@@ -22,6 +22,10 @@
   </div>
 {/if}
 
+{#if app.warnings.length}
+  <div class="warn" role="status">{#each app.warnings as w}<p>{w}</p>{/each}</div>
+{/if}
+
 <main>
   {#if app.loadError}
     <div class="empty" role="alert">
@@ -72,6 +76,7 @@
 <style>
   main { padding: 16px 24px 80px; max-width: 1760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
   .banner { background: var(--red-bg); color: var(--red); padding: 8px 24px; border-bottom: 1px solid var(--red); }
+  .warn { background: var(--amber-bg); color: var(--amber); padding: 8px 24px; border-bottom: 1px solid var(--amber); }
   .title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
   h2 { font-size: 15px; }
   .empty { background: var(--panel); border-radius: var(--radius); padding: 40px 24px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
@@ -80,6 +85,6 @@
   .empty p { color: var(--muted); }
   @media (max-width: 899px) {
     main { padding: 12px 12px 60px; }
-    .banner { padding: 8px 14px; }
+    .banner, .warn { padding: 8px 14px; }
   }
 </style>

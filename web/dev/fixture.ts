@@ -80,7 +80,8 @@ function reset(scenario: string) {
   const sold = genOpp(0);
   purchases = scenario === 'empty' ? [] : [
     { id: '7099000001', name: 'AK-47 | Redline (Field-Tested)', icon_url: icon('AK-47', 40), price_cents: 2310, status: 'bought', message: null, bought_at: nowS() - 86400, tradable_at: nowS() + 6 * 86400 - 3600, sell: sold.sell },
-    { id: '7099000002', name: 'M4A1-S | Printstream (Field-Tested)', icon_url: icon('M4A1', 41), price_cents: 5090, status: 'failed', message: 'Alguém comprou antes de você.', bought_at: null, tradable_at: null, sell: sold.sell }
+    { id: '7099000002', name: 'M4A1-S | Printstream (Field-Tested)', icon_url: icon('M4A1', 41), price_cents: 5090, status: 'failed', message: 'Alguém comprou antes de você.', bought_at: null, tradable_at: null, sell: sold.sell },
+    { id: '7099000003', name: 'USP-S | Kill Confirmed (Minimal Wear)', icon_url: icon('USP', 42), price_cents: 3100, status: 'failed', message: 'a Steam não confirmou; confira seu inventário', bought_at: null, tradable_at: null, sell: sold.sell }
   ];
 }
 reset('full');

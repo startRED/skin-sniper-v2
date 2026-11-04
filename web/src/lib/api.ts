@@ -19,6 +19,8 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
       const j = await r.json();
       msg = j.error ?? j.message ?? '';
     } catch {}
+    if (r.status === 503)
+      throw new ApiError(`Esta parte do Skin Sniper ainda não está pronta${msg ? ` (${msg})` : ''}. Nada foi perdido; tente de novo mais tarde.`);
     throw new ApiError(msg || `O Skin Sniper respondeu com erro (${r.status}).`);
   }
   return r.json();

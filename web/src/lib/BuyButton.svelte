@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, arm, buy, purchaseOf } from './store.svelte';
+  import { app, arm, buy, isUncertain, purchaseOf } from './store.svelte';
   import { money } from './format';
   import type { Opportunity } from './types';
 
@@ -11,6 +11,7 @@
   const otherBusy = $derived(
     app.purchases.some((x) => x.id !== o.id && (x.status === 'pending' || x.status === 'need_confirmation'))
   );
+  const uncertain = $derived(isUncertain(p));
   const err = $derived(app.buyError[o.id] ?? (status === 'failed' ? (p?.message ?? 'A compra não deu certo.') : null));
 </script>
 
@@ -19,6 +20,8 @@
     <button class="btn" disabled><span class="spin"></span>Comprando…</button>
   {:else if status === 'need_confirmation'}
     <button class="btn warn" disabled>Confirme no app Steam</button>
+  {:else if uncertain}
+    <button class="btn warn" disabled>Confira seu inventário</button>
   {:else if status === 'bought'}
     <button class="btn ok" disabled>Comprado</button>
   {:else if armed}
@@ -31,7 +34,7 @@
       {err ? 'Tentar de novo' : 'Comprar'}
     </button>
   {/if}
-  {#if err}<span class="err" role="alert">{err}</span>{/if}
+  {#if err}<span class="err" class:amber={uncertain} role="alert">{err}</span>{/if}
 </div>
 
 <style>
@@ -45,5 +48,6 @@
   @keyframes drain { to { transform: scaleX(0); } }
   .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--faint); border-top-color: var(--ink); animation: rot 0.8s linear infinite; }
   @keyframes rot { to { transform: rotate(360deg); } }
+  .err.amber { color: var(--amber); }
   .err { color: var(--red); font-size: 12px; line-height: 1.25; }
 </style>

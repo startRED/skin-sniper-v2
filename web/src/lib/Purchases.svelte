@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app } from './store.svelte';
+  import { app, isUncertain } from './store.svelte';
   import { clock, day, money, until } from './format';
   import type { Purchase } from './types';
 
@@ -25,8 +25,13 @@
             <span class="muted">Pago {money(p.price_cents)}</span>
           </div>
           <div class="st">
-            <span class="pill {STATUS[p.status][0]}">{STATUS[p.status][1]}</span>
-            {#if p.status === 'failed' && p.message}<span class="down small">{p.message}</span>{/if}
+            {#if isUncertain(p)}
+              <span class="pill warn">Resultado incerto</span>
+              <span class="small amber">{(p.message ?? "").replace(/[.\s]*$/, ".")} Não tente de novo antes de conferir.</span>
+            {:else}
+              <span class="pill {STATUS[p.status][0]}">{STATUS[p.status][1]}</span>
+              {#if p.status === 'failed' && p.message}<span class="down small">{p.message}</span>{/if}
+            {/if}
             {#if p.status === 'bought' && p.tradable_at}
               <span class="small muted">Destrava {until(p.tradable_at, app.now)} · {day(p.tradable_at)} às {clock(p.tradable_at)}</span>
             {/if}
@@ -54,6 +59,7 @@
   .who, .st { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .st .pill { align-self: flex-start; }
   .small { font-size: 12px; }
+  .amber { color: var(--amber); }
   .sell { display: flex; gap: 20px; margin: 0; }
   .sell div { display: flex; flex-direction: column; }
   dt { color: var(--faint); font-size: 12px; }

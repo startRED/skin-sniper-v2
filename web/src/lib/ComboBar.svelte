@@ -12,8 +12,8 @@
       {#each items.slice(0, 6) as o (o.id)}<img src={o.icon_url} alt="" width="32" height="32" />{/each}
     </span>
     <span class="txt">
-      <b>Melhor combinação com {money(combo.cost_cents)}</b>
-      <span class="muted">{items.length} {items.length === 1 ? 'skin' : 'skins'} que cabem no saldo · lucro provável
+      <b>Melhor combinação com seu saldo de {money(app.state?.saldo_cents ?? 0)}</b>
+      <span class="muted">{items.length} {items.length === 1 ? "skin cabe" : "skins cabem"} · custo total <b>{money(combo.cost_cents)}</b> · lucro provável
         <b class="up">{signed(combo.profit_cents)}</b></span>
     </span>
     <span class="hint">{app.highlight ? 'Mostrando na lista' : 'Mostrar na lista'}</span>
@@ -33,6 +33,7 @@
   .thumbs img:first-child { margin-left: 0; }
   .txt { display: flex; flex-wrap: wrap; column-gap: 12px; align-items: baseline; flex: 1; min-width: 0; }
   .hint { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .txt .muted b:not(.up) { color: var(--ink); }
   @media (max-width: 899px) {
     .hint { display: none; }
     .txt { flex-direction: column; }
