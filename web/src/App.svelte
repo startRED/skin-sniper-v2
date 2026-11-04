@@ -14,6 +14,8 @@
   const lostCount = $derived(lostRows().length);
   const noSaldo = $derived(app.state?.saldo_source === 'none');
   const noSteam = $derived(app.state != null && !app.state.keys.steam.set);
+  // logo depois de ligar: a Steam ainda não respondeu (ou está em pausa), o saldo vem dela
+  const reading = $derived(noSaldo && app.state?.keys.steam.set === true && app.state.keys.steam.ok === null);
 </script>
 
 <TopBar />
@@ -51,7 +53,10 @@
 
       {#if count === 0}
         <div class="empty compact" role="status">
-          {#if noSaldo}
+          {#if reading}
+            <h3>Lendo seu saldo na Steam…</h3>
+            <p>Assim que a Steam responder eu escolho as skins que cabem. Se ela pediu calma, isso espera a pausa lá em cima acabar.</p>
+          {:else if noSaldo}
             <h3>Falta o seu saldo</h3>
             <p>Digite quanto você tem para gastar (lá em cima, em “Saldo”) ou conecte a Steam em Configurações. Com isso eu sei quais skins cabem.</p>
           {:else}

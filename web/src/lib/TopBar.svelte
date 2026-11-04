@@ -10,7 +10,8 @@
   const st = $derived(app.state);
   const paused = $derived(st?.hunt.paused_until != null && st.hunt.paused_until > app.now);
   const sourceLabel = $derived(
-    st?.saldo_source === 'steam' ? 'lido da Steam' : st?.saldo_source === 'manual' ? 'digitado por você' : 'sem saldo'
+    st?.saldo_source === 'steam' ? 'lido da Steam' : st?.saldo_source === 'manual' ? 'digitado por você'
+    : st?.keys.steam.set && st.keys.steam.ok === null ? 'lendo da Steam…' : 'sem saldo'
   );
 
   function edit() {
