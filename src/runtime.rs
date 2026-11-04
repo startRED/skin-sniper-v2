@@ -213,9 +213,10 @@ impl Runtime {
             }
             Err(e) => {
                 let (ok, detail) = match &e {
-                    SteamError::SessionExpired => {
-                        (Some(false), "cookie expirado ou recusado".to_string())
-                    }
+                    SteamError::SessionExpired => (
+                        Some(false),
+                        "login expirado — escaneie o QR de novo".to_string(),
+                    ),
                     SteamError::WrongCurrency { .. } => (
                         Some(false),
                         "a carteira dessa conta não está em reais".to_string(),
@@ -234,6 +235,16 @@ impl Runtime {
         if let Err(e) = self.apply_saldo().await {
             tracing::warn!("saldo: {e:#}");
         }
+        self.hunt.publish_state();
+    }
+
+    /// A Steam recusou a renovação: avisa o painel que só um QR novo resolve.
+    pub fn mark_login_expired(&self) {
+        *self.wallet.lock().unwrap() = None;
+        self.hunt.set_keys(|k| {
+            k.steam.ok = Some(false);
+            k.steam.detail = Some("login expirado — escaneie o QR de novo".to_string());
+        });
         self.hunt.publish_state();
     }
 

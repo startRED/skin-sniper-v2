@@ -28,11 +28,21 @@ pub struct SessionInfo {
 /// `SessionExpired`; carteira que não é BRL devolve `WrongCurrency`. Em caso de sucesso grava o
 /// `sessionid` da página no cookie do cliente (a compra exige o mesmo valor no cookie e no formulário).
 pub async fn validate(c: &SteamClient) -> Result<SessionInfo> {
-    let Some(cookie) = c.cookie() else {
+    let Some(mut cookie) = c.cookie() else {
         return Err(Error::SessionExpired);
     };
-    let (status, _, html) = c.get_page_auth(Endpoint::Session, "/market/").await?;
+    // O navegador sempre manda `sessionid` junto; sem ele, manda um nosso (a Steam aceita qualquer valor
+    // de 24 hex, desde que cookie e formulário combinem) e depois adota o da página.
+    if cookie.sessionid.is_none() {
+        let id = random_sessionid();
+        if c.adopt_sessionid(&cookie, &id) {
+            cookie.sessionid = Some(id);
+        }
+    }
+    let (status, location, html) = c.get_page_auth(Endpoint::Session, "/market/").await?;
     if (300..400).contains(&status) || status == 401 {
+        // sem segredo: só o status e o destino (host + caminho) do redirecionamento
+        tracing::warn!(status, redirect = %redirect_target(location.as_deref()), shape = %cookie_shape(&cookie.steam_login_secure), "sessão recusada pela Steam");
         return Err(Error::SessionExpired);
     }
     if status != 200 {
@@ -41,11 +51,54 @@ pub async fn validate(c: &SteamClient) -> Result<SessionInfo> {
             status,
         });
     }
-    let info = parse_market_page(&html)?;
+    let info = parse_market_page(&html).inspect_err(|e| {
+        if matches!(e, Error::SessionExpired) {
+            tracing::warn!(
+                status,
+                shape = %cookie_shape(&cookie.steam_login_secure),
+                "sessão recusada pela Steam: página do mercado veio anônima"
+            );
+        }
+    })?;
     if cookie.sessionid.as_deref() != Some(info.sessionid.as_str()) {
         c.adopt_sessionid(&cookie, &info.sessionid);
     }
     Ok(info)
+}
+
+/// 24 caracteres hex, como o `sessionid` do navegador. Não é segredo de verdade (só casa cookie e formulário).
+fn random_sessionid() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    format!("{:016x}{:08x}", h.finish(), std::process::id())
+}
+
+/// Forma do cookie para o log, sem o valor: separador, tamanho e horas até o `exp` do JWT.
+fn cookie_shape(v: &str) -> String {
+    let sep = if v.contains("%7C%7C") {
+        "%7C%7C"
+    } else if v.contains("||") {
+        "||"
+    } else {
+        "nenhum"
+    };
+    let exp = super::auth::cookie_exp(v).map_or("ilegível".to_string(), |e| {
+        format!("{}h", (e - super::auth::now_unix()) / 3600)
+    });
+    format!("separador={sep} tamanho={} exp_em={exp}", v.len())
+}
+
+/// Host e caminho do `Location`, sem query nem fragmento (podem trazer dados da sessão).
+fn redirect_target(location: Option<&str>) -> String {
+    let Some(l) = location else {
+        return "(sem Location)".into();
+    };
+    l.split(['?', '#']).next().unwrap_or_default().to_string()
 }
 
 pub fn parse_market_page(html: &str) -> Result<SessionInfo> {
@@ -194,6 +247,17 @@ g_rgWalletInfo = {{"wallet_fee":1,"wallet_balance":"3608","wallet_currency":{cur
     }
 
     #[test]
+    fn redirect_target_drops_query() {
+        assert_eq!(
+            redirect_target(Some(
+                "https://steamcommunity.com/login/home/?goto=%2Fmarket%2F&x=1"
+            )),
+            "https://steamcommunity.com/login/home/"
+        );
+        assert_eq!(redirect_target(None), "(sem Location)");
+    }
+
+    #[test]
     fn wrong_wallet_currency() {
         assert!(matches!(
             parse_market_page(&logged_page(1)),
@@ -234,13 +298,65 @@ g_rgWalletInfo = {{"wallet_fee":1,"wallet_balance":"3608","wallet_currency":{cur
         assert!(c.stats().last_query_at.is_none());
     }
 
+    /// JWT de mentira no formato do navegador (cabeçalho.corpo.assinatura em base64url, `aud` web:community),
+    /// guardado URL-encoded (`%7C%7C`) como o Chrome mostra. O cabeçalho Cookie tem de sair idêntico:
+    /// nem codificar de novo (`%257C`) nem decodificar (`||`).
+    #[tokio::test]
+    async fn cookie_header_is_sent_verbatim_with_sessionid() {
+        use axum::{Router, http::HeaderMap, response::Html, routing::get};
+        let value = "76561198000000001%7C%7CeyAidHlwIjogIkpXVCIsICJhbGciOiAiRWREU0EiIH0.eyJpc3MiOiJyOjAwMTIiLCJzdWIiOiI3NjU2MTE5ODAwMDAwMDAwMSIsImF1ZCI6WyJ3ZWI6Y29tbXVuaXR5Il0sImV4cCI6MjAwMDAwMDAwMH0.ZmFsc2EtYXNzaW5hdHVyYS1fLTAxMjM";
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        let app = Router::new().route(
+            "/market/",
+            get(move |h: HeaderMap| {
+                let seen = seen2.clone();
+                async move {
+                    seen.lock()
+                        .unwrap()
+                        .push(h["cookie"].to_str().unwrap().to_string());
+                    Html(logged_page(7))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = SteamClient::with_base(&format!("http://{addr}")).unwrap();
+        c.set_cookie(Some(Cookie {
+            steam_login_secure: value.into(),
+            sessionid: None,
+        }));
+        validate(&c).await.unwrap();
+        c.set_gap_for_test(std::time::Duration::ZERO);
+        validate(&c).await.unwrap();
+        let seen = seen.lock().unwrap();
+        // 1º pedido: sessionid gerado por nós (24 hex); 2º: o que a página devolveu
+        let (name, rest) = seen[0].split_once("; sessionid=").unwrap();
+        assert_eq!(name, format!("steamLoginSecure={value}"));
+        assert!(
+            rest.len() == 24 && rest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{rest}"
+        );
+        assert_eq!(
+            seen[1],
+            format!("steamLoginSecure={value}; sessionid=0123456789abcdef01234567")
+        );
+        assert!(
+            cookie_shape(value).contains("separador=%7C%7C")
+                && cookie_shape(value).contains("exp_em=")
+        );
+        assert!(!cookie_shape(value).contains("eyJ"));
+    }
+
     #[tokio::test]
     async fn login_redirect_is_expired_and_cookie_is_sent() {
         use axum::{Router, http::HeaderMap, http::StatusCode, routing::get};
         let app = Router::new().route(
             "/market/",
             get(|h: HeaderMap| async move {
-                assert_eq!(h.get("cookie").unwrap(), "steamLoginSecure=x");
+                let c = h.get("cookie").unwrap().to_str().unwrap();
+                assert!(c.starts_with("steamLoginSecure=x; sessionid="), "{c}");
                 (StatusCode::FOUND, [("location", "/login")])
             }),
         );

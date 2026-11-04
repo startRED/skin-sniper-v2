@@ -174,6 +174,7 @@ async fn main() -> Result<()> {
     );
     rt.settings_changed().await?;
     rt.spawn_wallet_refresh();
+    app.login.spawn_renewal(rt.clone());
     tokio::spawn(hunt::scheduler::run(hunt));
     app.rt = Some(rt);
 

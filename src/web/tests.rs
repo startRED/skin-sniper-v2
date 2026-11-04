@@ -319,3 +319,24 @@ async fn sse_closes_when_client_lags() {
     .await;
     assert!(end.is_ok(), "stream deveria encerrar após Lagged");
 }
+
+#[tokio::test]
+async fn login_status_without_qr_is_expired_and_start_needs_json() {
+    let s = start().await;
+    let v: Value = s
+        .get("/api/steam/login/status")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v, json!({"state": "expired"}));
+    let r = s
+        .http
+        .post(format!("{}/api/steam/login/qr", s.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
