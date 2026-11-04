@@ -247,5 +247,6 @@ export function start() {
 }
 
 // Logo depois de ligar: a Steam ainda não respondeu (ou está em pausa) e o saldo vem dela.
+// Falha temporária também deixa ok null, mas com outro texto ("não consegui verificar…").
 export const readingSaldo = () =>
-  app.state?.saldo_source === 'none' && app.state.keys.steam.set && app.state.keys.steam.ok === null;
+  app.state?.saldo_source === 'none' && app.state.keys.steam.ok === null && app.state.keys.steam.detail === 'verificando…';
