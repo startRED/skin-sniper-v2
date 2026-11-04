@@ -128,17 +128,17 @@
               </ol>
             </div>
           {:else if phase === 'done'}
-            <p class="ok-msg" role="status">Conectado{account ? ` como ${account}` : ''}. Confirmando…</p>
-          {:else if keys?.steam.ok === true}
-            <p class="ok-msg">{keys.steam.detail && keys.steam.detail !== 'conta conectada' ? `Conectado como ${keys.steam.detail}.` : 'Conta conectada.'}</p>
+            <p class="ok-msg" role="status">Login confirmado{account ? ` para ${account}` : ''}. Verificando acesso ao Mercado…</p>
           {:else if phase === 'expired'}
             <p class="down" role="alert">O QR venceu. Gere outro e escaneie de novo.</p>
           {:else if phase === 'error'}
             <p class="down" role="alert">{qrError || 'Não consegui entrar. Tente de novo.'}</p>
+          {:else if keys?.steam.ok === true}
+            <p class="ok-msg">{keys.steam.detail && keys.steam.detail !== 'conta conectada' ? `Conectado como ${keys.steam.detail}.` : 'Conta conectada.'}</p>
           {:else if !keys?.steam}
             <p class="muted">Verificando…</p>
           {:else if keys.steam.ok === false}
-            <p class="down">{keys.steam.detail?.includes('carteira') ? 'A carteira desta conta não está em reais. Use uma conta com carteira em reais.' : 'Login expirado. Entre de novo pelo QR.'}</p>
+            <p class="down">{keys.steam.detail?.toLowerCase().includes('mercado') ? 'O login funcionou, mas a Steam não liberou o Mercado para esta conta. Confira se ela pode comprar e vender no Mercado e se o Steam Guard está ativo.' : keys.steam.detail?.includes('carteira') ? 'O login funcionou, mas a carteira desta conta não está em reais. Use uma conta com carteira em reais.' : keys.steam.detail?.includes('expirado') ? 'Login expirado. Entre de novo pelo QR.' : 'Não consegui validar o acesso à Steam. Confira sua conta.'}</p>
           {:else if keys.steam.set}
             <p class="muted">{keys.steam.detail?.startsWith('não consegui') ? 'Não consegui verificar o login. Confira sua conexão.' : 'Verificando login…'}</p>
           {:else}

@@ -75,7 +75,9 @@
   <div class="hunt" class:paused>
     <span class="dot" class:live={app.conn === 'live' && !paused} class:warn={paused} class:off={app.conn === 'down'}></span>
     <div>
-      {#if !st}
+      {#if app.conn === 'down'}
+        <span>Desconectado</span>
+      {:else if !st}
         <span>Conectando…</span>
       {:else if paused}
         <span>Em pausa · a Steam pediu calma · volta em {st.hunt.paused_until! - app.now} s</span>
@@ -85,7 +87,7 @@
         <span>Caçando <b>{st.hunt.watching}</b> skins · {st.hunt.queries_per_min} consultas/min ·
           {st.hunt.last_query_at ? ago(st.hunt.last_query_at, app.now) : 'ainda sem consulta'}</span>
       {/if}
-      {#if st?.hunt.message}<span class="msg">{st.hunt.message}</span>{/if}
+      {#if app.conn !== 'down' && st?.hunt.message && !(paused && st.hunt.message.includes('429'))}<span class="msg">{st.hunt.message}</span>{/if}
     </div>
   </div>
 
@@ -121,7 +123,7 @@
   .hunt { display: flex; align-items: center; gap: 10px; margin-left: auto; color: var(--muted); min-width: 0; }
   .hunt b { color: var(--ink); }
   .hunt > div { display: flex; flex-direction: column; }
-  .msg { font-size: 12px; color: var(--faint); }
+  .msg { font-size: 12px; color: var(--muted); }
   .paused { color: var(--amber); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
   .dot.live { background: var(--green); animation: pulse 2.4s ease-in-out infinite; }

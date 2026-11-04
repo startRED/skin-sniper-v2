@@ -5,7 +5,25 @@
 
   let { collapsed = false }: { collapsed?: boolean } = $props();
 
-  const n = $derived(app.watch.length);
+  const modes = { barato: 'Barato', seed: 'Seed', float: 'Float' } as const;
+  type Row = WatchRow & { modes: WatchRow[] };
+  // Uma linha por skin (e grupo raro): os modos viram etiquetas. Menor anúncio e "conferido" vêm da mesma
+  // consulta (a do menor anúncio; sem nenhum, a mais recente), para não juntar preço velho com horário novo.
+  const rows = $derived.by(() => {
+    const by = new Map<string, Row>();
+    for (const w of app.watch) {
+      const key = `${w.name}|${w.group ?? ''}`;
+      const r = by.get(key);
+      if (!r) { by.set(key, { ...w, modes: [w] }); continue; }
+      if (!r.modes.some((m) => m.mode === w.mode)) r.modes.push(w);
+      const cheaper = w.floor_cents != null && (r.floor_cents == null || w.floor_cents < r.floor_cents);
+      const newer = r.floor_cents == null && w.floor_cents == null && (w.last_checked_at ?? 0) > (r.last_checked_at ?? 0);
+      if (cheaper || newer) { r.floor_cents = w.floor_cents; r.last_checked_at = w.last_checked_at; }
+      if (w.score > r.score) { r.score = w.score; r.reason = w.reason; }
+    }
+    return [...by.values()];
+  });
+  const n = $derived(rows.length);
   // Quanto o menor anúncio precisa cair para dar lucro; null sem os dois números (max_buy ≤ 0 = nenhum preço dá lucro).
   const gap = (w: WatchRow) =>
     w.floor_cents != null && w.max_buy_cents != null && w.max_buy_cents > 0 ? w.floor_cents - w.max_buy_cents : null;
@@ -21,14 +39,16 @@
       <div role="columnheader">Vendas/dia</div>
       <div role="columnheader">Conferido</div>
     </div>
-    {#each app.watch as w}
+    {#each rows as w (`${w.name}|${w.group ?? ''}`)}
       {@const g = gap(w)}
       <div class="row grid" class:ready={g != null && g <= 0} role="row">
         <div class="c skin" role="cell">
           <img src={w.icon_url} alt="" width="40" height="40" loading="lazy" />
           <span class="names">
             <span class="nm">{w.name}</span>
+            {#each w.modes as m (m.mode)}<span class="pill mute" title="{m.reason} · {m.score.toFixed(2)} centavos de lucro esperado por consulta">{modes[m.mode] ?? m.mode}</span>{/each}
             {#if w.group}<span class="pill {w.kind === 'raro' ? 'warn' : 'mute'}">{w.group}</span>{/if}
+            <small class="reason">{w.reason}</small>
           </span>
         </div>
         <div class="c" role="cell" data-l="Menor anúncio"><b>{w.floor_cents != null ? money(w.floor_cents) : '—'}</b></div>
@@ -62,7 +82,7 @@
 
 <style>
   h2 { font-size: 15px; }
-  section { margin-top: 20px; }
+  section { margin-top: 12px; }
   .sub { margin: 2px 0 8px; }
   .fold { background: var(--panel); border-radius: var(--radius); margin-top: 12px; }
   summary { cursor: pointer; padding: 12px 16px; color: var(--muted); }
@@ -80,6 +100,7 @@
   .skin img { width: 40px; height: 40px; border-radius: 6px; background: var(--panel-2); object-fit: contain; flex: none; }
   .names { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; min-width: 0; }
   .nm { font-weight: 600; }
+  .reason { flex-basis: 100%; color: var(--muted); font-size: 12px; }
 
   @media (max-width: 899px) {
     .head { display: none; }

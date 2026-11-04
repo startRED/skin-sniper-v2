@@ -49,15 +49,13 @@
       </div>
 
       {#if count === 0}
-        <div class="empty" role="status">
+        <div class="empty compact" role="status">
           {#if noSaldo}
             <h3>Falta o seu saldo</h3>
             <p>Digite quanto você tem para gastar (lá em cima, em “Saldo”) ou conecte a Steam em Configurações. Com isso eu sei quais skins cabem.</p>
           {:else}
-            <h3>Nenhuma skin com lucro agora</h3>
-            <p>Continuamos vigiando. Quando aparecer uma que dê lucro depois das taxas e caiba no seu saldo, ela entra aqui sozinha{app.settings?.sound ? ' e você ouve um aviso' : ''}.</p>
+            <h3>Nenhuma skin com lucro agora.</h3>
           {/if}
-          {#if app.state?.hunt.message}<p class="hunt-msg">{app.state.hunt.message}.</p>{/if}
           {#if noSteam}
             <p>Dica: conecte a sua conta da Steam para eu ler o saldo e poder comprar.</p>
             <button class="btn" onclick={() => (app.settingsOpen = true)}>Abrir configurações</button>
@@ -87,7 +85,8 @@
   .empty p, .empty h3, .empty h2 { max-width: 62ch; }
   .empty h3, .empty h2 { font-size: 17px; }
   .empty p { color: var(--muted); }
-  .empty .hunt-msg { color: var(--ink); }
+  .empty.compact { padding: 12px 16px; gap: 6px; }
+  .empty.compact h3 { font-size: 14px; }
   @media (max-width: 899px) {
     main { padding: 12px 12px 60px; }
     .banner, .warn { padding: 8px 14px; }
