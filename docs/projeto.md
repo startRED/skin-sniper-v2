@@ -128,7 +128,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    - **Piso:** o do anúncio visto na última consulta da tarefa (vale 6 h); sem consulta ainda, USD × razão medida,
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
      o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
-     foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece).
+     foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
+     enquanto faltam faixas, o raro com piso visto acima do saldo gira com 1/4 do peso.
      A seleção é refeita a cada 15 min para isso valer.
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 0,20 e 5 % depois da taxa
      (hoje ≈ R$ 1,45). Abaixo disso a taxa mínima de 1 + 1 centavo come o lucro. Os 30 % são hipótese, não medida.

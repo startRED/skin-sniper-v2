@@ -42,6 +42,8 @@ pub const RESELECT_SECS: i64 = 900;
 /// Quanto o piso pode ficar abaixo da mediana de vendas e ainda ser plausível: a hipótese que dá o piso mínimo
 /// de desconto (`min_discount_floor`) antes de haver histórico. Com histórico vale a dispersão do item.
 const MAX_UPLIFT_PCT: i64 = 30;
+/// Peso (frente a 1,0) de um raro cujas faixas vistas até agora custam mais que o saldo.
+const OVER_BUDGET_WEIGHT: f64 = 0.25;
 /// Teto da dispersão usada no lucro possível: acima disso o histórico é ruído, não folga.
 const MAX_DISPERSION: f64 = 0.5;
 const RATIO_SAMPLES: usize = 3;
@@ -248,7 +250,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
             by_wear.entry((code, wear)).or_insert((f, i.name.as_str()));
         }
     }
-    let mut rare: Vec<(i64, Task)> = by_wear
+    let mut rare: Vec<(i64, Task, f64)> = by_wear
         .into_iter()
         .filter_map(|((code, wear), (f, name))| {
             let id = format!("r:{code}:{wear}");
@@ -267,15 +269,25 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
                     seeds,
                     score: 0.0,
                 };
-                (seen.floor.unwrap_or(f), task)
+                // faixa vista acima do saldo: ainda gira (outra faixa pode estar barata), mas com menos peso
+                let weight = if seen.floor.is_some_and(|f| f > c.saldo) {
+                    OVER_BUDGET_WEIGHT
+                } else {
+                    1.0
+                };
+                (seen.floor.unwrap_or(f), task, weight)
             })
         })
         .collect();
     rare.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
     rare.truncate(RARE_MAX_TASKS);
     // Metade das consultas para raros: o peso somado deles iguala o dos comuns.
-    let share = if total > 0.0 { total } else { 10.0 } / rare.len().max(1) as f64;
-    tasks.extend(rare.into_iter().map(|(_, t)| Task { score: share, ..t }));
+    let per_weight =
+        if total > 0.0 { total } else { 10.0 } / rare.iter().map(|r| r.2).sum::<f64>().max(1e-9);
+    tasks.extend(rare.into_iter().map(|(_, t, w)| Task {
+        score: per_weight * w,
+        ..t
+    }));
     tasks
 }
 
@@ -530,9 +542,10 @@ async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
 /// de parse não trava o ciclo (a skin só fica sem tarefa); erro de rede sobe.
 async fn scan_skin(h: &Hunt, base: &str) -> Result<()> {
     let q = [
-        ("query", base.to_string()),
+        // a Valve não acha o nome com o " | "; sem ele acha (todos os desgastes e StatTrak)
+        ("query", base.replace(" | ", " ")),
         ("start", "0".into()),
-        ("count", "10".into()),
+        ("count", "20".into()),
         ("search_descriptions", "0".into()),
         ("sort_column", "popular".into()),
         ("sort_dir", "desc".into()),
@@ -1007,9 +1020,18 @@ mod tests {
             .collect();
         // todas as faixas conferidas, todas caras: sai
         assert_eq!(id_of(&select(&items, &ctx(saldo, &hit, &floors))), None);
-        // uma faixa ainda sem consulta (ou vazia): continua
+        // uma faixa ainda sem consulta (ou vazia): continua, mas com peso menor que um raro ainda não visto
         floors.remove(&format!("{id}#0-0"));
-        assert!(id_of(&select(&items, &ctx(saldo, &hit, &floors))).is_some());
+        let tasks = select(&items, &ctx(saldo, &hit, &floors));
+        let score = |name: &str| {
+            tasks
+                .iter()
+                .find(|t| t.rare() && t.name == name)
+                .unwrap()
+                .score
+        };
+        assert!(id_of(&tasks).is_some());
+        assert!(score(heat) < score("Glock-18 | Moonrise (Field-Tested)") / 2.0);
         floors.insert(format!("{id}#0-0"), (None, 1_793_769_000));
         assert!(id_of(&select(&items, &ctx(saldo, &hit, &floors))).is_some());
         // uma faixa barata: continua
