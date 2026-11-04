@@ -101,7 +101,12 @@ WatchRow = {
   max_buy_cents: number | null,    // maior preço que ainda dá lucro >= R$ 0,20 e >= 5 % no preço médio;
                                    // null sem estimativa e sempre null em item raro (o teto depende do grupo)
   sales_per_day: number, kind: "desconto" | "raro", group: string | null,
-  last_checked_at: number | null   // ordem: (floor - max_buy) crescente; sem os dois, por último
+  last_checked_at: number | null,  // ordem: (floor - max_buy) crescente; sem os dois, por último
+  mode: "barato" | "seed" | "float", // modo de busca do alvo (a mesma skin pode aparecer em mais de um modo)
+  score: number,                   // lucro esperado por consulta gasta, em centavos, aprendido (0 sem dados)
+  reason: string                   // por que a agenda dá consultas a ele, em palavras curtas: "rendeu R$ 1,20 em
+                                   // 30 consultas", "testando alvo novo", "quase deu lucro 3 vezes",
+                                   // "sem achar nada há 5 h", "sem achar nada em 40 consultas"
 }
 Sell = { high: Tier, mid: Tier, quick: Tier }
 Tier = { price_cents: number, net_cents: number, profit_cents: number, eta_hours: number | null }
@@ -134,13 +139,24 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
    por (skin com tabela × desgaste) cujo piso cabe no saldo (`propertyFilters` por faixa de seed dos tiers; a
-   tarefa percorre as faixas em rodízio, uma por consulta). Os raros ficam com ~50 % das consultas quando existem.
+   tarefa percorre as faixas em rodízio, uma por consulta). Para os melhores comuns há ainda um braço de **float baixo** (faixa de float do começo do desgaste, filtrada no servidor).
    - **Piso:** o do anúncio visto na última consulta da tarefa (vale 6 h); sem consulta ainda, USD × razão medida,
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
      o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
      foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
-     enquanto faltam faixas, o raro com piso visto acima do saldo gira com 1/4 do peso.
+     enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
      A seleção é refeita a cada 15 min para isso valer.
+   - **Agenda que aprende (bandido de vários braços):** cada alvo (skin × desgaste × modo: `barato`, `seed`,
+     `float`) é um braço com uma nota que se atualiza sozinha = lucro esperado (preço médio) achado por consulta
+     gasta; quase-lucro (anúncio que faltou até R$ 0,30 ou 10 % do preço para entrar na lista) conta 15 % do
+     lucro mínimo, para a nota não começar do zero. A agenda é **UCB1** (determinístico, sem crate de aleatórios):
+     quem rende por consulta ganha mais consultas, e a frequência de cada alvo é essa alocação. Regras que não
+     mudam: 12,5 % das consultas vão sempre ao braço menos testado, com o slot girando entre os três modos (cada
+     modo tem piso próprio, qualquer que seja o número de braços); consultas e recompensa pesam metade a cada
+     24 h; a nota vale metade a cada 4 h sem nenhuma recompensa. O saldo e a taxa continuam decidindo quem
+     entra (regras acima); a nota-base do catálogo só desempata braços ainda não testados. Nenhuma consulta
+     extra: o limitador manda, a agenda só escolhe qual. As notas ficam no banco (`arm_stats`, retenção 14 dias
+     e no máximo 2000 linhas) e sobrevivem a reinício. Os parâmetros (12,5 %, meias-vidas, 15 %) são hipóteses de calibração, não medidas.
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 0,20 e 5 % depois da taxa
      (hoje ≈ R$ 1,45). Abaixo disso a taxa mínima de 1 + 1 centavo come o lucro. Os 30 % são hipótese, não medida.
 3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 3 s. Cada 30 min sem 429 encurta 5 %

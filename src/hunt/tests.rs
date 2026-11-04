@@ -536,7 +536,7 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
     };
     {
         let mut s = h.lock();
-        s.queue.set_tasks(vec![task.clone()], &HashMap::new(), 0);
+        s.queue.set_tasks(vec![task.clone()]);
         s.floors.clear();
     }
     // antes da primeira consulta: sem piso nem horário, mas com teto e ritmo
@@ -565,4 +565,43 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
     let est = sell::estimate(&pts, NOW, None, None).unwrap();
     assert!(sell::evaluate(max, &est, 0).listable);
     assert!(!sell::evaluate(max + 1, &est, 0).listable);
+}
+
+#[tokio::test]
+async fn learned_scores_survive_a_restart_and_show_in_the_watch_row() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    run_until_two(&h, &mut rx).await; // histórico do Moonrise no banco e tarefas na agenda
+    // as consultas reais do teste acharam as duas oportunidades; mais 30 consultas tiram o "novo"
+    let id = format!("d:{MOON}");
+    {
+        let mut s = h.lock();
+        let only = s
+            .queue
+            .tasks()
+            .into_iter()
+            .find(|t| t.id == id)
+            .expect("Moonrise na agenda");
+        s.queue.set_tasks(vec![only]);
+        for _ in 0..30 {
+            s.queue.next(NOW);
+        }
+    }
+    let w = watch::list(&h).await.unwrap();
+    let row = w
+        .iter()
+        .find(|r| r.name == MOON)
+        .expect("Moonrise na agenda");
+    assert!(row.reason.starts_with("rendeu R$ "), "{}", row.reason);
+    assert!(row.score > 0.0 && row.mode == "barato");
+    scheduler::save_stats(&h).await.unwrap();
+
+    // reinício: outra caça sobre o mesmo banco recupera a nota
+    let (h2, _rx2) = hunt_against(&base, db);
+    h2.load().await.unwrap();
+    let (score, why) = h2.lock().queue.describe(&id, NOW);
+    assert_eq!(why, row.reason);
+    assert!(score > 0.0);
 }

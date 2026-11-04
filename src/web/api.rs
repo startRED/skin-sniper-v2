@@ -170,6 +170,13 @@ pub struct WatchRow {
     pub kind: Kind,
     pub group: Option<String>,
     pub last_checked_at: Option<i64>,
+    /// Modo de busca do alvo: `barato` (menores preços), `seed` (faixas raras) ou `float` (float baixo).
+    pub mode: String,
+    /// Lucro esperado por consulta gasta, em centavos, aprendido sozinho (0 enquanto não houver o que medir).
+    pub score: f64,
+    /// Por que a agenda dá (ou não) consultas a este alvo, em palavras curtas: "rendeu R$ 1,20 em 30
+    /// consultas", "testando alvo novo", "quase deu lucro 3 vezes", "sem achar nada há 5 h".
+    pub reason: String,
 }
 
 /// Leitura de `Settings`: segredos já mascarados (`••••gLO9`).

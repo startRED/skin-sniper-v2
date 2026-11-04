@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DAY: i64 = 86_400;
+/// Teto de notas de alvos guardadas (cada uma é uma linha pequena).
+const ARM_STATS_MAX: i64 = 2_000;
 
 /// Cada item é uma migração; `user_version` = quantas já foram aplicadas.
 const MIGRATIONS: &[&str] = &[
@@ -49,6 +51,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE activity_seen (listing_id TEXT PRIMARY KEY, last_seen INTEGER NOT NULL);
     CREATE INDEX activity_seen_last ON activity_seen(last_seen);
     INSERT INTO activity_seen(listing_id, last_seen) SELECT listing_id, last_seen FROM listings_seen;
+    "#,
+    // Agenda que aprende: nota de cada alvo (lucro esperado por consulta gasta), para sobreviver a reinício.
+    r#"
+    CREATE TABLE arm_stats (
+        id TEXT PRIMARY KEY, n REAL NOT NULL, r REAL NOT NULL, queries INTEGER NOT NULL,
+        finds INTEGER NOT NULL, gain_cents INTEGER NOT NULL, near_hits INTEGER NOT NULL,
+        first_at INTEGER NOT NULL, reward_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
     "#,
 ];
 
@@ -105,9 +115,11 @@ pub struct Retained {
     pub price_points: usize,
     pub listings_seen: usize,
     pub opportunities: usize,
+    pub arm_stats: usize,
 }
 
-/// price_points > 31 dias, listings_seen > 3 dias, oportunidades encerradas há > 7 dias.
+/// price_points > 31 dias, listings_seen > 3 dias, oportunidades encerradas há > 7 dias, notas da agenda sem uso
+/// há > 14 dias (e no máximo `ARM_STATS_MAX`, as mais recentes).
 pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
     let r = Retained {
         price_points: conn.execute("DELETE FROM price_points WHERE ts < ?1", [now - 31 * DAY])?,
@@ -118,6 +130,11 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
         opportunities: conn.execute(
             "DELETE FROM opportunities WHERE gone_at IS NOT NULL AND gone_at < ?1",
             [now - 7 * DAY],
+        )?,
+        arm_stats: conn.execute(
+            "DELETE FROM arm_stats WHERE updated_at < ?1 OR id NOT IN
+             (SELECT id FROM arm_stats ORDER BY updated_at DESC LIMIT ?2)",
+            rusqlite::params![now - 14 * DAY, ARM_STATS_MAX],
         )?,
     };
     conn.execute(
@@ -213,6 +230,7 @@ mod tests {
             "opportunities",
             "purchases",
             "outcomes",
+            "arm_stats",
         ] {
             conn.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| {
                 r.get::<_, i64>(0)
@@ -287,13 +305,21 @@ mod tests {
         .unwrap();
         conn.execute("INSERT INTO activity_seen VALUES ('new', ?1)", [now - DAY])
             .unwrap();
+        for (id, at) in [("arm-old", now - 15 * DAY), ("arm-new", now - DAY)] {
+            conn.execute(
+                "INSERT INTO arm_stats VALUES (?1, 1, 1, 1, 0, 0, 0, 0, 0, ?2)",
+                (id, at),
+            )
+            .unwrap();
+        }
         let r = retain(&conn, now).unwrap();
         assert_eq!(
             r,
             Retained {
                 price_points: 1,
                 listings_seen: 1,
-                opportunities: 1
+                opportunities: 1,
+                arm_stats: 1
             }
         );
         let left: i64 = conn
