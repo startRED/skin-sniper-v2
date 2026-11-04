@@ -22,8 +22,10 @@ $vbs = Join-Path $Destino 'Iniciar Skin Sniper.vbs'
 # Liga pelo WMI: o processo nasce fora do grupo de quem chamou o instalador (um terminal ou uma IA), então
 # não morre quando ele fecha. Sem janela.
 $exe = Join-Path $Destino 'skin-sniper.exe'
-$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
-    -Arguments @{ CommandLine = "`"$exe`""; CurrentDirectory = $Destino }
+# ShowWindow 0: o programa é de console e sem isso o WMI abriria uma janela preta (fechá-la o desligaria).
+$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = "`"$exe`""; CurrentDirectory = $Destino; ProcessStartupInformation = $si }
 if ($r.ReturnValue -ne 0) { throw "falha ao ligar o Skin Sniper (WMI $($r.ReturnValue))" }
 # Liga sozinho ao entrar no Windows, sem abrir o navegador.
 $atalho = Join-Path ([Environment]::GetFolderPath('Startup')) 'Skin Sniper.lnk'
