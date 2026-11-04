@@ -96,6 +96,26 @@ qp = [{"appid":730,"strItemName":"G180420B6053004",
 - Com filtro de seed ou float, o menor preço da página é o piso **do recorte**, não da skin. Num caso deu R$ 334 em vez de R$ 16,40.
   O piso precisa vir de outra chamada. (`S/docs/ref/armadilhas.md:15-18`, `S/internal/steam/steam.go:80-86`)
 
+### 1.3.1 Resposta nula observada em 04/11/2026
+
+No log local autorizado, recorte 04:47–06:31 UTC: 168 falhas, todas de
+`QueryListingsForItem`. Oito sem diagnóstico antigo; 160 com HTTP 200, 13 bytes e
+somente a chave `data` nula (121 na hora 05 UTC, 39 na hora 06 UTC).
+O log não registra item nem parâmetros; não permite agrupar por item ou medir a taxa sobre todas as consultas.
+Os arquivos rotacionados .1 e .2 não existiam. Nenhuma falha de histórico nesse recorte.
+
+**HIPÓTESE:** indisponibilidade transitória da action; não há evidência de item vazio,
+parâmetro incorreto ou bloqueio de taxa. Três sondas anônimas espaçadas responderam 200 com
+139379 bytes e anúncios: Moonrise FT, código G180420B6053004, sem filtro de propriedade.
+As duas primeiras omitiram o sort; a terceira reproduziu também sort field=0/direction=0.
+Não foi capturado corpo nulo ao vivo. `testdata/steam_actions_null_contract.json` é
+contrato reconstruído do diagnóstico, não captura bruta. Uma página vazia real já tem
+fixture em `steam_actions_karambit_doppler.json` e continua válida.
+
+O cliente tenta novamente uma única vez após pelo menos 5 s para `data:null` em HTTP 200.
+O limitador global e o breaker por endpoint continuam valendo; nunca se converte nulo
+em lista vazia, para preservar dados anteriores. Formato desconhecido continua erro.
+
 ### 1.4 Moeda
 
 - `eCurrency: 7` = BRL. As listagens do fixture real vêm em `eCurrency:7` com `strSubtotal "R$202.80"`.

@@ -76,6 +76,10 @@ pub enum Error {
         status: u16,
     },
     Transport(String),
+    /// A action respondeu 200 com data nula; não significa página vazia.
+    ActionUnavailable {
+        endpoint: Endpoint,
+    },
     /// Resposta fora do formato esperado.
     Parse(String),
     /// Cookie ausente, expirado ou recusado.
@@ -94,6 +98,10 @@ impl fmt::Display for Error {
             Self::Http { endpoint, status } => write!(f, "{endpoint:?}: HTTP {status}"),
             Self::Csfloat { status } => write!(f, "CSFloat: HTTP {status}"),
             Self::Transport(e) => write!(f, "falha de rede: {e}"),
+            Self::ActionUnavailable { endpoint } => write!(
+                f,
+                "{endpoint:?}: Steam devolveu data nula após tentativa de recuperação"
+            ),
             Self::Parse(e) => write!(f, "resposta inesperada: {e}"),
             Self::SessionExpired => write!(f, "sessão da Steam ausente ou expirada"),
             Self::WrongCurrency { got } => write!(f, "moeda {got} em vez de BRL (7)"),
@@ -393,25 +401,37 @@ impl SteamClient {
 
     /// Consulta `GET /market/actions?q=<método>&qp=<json>` (sem login) e devolve o campo `data`.
     pub async fn action(&self, ep: Endpoint, method: &str, qp: &Value) -> Result<Value> {
-        let req = self
-            .http
-            .get(self.url("/market/actions"))
-            .query(&[("q", method), ("qp", &qp.to_string())])
-            .header("x-valve-request-type", "queryAction")
-            .header("accept", "application/json, text/javascript, */*");
-        let (_, body) = self
-            .send_checked(ep, req, false, Some(envelope_problem))
-            .await
-            .map_err(|e| match e {
+        for attempt in 0..2 {
+            let req = self
+                .http
+                .get(self.url("/market/actions"))
+                .query(&[("q", method), ("qp", &qp.to_string())])
+                .header("x-valve-request-type", "queryAction")
+                .header("accept", "application/json, text/javascript, */*");
+            let response = self
+                .send_checked(ep, req, false, Some(envelope_problem))
+                .await;
+            if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
+                // A próxima vaga continua respeitando pausas maiores do limitador e do breaker.
+                let mut g = self.inner.lock().unwrap();
+                g.limiter.next_at = g
+                    .limiter
+                    .next_at
+                    .max(Instant::now() + Duration::from_secs(5));
+                continue;
+            }
+            let (_, body) = response.map_err(|e| match e {
                 Error::Parse(m) => Error::Parse(format!("{method}: {m}")),
                 other => other,
             })?;
-        let mut v: Value =
-            serde_json::from_slice(&body).map_err(|e| Error::Parse(format!("{method}: {e}")))?;
-        match v.get_mut("data") {
-            Some(d) if !d.is_null() => Ok(d.take()),
-            _ => Err(Error::Parse(format!("{method}: resposta sem `data`"))),
+            let mut v: Value = serde_json::from_slice(&body)
+                .map_err(|e| Error::Parse(format!("{method}: {e}")))?;
+            return match v.get_mut("data") {
+                Some(d) if !d.is_null() => Ok(d.take()),
+                _ => Err(Error::Parse(format!("{method}: resposta sem `data`"))),
+            };
         }
+        unreachable!("a segunda tentativa sempre retorna")
     }
 
     /// GET que devolve o corpo como JSON (ex.: `search/render`).
@@ -550,6 +570,13 @@ impl SteamClient {
             });
         }
         if let Some(diag) = bad_envelope {
+            if status == StatusCode::OK
+                && serde_json::from_slice::<Value>(&body)
+                    .ok()
+                    .is_some_and(|v| v.get("data") == Some(&Value::Null))
+            {
+                return Err(Error::ActionUnavailable { endpoint: ep });
+            }
             return Err(Error::Parse(format!("resposta sem `data` ({diag})")));
         }
         Ok((
@@ -604,6 +631,71 @@ pub(crate) struct Parts {
 mod tests {
     use super::*;
     use axum::{Router, http::StatusCode as AxStatus, routing::get};
+
+    #[tokio::test]
+    async fn null_data_retries_once() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        for ep in [Endpoint::Listings, Endpoint::History] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let app = Router::new().route(
+                "/market/actions",
+                get(move || {
+                    let seen = seen.clone();
+                    async move {
+                        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                            include_str!("../../testdata/steam_actions_null_contract.json")
+                        } else {
+                            r#"{"data":{"ok":true}}"#
+                        }
+                    }
+                }),
+            );
+            let c = fast(&serve(app).await);
+            let started = Instant::now();
+            let data = c
+                .action(ep, "Query", &serde_json::json!([730, "item"]))
+                .await
+                .unwrap();
+            assert_eq!(data["ok"], true);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert!(started.elapsed() >= Duration::from_secs(5));
+            assert!(c.breaker_open_until(ep).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_null_is_not_empty_and_still_opens_breaker() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = Router::new().route(
+            "/market/actions",
+            get(move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+                async { include_str!("../../testdata/steam_actions_null_contract.json") }
+            }),
+        );
+        let c = fast(&serve(app).await);
+        let qp = serde_json::json!([]);
+        assert!(matches!(
+            c.action(Endpoint::Listings, "Query", &qp).await,
+            Err(Error::ActionUnavailable { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            c.action(Endpoint::Listings, "Query", &qp).await,
+            Err(Error::BreakerOpen { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(c.breaker_open_until(Endpoint::History).is_none());
+    }
 
     fn t0() -> Instant {
         Instant::now()
