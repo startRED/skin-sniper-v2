@@ -410,11 +410,16 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     }
     // O saldo chegou (ex.: a Steam respondeu depois de uma pausa): o aviso de falta não pode ficar
     // no painel enquanto a descoberta espera o limitador.
-    {
+    let cleared = {
         let mut s = h.lock();
-        if s.message.as_deref() == Some(NO_SALDO) {
+        let stale = s.message.as_deref() == Some(NO_SALDO);
+        if stale {
             s.message = None;
         }
+        stale
+    };
+    if cleared {
+        h.publish_state();
     }
     if let Err(e) = catalog::maybe_reselect(h).await {
         tracing::warn!("seleção falhou: {e:#}");
