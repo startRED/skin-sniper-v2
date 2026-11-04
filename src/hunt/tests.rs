@@ -165,6 +165,17 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         }
     }
     found.sort_by_key(|o| o.price_cents);
+    eprintln!(
+        "MSG {:?} watching {} tasks {:?}",
+        h.state().hunt.message,
+        h.state().hunt.watching,
+        h.lock()
+            .queue
+            .tasks()
+            .iter()
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(found.len(), 2, "{found:#?}");
 
     // razão medida: R$ 4,00 (menor anúncio) ÷ US$ 1,00

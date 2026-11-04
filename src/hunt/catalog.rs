@@ -1,7 +1,8 @@
 //! Descoberta e seleção do que vigiar dado o saldo (docs/projeto.md, "Caça" 1–2).
 //!
 //! Um ciclo, um passo por vez (cada passo é uma consulta à Steam, no ritmo do limitador):
-//! 1. varredura de `search/render` por popularidade, uma página por categoria por rodada (cache de 24 h);
+//! 1. varredura de `search/render` por popularidade, uma página por categoria por rodada (cache de 24 h), e uma
+//!    busca por nome de cada skin com tabela de pattern (raras ficam longe do topo da popularidade);
 //! 2. razão BRL/USD medida entre um anúncio em BRL e o preço USD do mesmo item (nunca fixa no código);
 //! 3. `QueryPriceHistory` dos candidatos com piso ≤ saldo (cache de 6 h);
 //! 4. seleção por nota = vendas/dia × lucro possível × (1 + acertos), mais uma consulta de grupo raro por
@@ -14,11 +15,11 @@ use super::scheduler::Task;
 use super::{Hunt, detect};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
-use crate::pricing::groups::seed_ranges;
+use crate::pricing::groups::{seed_ranges, table_skins};
 use crate::pricing::sell::{
     MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
 };
-use crate::steam::client::Error as SteamError;
+use crate::steam::client::{Endpoint, Error as SteamError};
 use crate::steam::listings::{self, paint_index_from_code};
 use crate::steam::search;
 use anyhow::Result;
@@ -31,6 +32,9 @@ pub const CATALOG_TTL: i64 = 24 * 3600;
 pub const MIN_SALES_PER_DAY: f64 = 3.0;
 pub const WATCH_MAX: usize = 40;
 pub const RARE_MAX_TASKS: usize = 24;
+/// Rank das entradas vindas da busca por nome de skin com tabela (depois da popularidade); não rebaixa o rank
+/// que a varredura já deu ao item.
+const SKIN_RANK_BASE: i64 = 100_000;
 /// Piso visto numa consulta vale por tanto tempo (depois a tarefa é conferida de novo).
 pub const FLOOR_TTL: i64 = 6 * 3600;
 /// A seleção é refeita a cada tanto, para o piso visto tirar quem não cabe no saldo.
@@ -287,6 +291,8 @@ pub struct Discovery {
     scanning: bool,
     round: u32,
     scan_left: VecDeque<search::Category>,
+    /// Skins com tabela ainda sem busca por nome neste ciclo.
+    skins_left: VecDeque<String>,
     history: VecDeque<String>,
     hist_ready: bool,
     want_samples: bool,
@@ -311,6 +317,11 @@ impl Discovery {
             } else {
                 VecDeque::new()
             },
+            skins_left: if scanning {
+                table_skins().into()
+            } else {
+                VecDeque::new()
+            },
             want_samples,
             ..Discovery::default()
         };
@@ -332,6 +343,7 @@ impl Discovery {
 
 enum Next {
     Scan(search::Category, u32),
+    Skin(String),
     Ratio(String, String, Option<u8>, i64),
     Candidates,
     History(String),
@@ -370,6 +382,14 @@ pub async fn step(h: &Hunt) -> Result<bool> {
             Next::Scan(cat, start) => {
                 let r = scan_page(h, cat, start).await;
                 finish_scan(h, cat, r).await?;
+                return Ok(true);
+            }
+            Next::Skin(name) => {
+                let r = scan_skin(h, &name).await;
+                if r.as_ref().err().is_some_and(retryable) {
+                    h.lock().disc.skins_left.push_front(name);
+                }
+                r?;
                 return Ok(true);
             }
             Next::Ratio(name, code, wear, usd) => {
@@ -430,6 +450,8 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
         if let Some(cat) = d.scan_left.front().copied() {
             d.scan_left.pop_front();
             Pre::Done(Next::Scan(cat, d.round * 10))
+        } else if let Some(name) = d.skins_left.pop_front() {
+            Pre::Done(Next::Skin(name))
         } else if d.want_samples && d.samples.len() < RATIO_SAMPLES && d.tries < RATIO_MAX_TRIES {
             Pre::NeedSample
         } else if !d.hist_ready {
@@ -501,9 +523,44 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
 
 async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
     let page = search::fetch_page(&h.steam, cat, start).await?;
+    store_entries(h, page.entries, i64::from(start)).await
+}
+
+/// Busca por nome de uma skin com tabela: traz todos os desgastes com o código G e o piso em USD. Falha
+/// de parse não trava o ciclo (a skin só fica sem tarefa); erro de rede sobe.
+async fn scan_skin(h: &Hunt, base: &str) -> Result<()> {
+    let q = [
+        ("query", base.to_string()),
+        ("start", "0".into()),
+        ("count", "10".into()),
+        ("search_descriptions", "0".into()),
+        ("sort_column", "popular".into()),
+        ("sort_dir", "desc".into()),
+        ("appid", "730".into()),
+        ("norender", "1".into()),
+    ];
+    let v = h
+        .steam
+        .get_json(Endpoint::Search, "/market/search/render/", &q)
+        .await?;
+    let page = match search::parse_page(&v) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("busca de {base} sem resultado legível: {e}");
+            return Ok(());
+        }
+    };
+    let entries = page
+        .entries
+        .into_iter()
+        .filter(|e| e.name.contains(base))
+        .collect();
+    store_entries(h, entries, SKIN_RANK_BASE).await
+}
+
+async fn store_entries(h: &Hunt, entries: Vec<search::CatalogEntry>, rank_base: i64) -> Result<()> {
     let now = h.now();
     let ratio = h.lock().ratio.map(|r| r.0);
-    let entries = page.entries;
     h.db
         .call(move |c| {
             let tx = c.transaction()?;
@@ -519,7 +576,8 @@ async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(name) DO UPDATE SET g_code = excluded.g_code, paint_index = excluded.paint_index,
                         floor_cents = excluded.floor_cents, floor_usd_cents = excluded.floor_usd_cents,
-                        icon_url = excluded.icon_url, rank = excluded.rank, updated_at = excluded.updated_at",
+                        icon_url = excluded.icon_url, updated_at = excluded.updated_at,
+                        rank = CASE WHEN excluded.rank >= ?9 THEN COALESCE(items.rank, excluded.rank) ELSE excluded.rank END",
                     params![
                         e.name,
                         e.item_code,
@@ -527,8 +585,9 @@ async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
                         floor_brl,
                         e.sell_price_usd_cents,
                         e.icon_url,
-                        i64::from(start) + i as i64,
-                        now
+                        rank_base + i as i64,
+                        now,
+                        SKIN_RANK_BASE
                     ],
                 )?;
             }

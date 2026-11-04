@@ -203,9 +203,60 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
     out
 }
 
+/// Skins (sem desgaste) de todas as tabelas que o mercado de armas pode ter: cspatterns, blue gem e fade.
+/// Faca fica de fora (a varredura do catálogo descarta ★) e fase Doppler também (só facas).
+pub fn table_skins() -> Vec<String> {
+    let t = tables();
+    let gun = |w: &str| {
+        !(w.contains("Knife") || w.contains("Bayonet") || w.contains("Daggers") || w == "Karambit")
+    };
+    let mut out: BTreeSet<String> = t.cs.skins.keys().cloned().collect();
+    out.extend(
+        t.blue
+            .weapons
+            .keys()
+            .filter(|w| gun(w))
+            .map(|w| format!("{w} | Case Hardened")),
+    );
+    for (finish, by_weapon) in &t.fade.finishes {
+        out.extend(
+            by_weapon
+                .keys()
+                .filter(|w| gun(w))
+                .map(|w| format!("{w} | {finish}")),
+        );
+    }
+    out.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_skins_cover_the_tables_without_knives() {
+        let v = table_skins();
+        for want in [
+            "Glock-18 | Moonrise",
+            "Glock-18 | High Beam",
+            "Desert Eagle | Heat Treated",
+            "Five-SeveN | Case Hardened",
+            "AK-47 | Case Hardened",
+            "Glock-18 | Fade",
+            "SSG 08 | Acid Fade",
+        ] {
+            assert!(v.iter().any(|n| n == want), "faltou {want}");
+        }
+        assert!(
+            v.iter()
+                .all(|n| !n.contains("Knife") && !n.contains("Bayonet"))
+        );
+        // todo nome tem consulta de seed: é isso que vira tarefa
+        assert!(
+            v.iter()
+                .all(|n| !seed_ranges(&format!("{n} (Field-Tested)")).is_empty())
+        );
+    }
 
     const MOON: &str = "Glock-18 | Moonrise (Field-Tested)";
 

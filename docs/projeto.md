@@ -193,9 +193,11 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   US$ 20), guardada em `settings` (`usd_brl_ratio`) e remedida a cada 24 h.
 - Consulta de desconto e de raro levam o filtro de desgaste do nome (`Exterior`); o código cobre todos os
   desgastes e qualidades, então StatTrak/Souvenir do mesmo código aparecem na consulta rara e são avaliados.
-- Raro cobre as tabelas de `assets/patterns` só para itens que a varredura de catálogo já viu (60 por categoria);
-  skin com tabela fora da varredura não vira tarefa. Fase Doppler não tem filtro de seed: é reconhecida na
-  avaliação (`group_of` por paint index) quando o item cai numa tarefa de desconto.
+- Skins com tabela (cspatterns, blue gem, fade de arma) ficam longe do topo de popularidade (o Moonrise está na
+  posição ~1900 das pistolas), então a descoberta faz uma busca por nome de cada uma (`table_skins`, 1 consulta
+  por skin a cada ciclo de 24 h) e grava todos os desgastes no catálogo. Faca e fase Doppler não entram (a busca
+  descarta ★): a fase é reconhecida na avaliação (`group_of` por paint index) quando o item cai numa tarefa de
+  desconto.
 - Fila: o vencimento seguinte parte do vencimento anterior (`max(vencimento, agora) + intervalo`), para os pesos
   valerem mesmo com a fila atrasada.
 - `/api/watch`: teto de compra ≤ 0 vira nulo e linhas sem teto vão para o fim. Raro mostra teto só quando o
