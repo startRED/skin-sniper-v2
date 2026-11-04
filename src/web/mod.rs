@@ -30,6 +30,8 @@ pub struct AppState {
     pub settings: SettingsStore,
     pub events: broadcast::Sender<Event>,
     pub pc_name: Option<String>,
+    /// Caça e compra ligadas; `None` nos testes de rota, que usam só o banco.
+    pub rt: Option<std::sync::Arc<crate::runtime::Runtime>>,
 }
 
 impl AppState {
@@ -39,12 +41,16 @@ impl AppState {
             settings,
             events: broadcast::channel(256).0,
             pc_name: guard::pc_name(),
+            rt: None,
         }
     }
 
     /// Só o que existe hoje: saldo manual e quais chaves estão salvas. Caça e combo ficam vazios
     /// (com mensagem) até os módulos correspondentes serem ligados.
     pub async fn current_state(&self) -> Result<State> {
+        if let Some(rt) = &self.rt {
+            return Ok(rt.hunt.state());
+        }
         let saldo = self.settings.saldo().await?;
         let s = self.settings.view().await?;
         let key = |set: bool| KeyStatus {

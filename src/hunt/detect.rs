@@ -5,9 +5,11 @@
 use super::catalog::{HISTORY_TTL, wear_label, window_stats};
 use super::scheduler::Task;
 use super::{Active, Hunt};
+use crate::notify::{Alert, NotifyError};
 use crate::pricing::groups::group_of;
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
 use crate::steam::buy::brl;
+use crate::steam::client::Error as SteamError;
 use crate::steam::history;
 use crate::steam::listings::{Listing, ListingsPage};
 use crate::web::api::{Confidence, Event, Kind, Opportunity, Sell, Tier};
@@ -214,8 +216,24 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> RareEvidence {
         Some(v) => v,
         None => {
             let (at, v) = match h.csfloat.sales(name).await {
-                Ok(v) => (now, v),
+                Ok(v) => {
+                    h.set_keys(|k| {
+                        if k.csfloat.set {
+                            k.csfloat.ok = Some(true);
+                            k.csfloat.detail = None;
+                        }
+                    });
+                    (now, v)
+                }
                 Err(e) => {
+                    if let SteamError::Csfloat { status: 401 | 403 } = e {
+                        h.set_keys(|k| {
+                            if k.csfloat.set {
+                                k.csfloat.ok = Some(false);
+                                k.csfloat.detail = Some("chave recusada pelo CSFloat".into());
+                            }
+                        });
+                    }
                     tracing::warn!("CSFloat indisponível para {name}: {e}");
                     // tenta de novo em ~10 min, sem martelar
                     (now - HISTORY_TTL + 600, vec![])
@@ -399,7 +417,8 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             Ok(known)
         })
         .await?;
-    let notify_min = h.settings.view().await?.notify_min_profit_cents;
+    let view = h.settings.view().await?;
+    let notify_min = view.notify_min_profit_cents;
     let mut seen: Vec<&Listing> = relevant
         .iter()
         .copied()
@@ -472,6 +491,9 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     }
     store_seen(h, &seen, now).await?;
 
+    for (opp, _) in out.found.iter().filter(|(_, notify)| *notify) {
+        send_alert(h, opp, view.panel_url.clone());
+    }
     if !out.found.is_empty() || !out.gone.is_empty() {
         h.recompute_combo();
         h.publish_state();
@@ -553,7 +575,7 @@ async fn store_opportunity(
 }
 
 /// Marca como encerradas (`gone_at`) e avisa o painel. Devolve os ids que estavam ativos.
-async fn mark_gone(h: &Hunt, ids: Vec<String>) -> Result<Vec<String>> {
+pub(crate) async fn mark_gone(h: &Hunt, ids: Vec<String>) -> Result<Vec<String>> {
     if ids.is_empty() {
         return Ok(ids);
     }
@@ -596,4 +618,27 @@ pub async fn drop_tasks(h: &Hunt, tasks: &[String]) -> Result<()> {
         h.recompute_combo();
     }
     Ok(())
+}
+
+/// Aviso no Telegram (uma vez por anúncio; o próprio `Telegram` lembra). Em segundo plano: o envio
+/// espera o ritmo do Telegram e não pode segurar a caça.
+fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>) {
+    let Some(tg) = h.telegram.clone() else {
+        return;
+    };
+    let alert = Alert {
+        id: opp.id.clone(),
+        name: opp.name.clone(),
+        group: opp.group.clone(),
+        price_cents: opp.price_cents,
+        mid_profit_cents: opp.sell.mid.profit_cents,
+        safe_profit_cents: opp.sell.quick.profit_cents,
+        eta_hours: opp.sell.mid.eta_hours,
+    };
+    tokio::spawn(async move {
+        match tg.notify(&alert, panel_url.as_deref()).await {
+            Ok(_) | Err(NotifyError::NotConfigured) => {}
+            Err(e) => tracing::warn!("aviso no Telegram falhou: {e}"),
+        }
+    });
 }

@@ -10,6 +10,7 @@ pub mod scheduler;
 
 use crate::csfloat::{CsfloatClient, CsfloatSale};
 use crate::db::{Db, now_unix};
+use crate::notify::Telegram;
 use crate::pricing::combo::{self, Candidate};
 use crate::settings::SettingsStore;
 use crate::steam::client::SteamClient;
@@ -27,6 +28,8 @@ pub struct HuntDeps {
     pub csfloat: Arc<CsfloatClient>,
     pub events: broadcast::Sender<Event>,
     pub settings: SettingsStore,
+    /// Aviso de oportunidade que passa no critério; `None` desliga (testes).
+    pub telegram: Option<Arc<Telegram>>,
 }
 
 /// Oportunidade ativa em memória, com a tarefa que a achou.
@@ -65,6 +68,7 @@ pub struct Hunt {
     pub(crate) csfloat: Arc<CsfloatClient>,
     pub(crate) events: broadcast::Sender<Event>,
     pub(crate) settings: SettingsStore,
+    pub(crate) telegram: Option<Arc<Telegram>>,
     /// Relógio injetável para os testes.
     pub(crate) now: fn() -> i64,
     pub(crate) sh: Mutex<Shared>,
@@ -92,6 +96,7 @@ impl Hunt {
             csfloat: deps.csfloat,
             events: deps.events,
             settings: deps.settings,
+            telegram: deps.telegram,
             now,
             wake: Notify::new(),
             sh: Mutex::new(Shared {

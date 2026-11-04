@@ -244,7 +244,7 @@ async fn unwired_routes_say_so_and_db_routes_read_db() {
             .await
             .unwrap()
             .status(),
-        StatusCode::NOT_FOUND
+        StatusCode::SERVICE_UNAVAILABLE // sem Runtime nada é ligado; o 404 real é testado em runtime::tests
     );
     let p: Vec<Value> = s
         .get("/api/purchases")

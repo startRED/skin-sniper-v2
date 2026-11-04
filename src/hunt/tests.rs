@@ -117,6 +117,7 @@ fn hunt_against(base: &str, db: Db) -> (Arc<Hunt>, broadcast::Receiver<Event>) {
             steam,
             csfloat: Arc::new(CsfloatClient::with_base(base).unwrap()),
             events,
+            telegram: None,
         },
         clock,
     );
