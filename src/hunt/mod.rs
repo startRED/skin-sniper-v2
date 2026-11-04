@@ -196,6 +196,7 @@ impl Hunt {
             .values()
             .map(|a| Candidate {
                 id: a.opp.id.clone(),
+                name: a.opp.name.clone(),
                 cost_cents: a.opp.price_cents,
                 profit_cents: a.opp.sell.mid.profit_cents,
             })

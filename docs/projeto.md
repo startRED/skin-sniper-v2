@@ -159,6 +159,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 - Prazo `eta_hours` = 24 / (vendas/dia × fração do peso com mediana ≥ preço), depois da trava.
 - Confiança: alta (≥ 20 vendas/dia e ≥ 100 pontos em 7 dias; raro com n ≥ 8), média (≥ 5/dia; raro n ≥ 3),
   baixa no resto.
+- Combinação: se a de maior lucro tiver uma única skin, prefere duas ou três de nomes distintos quando
+  o lucro delas alcançar pelo menos 90 % do ótimo e couber no saldo.
 - Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 %. `safe` quando lucro no `quick` > 0.
   Aviso no Telegram/som: `safe` e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00).
 - Calibração: cada compra grava os três preços previstos; quando o Erick vender, o realizado entra numa

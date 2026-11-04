@@ -9,6 +9,7 @@ pub const MAX_ITEMS: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub id: String,
+    pub name: String,
     pub cost_cents: i64,
     pub profit_cents: i64,
 }
@@ -21,7 +22,8 @@ pub struct Combo {
 }
 
 /// Escolhe o subconjunto de maior lucro cujo custo total não passa de `balance_cents`.
-/// Ignora itens com custo ≤ 0, lucro ≤ 0 ou custo acima do saldo. Empate de lucro: qualquer um dos ótimos.
+/// Ignora itens com custo ≤ 0, lucro ≤ 0 ou custo acima do saldo. Se o ótimo for uma única skin,
+/// prefere duas ou três skins de nomes distintos quando rendem ao menos 90% do lucro ótimo.
 ///
 /// shortcut: acima de R$ 200 os custos são arredondados PARA CIMA em passos de `ceil(saldo / 20000)`
 /// centavos (nunca estoura o saldo, mas pode perder um pouco de lucro: no máximo um passo por item
@@ -71,6 +73,47 @@ pub fn best_combo(items: &[Candidate], balance_cents: i64) -> Combo {
         }
     }
     out.ids.reverse();
+    if out.ids.len() == 1 {
+        let mut diversified: Option<Combo> = None;
+        for i in 0..cands.len() {
+            for j in i + 1..cands.len() {
+                if cands[i].name == cands[j].name {
+                    continue;
+                }
+                for third in std::iter::once(None).chain(cands[j + 1..].iter().copied().map(Some)) {
+                    if third.is_some_and(|c| c.name == cands[i].name || c.name == cands[j].name) {
+                        continue;
+                    }
+                    let cost = i128::from(cands[i].cost_cents)
+                        + i128::from(cands[j].cost_cents)
+                        + third.map_or(0, |c| i128::from(c.cost_cents));
+                    let profit = i128::from(cands[i].profit_cents)
+                        + i128::from(cands[j].profit_cents)
+                        + third.map_or(0, |c| i128::from(c.profit_cents));
+                    if cost <= i128::from(balance_cents)
+                        && profit <= i128::from(i64::MAX)
+                        && profit * 10 >= i128::from(out.profit_cents) * 9
+                        && diversified
+                            .as_ref()
+                            .is_none_or(|best| profit > i128::from(best.profit_cents))
+                    {
+                        let mut ids = vec![cands[i].id.clone(), cands[j].id.clone()];
+                        if let Some(c) = third {
+                            ids.push(c.id.clone());
+                        }
+                        diversified = Some(Combo {
+                            ids,
+                            cost_cents: cost as i64,
+                            profit_cents: profit as i64,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(combo) = diversified {
+            return combo;
+        }
+    }
     out
 }
 
@@ -82,6 +125,7 @@ mod tests {
     fn c(id: &str, cost: i64, profit: i64) -> Candidate {
         Candidate {
             id: id.into(),
+            name: id.into(),
             cost_cents: cost,
             profit_cents: profit,
         }
@@ -157,9 +201,43 @@ mod tests {
                 }
             }
             let got = best_combo(&items, bal);
-            assert_eq!(got.profit_cents, want);
+            assert!(got.profit_cents * 10 >= want * 9);
             assert!(got.cost_cents <= bal);
         }
+    }
+
+    #[test]
+    fn favors_distinct_skins_only_within_ten_percent() {
+        let single = c("single", 100, 100);
+        let a = c("a", 50, 45);
+        let b = c("b", 50, 45);
+        assert_eq!(
+            best_combo(&[single.clone(), a.clone(), b.clone()], 100).ids,
+            ["a", "b"]
+        );
+        let mut lower = b.clone();
+        lower.profit_cents = 44;
+        assert_eq!(
+            best_combo(&[single.clone(), a.clone(), lower], 100).ids,
+            ["single"]
+        );
+        let mut same = b;
+        same.name = a.name.clone();
+        assert_eq!(best_combo(&[single, a, same], 100).ids, ["single"]);
+    }
+
+    #[test]
+    fn favors_three_distinct_skins() {
+        let got = best_combo(
+            &[
+                c("single", 90, 100),
+                c("a", 30, 30),
+                c("b", 30, 30),
+                c("c", 30, 30),
+            ],
+            90,
+        );
+        assert_eq!(got.ids, ["a", "b", "c"]);
     }
 
     #[test]
