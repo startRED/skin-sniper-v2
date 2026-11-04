@@ -6,7 +6,7 @@
 //! 2. razão BRL/USD medida entre um anúncio em BRL e o preço USD do mesmo item (nunca fixa no código);
 //! 3. `QueryPriceHistory` dos candidatos com piso ≤ saldo (cache de 6 h);
 //! 4. seleção por nota = vendas/dia × lucro possível × (1 + acertos), mais uma consulta de grupo raro por
-//!    skin com tabela × desgaste e um braço de float baixo para os melhores comuns. A nota só escolhe quem
+//!    skin com tabela × desgaste. A nota só escolhe quem
 //!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
 //!    caber no saldo.
 //!
@@ -34,8 +34,6 @@ pub const CATALOG_TTL: i64 = 24 * 3600;
 pub const MIN_SALES_PER_DAY: f64 = 3.0;
 pub const WATCH_MAX: usize = 40;
 pub const RARE_MAX_TASKS: usize = 24;
-/// Quantos dos melhores comuns ganham também um braço de float baixo.
-pub const FLOAT_ARMS: usize = WATCH_MAX / 2;
 /// Rank das entradas vindas da busca por nome de skin com tabela (depois da popularidade); não rebaixa o rank
 /// que a varredura já deu ao item.
 const SKIN_RANK_BASE: i64 = 100_000;
@@ -241,25 +239,6 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     common.truncate(WATCH_MAX);
     let total: f64 = common.iter().map(|c| c.1.score).sum();
     let mut tasks: Vec<Task> = common.into_iter().map(|c| c.1).collect();
-    // Float baixo: um braço extra para os melhores comuns. Mesmo critério de saldo e de taxa (piso mínimo),
-    // com o piso visto na própria consulta; sem consulta ainda, o piso do desconto serve de triagem.
-    let floats: Vec<Task> = tasks
-        .iter()
-        .filter(|t| t.wear.is_some())
-        .take(FLOAT_ARMS)
-        .filter(|t| {
-            let id = format!("f:{}", t.name);
-            observed(c.floors, &id, c.now)
-                .floor
-                .is_none_or(|f| f <= c.saldo && f >= min_floor)
-        })
-        .map(|t| Task {
-            id: format!("f:{}", t.name),
-            ..t.clone()
-        })
-        .collect();
-    tasks.extend(floats);
-
     // Raros: skin com tabela × desgaste, uma vez só (itens repetidos do catálogo não duplicam).
     let mut by_wear: BTreeMap<(&str, u8), (i64, &str)> = BTreeMap::new();
     for i in items {
@@ -1082,39 +1061,12 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_of_arm_is_selected_and_nothing_is_lost() {
+    fn selected_arms_include_discounts_and_rares_only() {
         let (items, saldo) = catalog_fixture();
-        let floors = HashMap::new();
-        let hit = NO_HITS();
-        let tasks = select(&items, &ctx(saldo, &hit, &floors));
-        let n = |p: &str| tasks.iter().filter(|t| t.id.starts_with(p)).count();
-        assert!(n("d:") > 0 && n("r:") > 0 && n("f:") > 0, "{tasks:?}");
-        // cada braço de float é irmão de um de desconto (mesmo nome), com id próprio
-        for f in tasks.iter().filter(|t| t.id.starts_with("f:")) {
-            assert!(tasks.iter().any(|t| t.id == format!("d:{}", f.name)));
-        }
-    }
-
-    #[test]
-    fn float_arm_obeys_balance_and_fee_rules() {
-        let items: Vec<Item> = vec![item("S0 (Field-Tested)", 300, 1, 20.0, 0.3)];
-        let hits = NO_HITS();
-        let has_f = |floors: &HashMap<String, (Option<i64>, i64)>, saldo| {
-            select(&items, &ctx(saldo, &hits, floors))
-                .iter()
-                .any(|t| t.id.starts_with("f:"))
-        };
-        let none = HashMap::new();
-        assert!(has_f(&none, 100_000));
-        // o menor float visto custa mais que o saldo: sai (o de desconto, mais barato, continua)
-        let seen = HashMap::from([(
-            "f:S0 (Field-Tested)".to_string(),
-            (Some(5_001), 1_793_769_000),
-        )]);
-        assert!(!has_f(&seen, 5_000));
-        // abaixo do piso em que a taxa ainda deixa lucro: sai
-        let tiny = HashMap::from([("f:S0 (Field-Tested)".to_string(), (Some(50), 1_793_769_000))]);
-        assert!(!has_f(&tiny, 100_000));
+        let tasks = select(&items, &ctx(saldo, &NO_HITS(), &HashMap::new()));
+        assert!(tasks.iter().any(|t| t.id.starts_with("d:")));
+        assert!(tasks.iter().any(|t| t.id.starts_with("r:")));
+        assert!(tasks.iter().all(|t| !t.id.starts_with("f:")));
     }
 
     #[test]

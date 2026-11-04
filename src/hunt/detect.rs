@@ -39,6 +39,7 @@ pub(crate) struct Near {
 pub(crate) struct Cycle {
     started: i64,
     evaluated: u32,
+    pub(crate) saved_listings: u32,
     passed: u32,
     pub(crate) near: Vec<Near>,
     last: Option<String>,
@@ -104,7 +105,12 @@ pub(crate) fn roll_cycle(h: &Hunt) {
     let text = c.text(now - c.started);
     s.cycle.last = Some(text.clone());
     drop(s);
-    tracing::info!(avaliados = c.evaluated, passaram = c.passed, "{text}");
+    tracing::info!(
+        avaliados = c.evaluated,
+        passaram = c.passed,
+        consultas_anuncios_economizadas = c.saved_listings,
+        "{text}"
+    );
     for n in &c.near {
         tracing::info!(
             "perto: {} a {}; no preço médio {}, no rápido {}",
