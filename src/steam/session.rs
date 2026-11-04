@@ -31,8 +31,10 @@ pub async fn validate(c: &SteamClient) -> Result<SessionInfo> {
     let Some(cookie) = c.cookie() else {
         return Err(Error::SessionExpired);
     };
-    let (status, _, html) = c.get_page_auth(Endpoint::Session, "/market/").await?;
+    let (status, location, html) = c.get_page_auth(Endpoint::Session, "/market/").await?;
     if (300..400).contains(&status) || status == 401 {
+        // sem segredo: só o status e o destino (host + caminho) do redirecionamento
+        tracing::warn!(status, redirect = %redirect_target(location.as_deref()), "sessão recusada pela Steam");
         return Err(Error::SessionExpired);
     }
     if status != 200 {
@@ -41,11 +43,26 @@ pub async fn validate(c: &SteamClient) -> Result<SessionInfo> {
             status,
         });
     }
-    let info = parse_market_page(&html)?;
+    let info = parse_market_page(&html).inspect_err(|e| {
+        if matches!(e, Error::SessionExpired) {
+            tracing::warn!(
+                status,
+                "sessão recusada pela Steam: página do mercado veio anônima"
+            );
+        }
+    })?;
     if cookie.sessionid.as_deref() != Some(info.sessionid.as_str()) {
         c.adopt_sessionid(&cookie, &info.sessionid);
     }
     Ok(info)
+}
+
+/// Host e caminho do `Location`, sem query nem fragmento (podem trazer dados da sessão).
+fn redirect_target(location: Option<&str>) -> String {
+    let Some(l) = location else {
+        return "(sem Location)".into();
+    };
+    l.split(['?', '#']).next().unwrap_or_default().to_string()
 }
 
 pub fn parse_market_page(html: &str) -> Result<SessionInfo> {
@@ -191,6 +208,17 @@ g_rgWalletInfo = {{"wallet_fee":1,"wallet_balance":"3608","wallet_currency":{cur
                 account_name: Some("Jo&ão Teste".into()),
             }
         );
+    }
+
+    #[test]
+    fn redirect_target_drops_query() {
+        assert_eq!(
+            redirect_target(Some(
+                "https://steamcommunity.com/login/home/?goto=%2Fmarket%2F&x=1"
+            )),
+            "https://steamcommunity.com/login/home/"
+        );
+        assert_eq!(redirect_target(None), "(sem Location)");
     }
 
     #[test]

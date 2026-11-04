@@ -211,3 +211,12 @@ Nenhum usa o mercado novo. Lições:
 - Se `propertyFilters` aceita várias faixas de seed numa consulta só.
 - Se a moeda BRL anônima depende do IP (afeta quem rodar fora do Brasil ou via VPN).
 - Valor de `tradefee_tax` para conta BR (esperado 0, **HIPÓTESE**).
+
+---
+
+## 9. Login por QR (IAuthenticationService), pesquisado em 2026-11-04
+- Fluxo: `BeginAuthSessionViaQR` → `challenge_url` (vira o QR) → `PollAuthSessionStatus` a cada `interval` (5 s) → `refresh_token` + `access_token` + `account_name`. Cookie `steamLoginSecure` = `<steamid>%7C%7C<access_token>` (steamid = `sub` do JWT). Fonte: https://github.com/DoctorMcKay/node-steam-session (`LoginSession.ts`, `AuthenticationClient.ts`, `WebApiTransport.ts`).
+- Transporte: `POST https://api.steampowered.com/IAuthenticationService/<Método>/v1/` com `input_protobuf_encoded` (protobuf em base64) num formulário; resposta é protobuf binário com o header `x-eresult` (1 = OK). **Confirmado ao vivo** (2026-11-04): formulário `application/x-www-form-urlencoded` serve (não precisa de multipart) e o Begin respondeu com `challenge_url` `https://s.team/q/…` e `interval` 5.
+- Campos (SteamDatabase/Protobufs, `webui/service_authentication.proto`): Begin req `device_details`=3 (`device_friendly_name`=1, `platform_type`=2, `os_type`=3, `gaming_device_type`=4); Begin resp `client_id`=1 (uint64), `challenge_url`=2, `request_id`=3 (bytes), `interval`=4 (float); Poll req `client_id`=1, `request_id`=2; Poll resp `new_client_id`=1, `new_challenge_url`=2, `refresh_token`=3, `access_token`=4, `account_name`=6; GenerateAccessTokenForApp req `refresh_token`=1, `steamid`=2 (fixed64), `renewal_type`=3; resp `access_token`=1. Enums (valores da biblioteca): plataforma MobileApp = 3; renovação None = 0.
+- Renovação: `GenerateAccessTokenForApp` só funciona com refresh token de **MobileApp** (WebBrowser dá AccessDenied, doc da biblioteca, 2025-04-30); o `aud` do token mobile é `["web","mobile"]`, então vale como cookie no steamcommunity.com. Por isso o QR é pedido como MobileApp. A rota WebBrowser (`login.steampowered.com/jwt/finalizelogin` + `settoken` em cada domínio) existe, mas exige várias chamadas por renovação.
+- **HIPÓTESE (não medida):** que o cookie vindo de token mobile também seja aceito em `buylisting`; e que o QR vale ~5 min (a Steam não documenta).

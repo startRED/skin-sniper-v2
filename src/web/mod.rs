@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod guard;
+pub mod login;
 pub mod sse;
 
 use crate::db::Db;
@@ -32,12 +33,14 @@ pub struct AppState {
     pub pc_name: Option<String>,
     /// Caça e compra ligadas; `None` nos testes de rota, que usam só o banco.
     pub rt: Option<std::sync::Arc<crate::runtime::Runtime>>,
+    pub login: std::sync::Arc<crate::steam::auth::Login>,
 }
 
 impl AppState {
     pub fn new(db: Db, settings: SettingsStore) -> Self {
         AppState {
             db,
+            login: crate::steam::auth::Login::new(settings.clone()),
             settings,
             events: broadcast::channel(256).0,
             pc_name: guard::pc_name(),
@@ -103,6 +106,8 @@ pub fn router(app: AppState) -> Router {
             "/api/settings",
             get(api::get_settings).put(api::put_settings),
         )
+        .route("/api/steam/login/qr", post(login::start))
+        .route("/api/steam/login/status", get(login::status))
         .route("/api/events", get(sse::events))
         .route("/api/{*rest}", any(api::api_not_found))
         .fallback(static_files)

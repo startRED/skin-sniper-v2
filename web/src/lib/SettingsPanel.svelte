@@ -3,6 +3,7 @@
   import { centsToInput, parseBRL } from './format';
   import { unlockAudio } from './sound';
   import SecretField from './SecretField.svelte';
+  import SteamLogin from './SteamLogin.svelte';
   import type { Opportunity, SettingsInput } from './types';
 
   let dlg: HTMLDialogElement;
@@ -60,9 +61,13 @@
     {:else}
       <section>
         <h3>Conta e chaves</h3>
-        <SecretField label="Login da Steam" masked={s.steam_login_secure} status={keys?.steam}
-          hint="Deixa o Skin Sniper ler seu saldo e comprar. Cole o valor do cookie steamLoginSecure."
-          onsave={(v) => save({ steam_login_secure: v })} onclear={() => save({ steam_login_secure: null })} />
+        <SteamLogin status={keys?.steam} />
+        <details class="adv">
+          <summary>Avançado: colar o cookie do navegador</summary>
+          <SecretField label="Cookie steamLoginSecure" masked={s.steam_login_secure} status={keys?.steam}
+            hint="Só se o QR não servir. Esse cookie vale cerca de um dia e não se renova sozinho."
+            onsave={(v) => save({ steam_login_secure: v })} onclear={() => save({ steam_login_secure: null })} />
+        </details>
         <SecretField label="Chave do CSFloat" masked={s.csfloat_key} status={keys?.csfloat}
           hint="Ajuda a avaliar skins raras com vendas de verdade."
           onsave={(v) => save({ csfloat_key: v })} onclear={() => save({ csfloat_key: null })} />
@@ -126,6 +131,7 @@
   h2 { font-size: 18px; }
   h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
   section { display: flex; flex-direction: column; gap: 16px; }
+  .adv summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
   .hint { color: var(--muted); font-size: 13px; }
   .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .inline input:not([type='checkbox']) { flex: 1; min-width: 0; }

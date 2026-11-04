@@ -152,17 +152,22 @@ impl SettingsStore {
 
     /// `None` apaga o saldo manual (volta a ler da Steam).
     pub async fn set_saldo(&self, cents: Option<i64>) -> Result<()> {
+        self.set_raw(SALDO_KEY, cents.map(|c| c.to_string())).await
+    }
+
+    /// Grava (ou apaga, com `None`) uma chave interna que o painel não edita, como o token de renovação.
+    pub async fn set_raw(&self, key: &'static str, value: Option<String>) -> Result<()> {
         self.db
-            .call(move |c| match cents {
+            .call(move |c| match value {
                 Some(v) => c.execute(
                     "INSERT INTO settings(key, value) VALUES (?1, ?2)
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params![SALDO_KEY, v.to_string()],
+                    params![key, v],
                 ),
-                None => c.execute("DELETE FROM settings WHERE key = ?1", [SALDO_KEY]),
+                None => c.execute("DELETE FROM settings WHERE key = ?1", [key]),
             })
             .await?;
-        let _ = self.changed.send(SALDO_KEY.to_string());
+        let _ = self.changed.send(key.to_string());
         Ok(())
     }
 }
