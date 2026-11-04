@@ -56,6 +56,9 @@ function genOpp(ageSec: number): Opportunity {
     group, kind, price_cents: price, sell,
     margin_pct: Math.round((sell.mid.profit_cents / price) * 1000) / 10,
     safe: sell.quick.profit_cents > 0, confidence: conf,
+    ev_profit_cents: sell.mid.profit_cents, days_locked: kind === 'raro' ? null : 7 + (sell.mid.eta_hours ?? 0) / 24,
+    profit_per_day_cents: kind === 'raro' ? null : Math.round(sell.mid.profit_cents / (7 + (sell.mid.eta_hours ?? 0) / 24)),
+    risk: n % 4 === 0 ? 'alto' : conf === 'alta' ? 'baixo' : conf === 'media' ? 'medio' : 'alto',
     evidence: `${perDay} vendas/dia nos últimos 7 dias (exemplo)`,
     seen_at: nowS() - ageSec
   };

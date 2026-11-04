@@ -86,6 +86,14 @@ pub enum Confidence {
     Baixa,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Risk {
+    Baixo,
+    Medio,
+    Alto,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Opportunity {
     pub id: String,
@@ -103,6 +111,14 @@ pub struct Opportunity {
     pub margin_pct: f64,
     pub safe: bool,
     pub confidence: Confidence,
+    #[serde(default)]
+    pub ev_profit_cents: Option<i64>,
+    #[serde(default)]
+    pub days_locked: Option<f64>,
+    #[serde(default)]
+    pub profit_per_day_cents: Option<i64>,
+    #[serde(default)]
+    pub risk: Option<Risk>,
     pub evidence: String,
     pub seen_at: i64,
 }

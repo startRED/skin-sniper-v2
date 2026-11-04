@@ -88,6 +88,10 @@ Opportunity = {
   margin_pct: number,            // lucro no preço médio / preço
   safe: boolean,                 // lucro > 0 mesmo no preço rápido
   confidence: "alta" | "media" | "baixa",
+  ev_profit_cents: number | null,  // lucro estimado, em centavos
+  days_locked: number | null,      // trava e prazo estimado de venda, em dias
+  profit_per_day_cents: number | null, // lucro estimado dividido pelo prazo total
+  risk: "baixo" | "medio" | "alto" | null,
   evidence: string,              // frase curta: "392 vendas/dia nos últimos 7 dias"
   seen_at: number
 }
@@ -159,6 +163,18 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 - Prazo `eta_hours` = 24 / (vendas/dia × fração do peso com mediana ≥ preço), depois da trava.
 - Confiança: alta (≥ 20 vendas/dia e ≥ 100 pontos em 7 dias; raro com n ≥ 8), média (≥ 5/dia; raro n ≥ 3),
   baixa no resto.
+- Nota por dia é uma hipótese, não probabilidade medida de venda: em cada preço, calcula a fração do peso
+  dos últimos 7 dias com preço projetado igual ou maior; no raro comprovado, combina cada ponto com cada
+  múltiplo válido do grupo. Normaliza as três frações para somarem 1 e faz a média ponderada dos lucros
+  líquidos. Desconta `preço de compra × min(1, volatilidade × √7)`: penalidade conservadora para possível
+  queda durante a trava, não chance estatística de queda. Arredonda o resultado em centavos.
+  Volatilidade é o desvio padrão populacional das variações entre medianas diárias ponderadas por compras,
+  em dias consecutivos dos últimos 30 dias; exige pelo menos duas variações. Sem isso, lucro esperado é nulo.
+  Dias presos = 7 + prazo médio em horas / 24; sem prazo medido (incluindo raro comprovado), dias e nota são
+  nulos. Nota = lucro esperado / dias presos, arredondada em centavos; nulos ficam por último.
+- Risco baixo: volatilidade ≤ 2 % ao dia, ≥ 20 vendas/dia e, em raro, n ≥ 8. Médio: volatilidade ≤ 5 %,
+  ≥ 5 vendas/dia e, em raro, n ≥ 3. Alto nos demais casos, inclusive sem volatilidade suficiente. Esses
+  limites são hipóteses para priorização, não calibração com vendas reais.
 - Combinação: se a de maior lucro tiver uma única skin, prefere duas ou três de nomes distintos quando
   o lucro delas alcançar pelo menos 90 % do ótimo e couber no saldo.
 - Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 %. `safe` quando lucro no `quick` > 0.
@@ -188,7 +204,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 - Faixa "Melhor combinação com R$ 36,08": as skins, custo e lucro provável; clicar destaca na tabela.
 - Tabela única, densa, atualizada ao vivo: skin (imagem, nome, desgaste, float, seed, grupo), preço,
   três preços de venda, lucro, margem, prazo, confiança, há quanto tempo apareceu, botão comprar.
-  Ordenar clicando no cabeçalho (lucro, margem, lucro seguro, prazo, mais novo). Linha nova entra com
+  Ordem padrão por lucro esperado por dia; ordenar clicando no cabeçalho (por dia, lucro, margem, lucro seguro, prazo, mais novo). Linha nova entra com
   destaque breve; linha vendida sai.
 - Linha expandida: gráfico de 30 dias com as três linhas de preço, frase de evidência, links "abrir na
   Steam" e "inspecionar no jogo".

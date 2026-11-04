@@ -5,9 +5,19 @@
   import Chart from './Chart.svelte';
   import type { Opportunity, Tier } from './types';
 
-  const list = $derived(rows());
+  let daySort = $state<'asc' | 'desc' | null>('desc');
+  const list = $derived.by(() => {
+    const current = rows();
+    if (!daySort) return current;
+    return current.sort((a, b) => {
+      if (a.profit_per_day_cents == null) return b.profit_per_day_cents == null ? b.seen_at - a.seen_at : 1;
+      if (b.profit_per_day_cents == null) return -1;
+      return (daySort === 'desc' ? -1 : 1) * (a.profit_per_day_cents - b.profit_per_day_cents) || b.seen_at - a.seen_at;
+    });
+  });
   const inCombo = $derived(new Set(app.highlight ? (app.state?.combo.ids ?? []) : []));
   const CONF = { alta: 'Alta', media: 'Média', baixa: 'Baixa' } as const;
+  const RISK = { baixo: 'baixo', medio: 'médio', alto: 'alto' } as const;
   const TIERS: [string, 'quick' | 'mid' | 'high', string][] = [
     ['Rápido', 'quick', 'Vendendo rápido você ainda ganha: o preço é o mais baixo dos três, o de maior chance de vender logo'],
     ['Médio', 'mid', 'Preço mais provável de venda'],
@@ -15,13 +25,13 @@
   ];
 
   const title = (o: Opportunity) => (o.wear && o.name.endsWith(`(${o.wear})`) ? o.name.slice(0, -(o.wear.length + 3)) : o.name);
-  const sortAttr = (k: SortKey) => (app.sort.key === k ? (app.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+  const sortAttr = (k: SortKey) => (!daySort && app.sort.key === k ? (app.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
 </script>
 
 {#snippet th(key: SortKey, label: string, hint: string)}
   <div class="h sortable" role="columnheader" aria-sort={sortAttr(key)}>
-    <button onclick={() => setSort(key)} title={hint} class:active={app.sort.key === key}>
-      {label}<span class="arrow" aria-hidden="true">{app.sort.key === key ? (app.sort.dir === 'asc' ? '▲' : '▼') : ''}</span>
+    <button onclick={() => { if (daySort && app.sort.key === key) app.sort = { key, dir: key === 'eta' ? 'asc' : 'desc' }; else setSort(key); daySort = null; }} title={hint} class:active={!daySort && app.sort.key === key}>
+      {label}<span class="arrow" aria-hidden="true">{!daySort && app.sort.key === key ? (app.sort.dir === 'asc' ? '▲' : '▼') : ''}</span>
     </button>
   </div>
 {/snippet}
@@ -31,10 +41,14 @@
   {#if showProfit}<small class={t.profit_cents > 0 ? 'up' : 'down'}>{signed(t.profit_cents)}</small>{/if}
 {/snippet}
 
+<p class="day-hint">Por dia: lucro estimado dividido pelo tempo até vender, incluindo os 7 dias de trava.</p>
 <div class="table" role="table" aria-label="Skins com lucro">
   <div class="head grid" role="row">
     <div class="h hide" role="columnheader">Skin</div>
     <div class="h hide" role="columnheader">Preço</div>
+    <div class="h sortable" role="columnheader" aria-sort={daySort ? (daySort === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button onclick={() => { daySort = daySort === 'desc' ? 'asc' : 'desc'; }} class:active={daySort !== null} title="Lucro estimado dividido pelos dias até vender, incluindo os 7 dias de trava. É uma estimativa, não uma garantia.">Por dia<span class="arrow" aria-hidden="true">{daySort ? (daySort === 'asc' ? '▲' : '▼') : ''}</span></button>
+    </div>
     {@render th('profit', 'Lucro', 'Ordenar pelo lucro no preço médio')}
     {@render th('margin', 'Margem', 'Ordenar pela margem: lucro dividido pelo preço')}
     {@render th('safe', 'Venda rápida', 'Ordenar pelo lucro seguro: o que sobra vendendo pelo preço rápido')}
@@ -67,6 +81,7 @@
           </button>
         </div>
         <div class="c price" role="cell" data-l="Preço"><b>{money(o.price_cents)}</b></div>
+        <div class="c perday" role="cell" data-l="Por dia"><b>{o.profit_per_day_cents == null ? 'Sem dados' : signed(o.profit_per_day_cents)}</b></div>
         <div class="c profit" role="cell" data-l="Lucro">
           <b class={o.sell.mid.profit_cents > 0 ? 'up' : 'down'}>{signed(o.sell.mid.profit_cents)}</b>
           {#if o.safe}
@@ -81,7 +96,7 @@
         <div class="c tier" role="cell" data-l="Venda alta">{@render tier(o.sell.high, true)}</div>
         <div class="c eta" role="cell" data-l="Prazo">{eta(o.sell.mid.eta_hours)}</div>
         <div class="c conf" role="cell" data-l="Confiança">
-          <button type="button" class="cf {o.confidence}" data-tip={o.evidence} aria-label="Confiança {CONF[o.confidence]}: {o.evidence}">{CONF[o.confidence]}</button>
+          <button type="button" class="cf {o.risk === 'alto' ? 'baixa' : o.risk === 'medio' ? 'media' : o.confidence}" data-tip={o.evidence} aria-label="Confiança {CONF[o.confidence]}{o.risk ? `, risco ${RISK[o.risk]}` : ''}: {o.evidence}">{CONF[o.confidence]}{o.risk ? ` · risco ${RISK[o.risk]}` : ''}</button>
         </div>
         <div class="c seen muted" role="cell" data-l="Apareceu">{ago(o.seen_at, app.now)}</div>
         <div class="c act" role="cell"><BuyButton {o} /></div>
@@ -131,11 +146,12 @@
 </div>
 
 <style>
+  .day-hint { color: var(--muted); font-size: 12px; margin: 0 16px 6px; }
   .table { display: flex; flex-direction: column; gap: 0; }
   .grid {
     display: grid; align-items: center; column-gap: 12px; padding: 0 16px;
     grid-template-columns:
-      minmax(240px, 2.6fr) minmax(80px, 1fr) minmax(104px, 1.2fr) minmax(64px, 0.8fr)
+      minmax(240px, 2.6fr) minmax(80px, 1fr) minmax(80px, 1fr) minmax(104px, 1.2fr) minmax(64px, 0.8fr)
       repeat(3, minmax(88px, 1fr)) minmax(72px, 0.8fr) minmax(76px, 0.9fr) minmax(66px, 0.8fr) minmax(128px, 1.3fr);
   }
   .head { position: sticky; top: 61px; z-index: 5; background: var(--bg); min-height: 38px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
@@ -212,6 +228,7 @@
     .c::before { display: block; color: var(--faint); font-size: 11px; }
     .c.skin { grid-column: span 12; order: 1; }
     .c.price { grid-column: span 4; order: 2; }
+    .c.perday { grid-column: span 4; order: 4; }
     .c.profit { grid-column: span 5; order: 3; }
     .c.margin { grid-column: span 3; order: 4; }
     .c.tier { grid-column: span 4; order: 6; }

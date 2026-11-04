@@ -12,7 +12,7 @@ use crate::steam::buy::brl;
 use crate::steam::client::Error as SteamError;
 use crate::steam::history;
 use crate::steam::listings::{Listing, ListingsPage};
-use crate::web::api::{Confidence, Event, Kind, Opportunity, Sell, Tier};
+use crate::web::api::{Confidence, Event, Kind, Opportunity, Risk, Sell, Tier};
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
@@ -170,7 +170,7 @@ async fn history_at(h: &Hunt, name: &str) -> Result<Option<i64>> {
     .await
 }
 
-/// Pontos dos últimos 15 dias do nome (a tendência usa até 14); baixa o histórico se passou de 6 h.
+/// Pontos dos últimos 30 dias do nome; baixa o histórico se passou de 6 h.
 pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<PricePoint>> {
     let n = name.to_string();
     let last: Option<i64> =
@@ -191,7 +191,7 @@ pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<Pri
         c.prepare(
             "SELECT ts, median_cents, purchases FROM price_points WHERE name = ?1 AND ts >= ?2 ORDER BY ts",
         )?
-        .query_map(params![n, now - 15 * DAY], |r| {
+        .query_map(params![n, now - 30 * DAY], |r| {
             Ok(PricePoint {
                 ts: r.get(0)?,
                 median_cents: r.get(1)?,
@@ -346,6 +346,14 @@ async fn evaluate_one(
         margin_pct: ev.margin_pct,
         safe: ev.safe,
         confidence: api_confidence(est.confidence),
+        ev_profit_cents: ev.ev_profit_cents,
+        days_locked: ev.days_locked,
+        profit_per_day_cents: ev.profit_per_day_cents,
+        risk: Some(match est.risk {
+            sell::Risk::Low => Risk::Baixo,
+            sell::Risk::Medium => Risk::Medio,
+            sell::Risk::High => Risk::Alto,
+        }),
         evidence: est.evidence,
         seen_at: now,
     };
