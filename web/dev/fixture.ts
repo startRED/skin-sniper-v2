@@ -65,6 +65,7 @@ function genOpp(ageSec: number): Opportunity {
 }
 
 let opps: Opportunity[] = [];
+let lost: Opportunity[] = []; // sumiram da Steam: a API real devolve as do último dia com gone_at
 let purchases: Purchase[] = [];
 let saldoCents = 5000;
 let saldoSource: State['saldo_source'] = 'steam';
@@ -82,6 +83,7 @@ function reset(scenario: string) {
   saldoCents = 5000;
   saldoSource = 'steam';
   opps = scenario === 'empty' ? [] : Array.from({ length: 12 }, (_, i) => genOpp(4 + i * 37 + (i % 3) * 11));
+  lost = scenario === 'empty' ? [] : Array.from({ length: 10 }, (_, i) => ({ ...genOpp(900 + i * 1800), gone_at: nowS() - 180 - i * 1500 }));
   const sold = genOpp(0);
   purchases = scenario === 'empty' ? [] : [
     { id: '7099000001', name: 'AK-47 | Redline (Field-Tested)', icon_url: icon('AK-47', 40), price_cents: 2310, status: 'bought', message: null, bought_at: nowS() - 86400, tradable_at: nowS() + 6 * 86400 - 3600, sell: sold.sell },
@@ -188,7 +190,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     emit('state', state());
     return send(res, 200, { ok: true });
   }
-  if (p === '/api/opportunities') return send(res, 200, opps);
+  if (p === '/api/opportunities') return send(res, 200, [...opps, ...lost]);
   if (p === '/api/watch') return send(res, 200, watchRows());
   if (p === '/api/purchases') return send(res, 200, purchases);
   if (p === '/api/settings' && m === 'GET') return send(res, 200, settings);

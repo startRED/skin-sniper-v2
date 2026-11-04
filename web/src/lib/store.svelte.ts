@@ -32,8 +32,17 @@ export const app = $state({
 const ARM_MS = 4000;
 let armTimer: ReturnType<typeof setTimeout> | undefined;
 
+const LOST_KEEP_S = 86400;
+
+// Perdidas: sumiram da Steam no último dia. A mais recente primeiro.
+export function lostRows(): Opportunity[] {
+  return Object.values(app.opps)
+    .filter((o) => o.gone_at && app.now - o.gone_at < LOST_KEEP_S)
+    .sort((a, b) => b.gone_at! - a.gone_at!);
+}
+
 export function rows(): Opportunity[] {
-  if (app.frozen) return app.frozen.map((id) => app.opps[id]).filter(Boolean);
+  if (app.frozen) return app.frozen.map((id) => app.opps[id]).filter((o) => o && !o.gone_at);
   const { key, dir } = app.sort;
   const val = (o: Opportunity) =>
     key === 'profit' ? o.sell.mid.profit_cents
@@ -42,7 +51,7 @@ export function rows(): Opportunity[] {
     : key === 'eta' ? (o.sell.mid.eta_hours ?? Infinity)
     : o.seen_at;
   const sign = dir === 'asc' ? 1 : -1;
-  return Object.values(app.opps).sort((a, b) => sign * (val(a) - val(b)) || b.seen_at - a.seen_at);
+  return Object.values(app.opps).filter((o) => !o.gone_at).sort((a, b) => sign * (val(a) - val(b)) || b.seen_at - a.seen_at);
 }
 
 export function setSort(key: SortKey) {
@@ -205,7 +214,7 @@ function connect() {
       apply(() => fn(data));
     });
   on('opportunity', (o: Opportunity) => {
-    const isNew = !(o.id in app.opps);
+    const isNew = !app.opps[o.id] || !!app.opps[o.id].gone_at;
     app.opps[o.id] = o;
     if (!isNew) return;
     app.fresh[o.id] = true;
@@ -213,8 +222,9 @@ function connect() {
     if (app.loaded && qualifies(o)) notify(o);
   });
   on('gone', ({ id }) => {
-    delete app.opps[id];
-    if (app.expanded === id) app.expanded = null;
+    const o = app.opps[id];
+    if (o) app.opps[id] = { ...o, gone_at: app.now };
+    if (app.armed === id) disarm();
   });
   on('state', (s: State) => {
     app.state = s;

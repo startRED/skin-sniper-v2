@@ -322,12 +322,18 @@ async fn unwired_routes_say_so_and_db_routes_read_db() {
     let v: Value = r.json().await.unwrap();
     assert!(v["error"].as_str().unwrap().contains("ainda não ligado"));
 
-    let o = opp_json("42").to_string();
+    let (o, lost, old) = (
+        opp_json("42").to_string(),
+        opp_json("44").to_string(),
+        opp_json("43").to_string(),
+    );
+    let gone = crate::db::now_unix() - 60;
     s.app
         .db
         .call(move |c| {
             c.execute("INSERT INTO opportunities(id, json, created_at, gone_at) VALUES ('42', ?1, 1, NULL)", [&o])?;
-            c.execute("INSERT INTO opportunities(id, json, created_at, gone_at) VALUES ('43', ?1, 1, 5)", [&o]) // encerrada
+            c.execute("INSERT INTO opportunities(id, json, created_at, gone_at) VALUES ('44', ?1, 1, ?2)", (&lost, gone))?;
+            c.execute("INSERT INTO opportunities(id, json, created_at, gone_at) VALUES ('43', ?1, 1, 5)", [&old]) // perdida há muito
         })
         .await
         .unwrap();
@@ -340,8 +346,10 @@ async fn unwired_routes_say_so_and_db_routes_read_db() {
         .await
         .unwrap();
     assert_eq!(
-        list.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
-        ["42"]
+        list.iter()
+            .map(|o| (o.id.as_str(), o.gone_at))
+            .collect::<Vec<_>>(),
+        [("42", None), ("44", Some(gone))]
     );
     assert_eq!(
         s.get("/api/opportunities/42/history")

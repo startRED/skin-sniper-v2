@@ -375,6 +375,7 @@ async fn evaluate_one(
         }),
         evidence: est.evidence,
         seen_at: now,
+        gone_at: None,
     };
     Ok(Judged {
         found: Some((opp, ev.notify)),

@@ -128,6 +128,10 @@ pub struct Opportunity {
     pub risk: Option<Risk>,
     pub evidence: String,
     pub seen_at: i64,
+    /// Quando o anúncio sumiu (vendido para outro, comprado por você ou fora da seleção). Vem da
+    /// coluna `gone_at`, não do JSON guardado.
+    #[serde(default)]
+    pub gone_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -328,18 +332,36 @@ fn parse_rows<T: serde::de::DeserializeOwned>(what: &str, rows: Vec<String>) -> 
         .collect()
 }
 
+/// Perdidas ficam visíveis por um dia, para o usuário ver o que escapou.
+const LOST_KEEP_SECS: i64 = 86_400;
+const LOST_MAX: i64 = 50;
+
+/// Ativas e, depois, as perdidas mais recentes (com `gone_at`).
 pub async fn list_opportunities(AxState(app): AxState<AppState>) -> ApiResult<Vec<Opportunity>> {
+    let since = crate::db::now_unix() - LOST_KEEP_SECS;
     let rows = app
         .db
-        .call(|c| {
+        .call(move |c| {
             c.prepare(
-                "SELECT json FROM opportunities WHERE gone_at IS NULL ORDER BY created_at DESC",
+                "SELECT json, gone_at FROM opportunities WHERE gone_at IS NULL
+                 UNION ALL SELECT * FROM (SELECT json, gone_at FROM opportunities
+                   WHERE gone_at >= ?1 ORDER BY gone_at DESC LIMIT ?2)",
             )?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect()
+            .query_map([since, LOST_MAX], |r| {
+                Ok((r.get::<_, String>(0)?, r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(String, Option<i64>)>>>()
         })
         .await?;
-    Ok(Json(parse_rows("oportunidade", rows)))
+    Ok(Json(
+        rows.into_iter()
+            .filter_map(|(j, gone_at)| {
+                let mut o: Opportunity = parse_rows("oportunidade", vec![j]).pop()?;
+                o.gone_at = gone_at;
+                Some(o)
+            })
+            .collect(),
+    ))
 }
 
 pub async fn opportunity_history(
