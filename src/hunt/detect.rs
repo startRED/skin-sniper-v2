@@ -530,6 +530,10 @@ async fn store_seen(h: &Hunt, seen: &[&Listing], now: i64) -> Result<()> {
     h.db.call(move |c| {
         let tx = c.transaction()?;
         for (id, name, price, seed, float) in rows {
+            let is_new = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM listings_seen WHERE listing_id = ?1)", [&id], |r| r.get::<_, bool>(0))?;
+            if is_new {
+                tx.execute("INSERT INTO hourly_activity(hour_utc, listings) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET listings = listings + 1", [now.div_euclid(3600)])?;
+            }
             tx.execute(
                 "INSERT INTO listings_seen(listing_id, name, price_cents, seed, \"float\", first_seen, last_seen)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
@@ -559,12 +563,16 @@ async fn store_opportunity(
     );
     let at = opp.seen_at;
     h.db.call(move |c| {
-        c.execute(
+        let tx = c.transaction()?;
+        if fresh {
+            tx.execute("INSERT INTO hourly_activity(hour_utc, opportunities) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET opportunities = opportunities + 1", [at.div_euclid(3600)])?;
+        }
+        tx.execute(
             "INSERT OR REPLACE INTO opportunities(id, json, created_at, gone_at, task, listing_json)
              VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
             params![id, json, at, tid, lj],
-        )
-        .map(|_| ())
+        )?;
+        tx.commit()
     })
     .await?;
     {

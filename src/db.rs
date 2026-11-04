@@ -44,6 +44,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE opportunities ADD COLUMN task TEXT;
     ALTER TABLE opportunities ADD COLUMN listing_json TEXT;
     "#,
+    r#"
+    CREATE TABLE hourly_activity (hour_utc INTEGER PRIMARY KEY, listings INTEGER NOT NULL DEFAULT 0, opportunities INTEGER NOT NULL DEFAULT 0);
+    "#,
 ];
 
 pub fn now_unix() -> i64 {
@@ -114,6 +117,10 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
             [now - 7 * DAY],
         )?,
     };
+    conn.execute(
+        "DELETE FROM hourly_activity WHERE hour_utc < ?1",
+        [(now - 30 * DAY).div_euclid(3600)],
+    )?;
     conn.execute_batch("PRAGMA incremental_vacuum;")?;
     Ok(r)
 }
@@ -229,6 +236,16 @@ mod tests {
             )
             .unwrap();
         }
+        conn.execute(
+            "INSERT INTO hourly_activity VALUES (?1, 1, 0)",
+            [(now - 31 * DAY).div_euclid(3600)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO hourly_activity VALUES (?1, 2, 1)",
+            [(now - 29 * DAY).div_euclid(3600)],
+        )
+        .unwrap();
         let r = retain(&conn, now).unwrap();
         assert_eq!(
             r,
@@ -242,5 +259,9 @@ mod tests {
             .query_row("SELECT count(*) FROM opportunities", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 2);
+        let activity: i64 = conn
+            .query_row("SELECT count(*) FROM hourly_activity", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(activity, 1);
     }
 }

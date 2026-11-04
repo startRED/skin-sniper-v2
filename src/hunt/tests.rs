@@ -166,6 +166,18 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     }
     found.sort_by_key(|o| o.price_cents);
     assert_eq!(found.len(), 2, "{found:#?}");
+    let (seen, opportunities): (i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT sum(listings), sum(opportunities) FROM hourly_activity",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert!(seen >= 2);
+    assert_eq!(opportunities, 2);
 
     // razão medida: R$ 4,00 (menor anúncio) ÷ US$ 1,00
     assert_eq!(h.lock().ratio.map(|r| r.0), Some(4.0));

@@ -1,6 +1,7 @@
 //! web — axum: rotas do contrato, SSE, guarda de Host e arquivos embutidos.
 
 pub mod api;
+pub mod calibration;
 pub mod guard;
 pub mod login;
 pub mod sse;
@@ -102,6 +103,8 @@ pub fn router(app: AppState) -> Router {
         .route("/api/watch", get(api::watch))
         .route("/api/buy", post(api::buy))
         .route("/api/purchases", get(api::list_purchases))
+        .route("/api/purchases/{id}/sold", post(calibration::sold))
+        .route("/api/calibration", get(calibration::get))
         .route(
             "/api/settings",
             get(api::get_settings).put(api::put_settings),

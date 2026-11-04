@@ -59,6 +59,8 @@ GET  /api/opportunities    -> Opportunity[]         (ativas, ordem livre; o fron
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
 POST /api/buy              {id: string}            -> Purchase
 GET  /api/purchases        -> Purchase[]
+POST /api/purchases/:id/sold {sold_cents: int}      -> Purchase (valor pago pelo comprador, com taxas)
+GET  /api/calibration      -> Calibration
 GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
 GET  /api/settings         -> Settings              (chaves mascaradas)
 PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga)
@@ -100,7 +102,11 @@ WatchRow = {
 Sell = { high: Tier, mid: Tier, quick: Tier }
 Tier = { price_cents: number, net_cents: number, profit_cents: number, eta_hours: number | null }
 Purchase = { id, name, icon_url, price_cents, status: "pending" | "need_confirmation" | "bought" | "failed",
-             message: string | null, bought_at: number | null, tradable_at: number | null, sell: Sell }
+             message: string | null, bought_at: number | null, tradable_at: number | null, sell: Sell,
+             kind: "desconto" | "raro" | null, sold_cents: number | null }
+Calibration = { families: [{ family: string, kind: "desconto" | "raro", n: number,
+                              mean_error_pct: number, bias_pct: number }],
+                hours: [{ hour: 0..23, listings: number, opportunities: number }] }
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
              telegram_chat_id: string|null, panel_url: string|null, sound: boolean,
              notify_min_profit_cents: number }      // segredos chegam mascarados: "••••gLO9"
@@ -157,6 +163,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   Aviso no Telegram/som: `safe` e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00).
 - Calibração: cada compra grava os três preços previstos; quando o Erick vender, o realizado entra numa
   tabela para conferir o erro (v1 só grava; o ajuste fino vem depois com dados).
+- Venda manual aceita preço positivo em centavos, depois da liberação, e permite corrigir o valor. O valor é o
+  preço pago pelo comprador, incluindo taxas, igual aos três preços previstos. `mean_error_pct` é a média do
+  erro absoluto e `bias_pct` a média do erro com sinal, ambos `(realizado − médio previsto) / médio previsto`.
+  Agrupa pelo nome sem o desgaste e pelo tipo; compras antigas sem tipo nem oportunidade correspondente ficam
+  fora da calibração. Horários somam os últimos 30 dias por hora de São Paulo, inclusive horário de verão:
+  anúncios são os novos que couberam no saldo e foram avaliados; oportunidades são novas entradas na lista.
+  Os registros começam na instalação desta versão; não representam todo o mercado nem alteram a agenda.
 
 ## Compra
 
