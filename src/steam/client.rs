@@ -484,7 +484,7 @@ impl SteamClient {
     }
 
     /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms|fim
-    /// das leituras sem login Unix`). Sem pausa ativa, o 1º campo é a hora do último 429: ao subir, a
+    /// das leituras sem login Unix|último encurtamento Unix`). Sem pausa ativa, o 1º campo é a hora do último 429: ao subir, a
     /// escalada só zera 60 min depois dele.
     fn saved_pace(g: &mut Inner, now: Instant) -> String {
         let s = g.limiter.stats(now);
@@ -496,8 +496,10 @@ impl SteamClient {
             .anon_reads_until
             .filter(|t| *t > now)
             .map_or(0, |t| unix_in(t - now));
+        let adjusted =
+            unix_in(Duration::ZERO) - now.duration_since(g.limiter.last_adjust).as_secs() as i64;
         format!(
-            "{}|{}|{}|{anon}",
+            "{}|{}|{}|{anon}|{adjusted}",
             s.paused_until.or(last_429).unwrap_or(0),
             s.gap_ms,
             g.limiter.pause_len.as_millis()
@@ -513,6 +515,9 @@ impl SteamClient {
             return;
         };
         let anon = parts.next();
+        // shortcut: texto antigo (4 campos) encurta a partir do 1º campo; se foi salvo num 429 logado ou numa troca de
+        // conta, encurta duas vezes uma única vez (nunca abaixo do piso de 6 s). Some no próximo 429, que grava o 5º.
+        let adjusted = parts.next().and_then(|r| r.ok()).unwrap_or(until);
         let now = Instant::now();
         let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
         let g = &mut *self.inner.lock().unwrap();
@@ -522,17 +527,29 @@ impl SteamClient {
                 Some(now + Duration::from_secs(anon_left as u64).min(ANON_AFTER_429));
         }
         let l = &mut g.limiter;
-        l.gap = ms(gap).clamp(MIN_GAP, MAX_GAP);
-        let quiet = unix_in(Duration::ZERO) - until >= PAUSE_RESET_AFTER.as_secs() as i64;
+        // O tempo desde o último encurtamento salvo continua encurtando; sem isso cada reinício voltava ao
+        // intervalo de horas atrás e levava mais 2,5 h para sair dele (visto ao vivo em 04/11).
+        let since = (unix_in(Duration::ZERO) - adjusted).max(0) as u64;
+        let every = SHORTEN_EVERY.as_secs();
+        l.gap = ms(gap)
+            .mul_f64(SHORTEN_FACTOR.powi((since / every).min(100) as i32))
+            .clamp(MIN_GAP, MAX_GAP);
+        // o pedaço de 10 min já andado também conta para o próximo encurtamento
+        l.last_adjust = now
+            .checked_sub(Duration::from_secs(since % every))
+            .unwrap_or(now);
+        let quiet_for = (unix_in(Duration::ZERO) - until).max(0) as u64;
+        let quiet = quiet_for >= PAUSE_RESET_AFTER.as_secs();
         if let Some(Ok(p)) = pause.filter(|_| !quiet) {
             l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
             // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
             // shortcut: salvo durante uma pausa, conta do fim da pausa (mais cauteloso que o 429 real); gravar a
             // hora do 429 num 5º campo se a escalada longa atrapalhar.
-            let ago = (unix_in(Duration::ZERO) - until).max(0) as u64;
-            l.last_429 = Some(now.checked_sub(Duration::from_secs(ago)).unwrap_or(now));
+            l.last_429 = Some(
+                now.checked_sub(Duration::from_secs(quiet_for))
+                    .unwrap_or(now),
+            );
         }
-        l.last_adjust = now;
         let left = until - unix_in(Duration::ZERO);
         if left > 0 {
             l.paused_until = Some(now + Duration::from_secs(left as u64));
@@ -1052,6 +1069,25 @@ mod tests {
         let old = SteamClient::new().unwrap();
         old.restore_pace(&format!("{}|6000|600000", unix_in(Duration::ZERO) - 3700));
         assert_eq!(pause(&old), PAUSE_START);
+        // o tempo quieto depois do 429 salvo conta: 60 min = 6 encurtamentos, 3 h volta à base
+        old.restore_pace(&format!("{}|60000|60000", unix_in(Duration::ZERO) - 3600));
+        assert_eq!(old.stats().gap_ms, 22628); // 60000 × 0,85⁶
+        old.restore_pace(&format!(
+            "{}|60000|60000",
+            unix_in(Duration::ZERO) - 3 * 3600
+        ));
+        assert_eq!(old.stats().gap_ms, 6000);
+        // intervalo salvo já encurtado (sem 429 novo): conta do 5º campo, não do 429 antigo
+        let now_u = unix_in(Duration::ZERO);
+        old.restore_pace(&format!("{}|22628|60000|0|{}", now_u - 3600, now_u - 60));
+        assert_eq!(old.stats().gap_ms, 22628);
+        // e o texto salvo volta igual: salvar e retomar não encurta de novo
+        let again = SteamClient::new().unwrap();
+        again.restore_pace(&SteamClient::saved_pace(
+            &mut old.inner.lock().unwrap(),
+            Instant::now(),
+        ));
+        assert_eq!(again.stats().gap_ms, 22628);
         // e um 429 depois de 60 min quietos recomeça em 60 s, sem precisar de resposta boa no meio
         let mut l = Limiter::new(t0());
         l.on_429(t0(), None);
@@ -1226,7 +1262,7 @@ mod tests {
         assert_eq!((s.paused_until, s.gap_ms), (None, 100));
         // O prazo sem login sobrevive a um reinício.
         let v = saved.lock().unwrap().clone();
-        let anon: i64 = v.rsplit('|').next().unwrap().parse().unwrap();
+        let anon: i64 = v.split('|').nth(3).unwrap().parse().unwrap();
         assert!(anon > unix_in(Duration::from_secs(5 * 3600)), "{v}");
         let again = fast(&base);
         again.set_cookie(c.cookie());
@@ -1272,7 +1308,7 @@ mod tests {
         c.on_pace_change(move |v| *keep.lock().unwrap() = v);
         c.set_cookie(login("y"));
         assert!(
-            saved.lock().unwrap().ends_with("|0"),
+            saved.lock().unwrap().split('|').nth(3) == Some("0"),
             "o prazo zerado vai para o banco"
         );
         assert!(!anon(&c), "outra conta lê logada de novo");
