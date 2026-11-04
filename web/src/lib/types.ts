@@ -31,6 +31,10 @@ export type Opportunity = {
   margin_pct: number;
   safe: boolean;
   confidence: 'alta' | 'media' | 'baixa';
+  ev_profit_cents: number | null;
+  days_locked: number | null;
+  profit_per_day_cents: number | null;
+  risk: 'baixo' | 'medio' | 'alto' | null;
   evidence: string;
   seen_at: number;
 };

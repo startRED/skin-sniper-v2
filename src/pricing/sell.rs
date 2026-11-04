@@ -83,8 +83,44 @@ pub struct SellEstimate {
     pub mid: EstTier,
     pub high: EstTier,
     pub confidence: Confidence,
+    pub probabilities: [f64; 3],
+    pub volatility: Option<f64>,
+    pub risk: Risk,
     /// Frase curta em português para leigo.
     pub evidence: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Risk {
+    Low,
+    Medium,
+    High,
+}
+
+fn daily_volatility(points: &[PricePoint], now: i64) -> Option<f64> {
+    let mut days = std::collections::BTreeMap::<i64, Vec<(f64, f64)>>::new();
+    for p in points
+        .iter()
+        .filter(|p| p.ts > now - 30 * DAY && p.ts <= now && p.purchases > 0 && p.median_cents > 0)
+    {
+        days.entry(p.ts.div_euclid(DAY))
+            .or_default()
+            .push((p.median_cents as f64, f64::from(p.purchases)));
+    }
+    let medians: Vec<_> = days
+        .iter()
+        .filter_map(|(day, values)| weighted_quantile(values, 0.5).map(|v| (*day, v)))
+        .collect();
+    let returns: Vec<_> = medians
+        .windows(2)
+        .filter(|w| w[1].0 == w[0].0 + 1)
+        .map(|w| w[1].1 / w[0].1 - 1.0)
+        .collect();
+    if returns.len() < 2 {
+        return None;
+    }
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    Some((returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64).sqrt())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +299,7 @@ pub fn estimate(
     }
 
     let mut proven_rare = false;
+    let mut rare_samples = Vec::new();
     if let Some(r) = &rare {
         let m: Vec<(f64, f64)> = r
             .multiples
@@ -270,6 +307,7 @@ pub fn estimate(
             .filter(|x| x.is_finite() && **x > 0.0 && **x <= MAX_RARE_MULTIPLE)
             .map(|&x| (x, 1.0))
             .collect();
+        rare_samples = m.iter().map(|p| p.0).collect();
         if m.len() >= RARE_MIN_SALES {
             let (m25, m50, m75) = (
                 weighted_quantile(&m, 0.25).unwrap_or(1.0),
@@ -322,7 +360,40 @@ pub fn estimate(
             eta_hours(&window, sales_per_day, p)
         },
     };
+    let probability = |price: i64| {
+        let multiples: &[f64] = if proven_rare { &rare_samples } else { &[1.0] };
+        window
+            .iter()
+            .map(|(value, w)| {
+                w * multiples
+                    .iter()
+                    .filter(|m| value * factor * **m >= price as f64)
+                    .count() as f64
+                    / multiples.len() as f64
+            })
+            .sum::<f64>()
+            / weight(&window)
+    };
+    let volatility = daily_volatility(points, now);
+    let risk = match volatility {
+        Some(v)
+            if v <= 0.02
+                && sales_per_day >= 20.0
+                && (rare.is_none() || rare_samples.len() >= 8) =>
+        {
+            Risk::Low
+        }
+        Some(v)
+            if v <= 0.05 && sales_per_day >= 5.0 && (rare.is_none() || rare_samples.len() >= 3) =>
+        {
+            Risk::Medium
+        }
+        _ => Risk::High,
+    };
     Ok(SellEstimate {
+        probabilities: [probability(quick), probability(mid), probability(high)],
+        volatility,
+        risk,
         quick: tier(quick),
         mid: tier(mid),
         high: tier(high),
@@ -358,6 +429,9 @@ pub struct Sell {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Evaluation {
     pub sell: Sell,
+    pub ev_profit_cents: Option<i64>,
+    pub days_locked: Option<f64>,
+    pub profit_per_day_cents: Option<i64>,
     /// Lucro no preço médio ÷ preço de compra, em %.
     pub margin_pct: f64,
     /// Lucro > 0 mesmo no preço rápido.
@@ -396,7 +470,27 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         && sell.mid.profit_cents >= MIN_LIST_PROFIT_CENTS
         && margin_pct >= MIN_LIST_MARGIN_PCT;
     let notify = listable && safe && sell.mid.profit_cents >= notify_min_cents;
+    let total: f64 = est.probabilities.iter().sum();
+    let ev_profit_cents = est.volatility.filter(|_| total > 0.0).map(|vol| {
+        let expected = [
+            sell.quick.profit_cents,
+            sell.mid.profit_cents,
+            sell.high.profit_cents,
+        ]
+        .iter()
+        .zip(est.probabilities)
+        .map(|(profit, p)| *profit as f64 * p / total)
+        .sum::<f64>();
+        (expected - price_cents as f64 * (vol * 7.0_f64.sqrt()).min(1.0)).round() as i64
+    });
+    let days_locked = sell.mid.eta_hours.map(|hours| 7.0 + hours / 24.0);
+    let profit_per_day_cents = ev_profit_cents
+        .zip(days_locked)
+        .map(|(profit, days)| (profit as f64 / days).round() as i64);
     Evaluation {
+        ev_profit_cents,
+        days_locked,
+        profit_per_day_cents,
         sell,
         margin_pct,
         safe,
@@ -774,8 +868,52 @@ mod tests {
             mid: t(mid),
             high: t(high),
             confidence: Confidence::High,
+            probabilities: [1.0, 1.0, 1.0],
+            volatility: Some(0.0),
+            risk: Risk::Low,
             evidence: String::new(),
         }
+    }
+
+    #[test]
+    fn daily_score_handles_missing_data_and_risk() {
+        let flat_est = estimate(&flat(1000, 16), NOW, None, None).unwrap();
+        let ev = evaluate(500, &flat_est, 0);
+        assert_eq!(flat_est.volatility, Some(0.0));
+        assert_eq!(flat_est.risk, Risk::Low);
+        assert_eq!(ev.ev_profit_cents, Some(ev.sell.mid.profit_cents));
+        assert!(ev.days_locked.unwrap() > 7.0);
+        assert!(ev.profit_per_day_cents.unwrap() > 0);
+        let mut different = est(600, 900, 1200);
+        different.probabilities = [1.0, 0.5, 0.0];
+        let weighted = evaluate(500, &different, 0);
+        let expected = (weighted.sell.quick.profit_cents as f64 * 2.0
+            + weighted.sell.mid.profit_cents as f64)
+            / 3.0;
+        assert_eq!(weighted.ev_profit_cents, Some(expected.round() as i64));
+        different.volatility = Some(1.0);
+        assert_eq!(
+            evaluate(500, &different, 0).ev_profit_cents,
+            Some(expected.round() as i64 - 500)
+        );
+        different.probabilities = [0.0; 3];
+        assert_eq!(evaluate(500, &different, 0).ev_profit_cents, None);
+        let sparse = estimate(&flat(1000, 16)[..1], NOW, None, None).unwrap();
+        assert_eq!(sparse.volatility, None);
+        assert_eq!(evaluate(500, &sparse, 0).ev_profit_cents, None);
+        let rare = estimate(&flat(1000, 16), NOW, None, Some(rare(&[2.0; 3]))).unwrap();
+        assert_eq!(rare.risk, Risk::Medium);
+        assert_eq!(evaluate(500, &rare, 0).profit_per_day_cents, None);
+        let mut volatile = flat(1000, 16);
+        for p in &mut volatile {
+            if p.ts.div_euclid(DAY) % 2 == 0 {
+                p.median_cents = 2000;
+            }
+        }
+        assert_eq!(
+            estimate(&volatile, NOW, None, None).unwrap().risk,
+            Risk::High
+        );
     }
 
     #[test]
