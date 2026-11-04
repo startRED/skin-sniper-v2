@@ -7,7 +7,8 @@
 
   const modes = { barato: 'Barato', seed: 'Seed', float: 'Float' } as const;
   type Row = WatchRow & { modes: WatchRow[] };
-  // Uma linha por skin (e grupo raro): os modos viram etiquetas; vale o menor anúncio e a consulta mais recente.
+  // Uma linha por skin (e grupo raro): os modos viram etiquetas. Menor anúncio e "conferido" vêm da mesma
+  // consulta (a do menor anúncio; sem nenhum, a mais recente), para não juntar preço velho com horário novo.
   const rows = $derived.by(() => {
     const by = new Map<string, Row>();
     for (const w of app.watch) {
@@ -15,8 +16,9 @@
       const r = by.get(key);
       if (!r) { by.set(key, { ...w, modes: [w] }); continue; }
       if (!r.modes.some((m) => m.mode === w.mode)) r.modes.push(w);
-      if (w.floor_cents != null && (r.floor_cents == null || w.floor_cents < r.floor_cents)) r.floor_cents = w.floor_cents;
-      if ((w.last_checked_at ?? 0) > (r.last_checked_at ?? 0)) r.last_checked_at = w.last_checked_at;
+      const cheaper = w.floor_cents != null && (r.floor_cents == null || w.floor_cents < r.floor_cents);
+      const newer = r.floor_cents == null && w.floor_cents == null && (w.last_checked_at ?? 0) > (r.last_checked_at ?? 0);
+      if (cheaper || newer) { r.floor_cents = w.floor_cents; r.last_checked_at = w.last_checked_at; }
       if (w.score > r.score) { r.score = w.score; r.reason = w.reason; }
     }
     return [...by.values()];
