@@ -390,6 +390,38 @@ async fn seen_listing_is_reevaluated_when_history_changes() {
 }
 
 #[tokio::test]
+async fn hourly_listings_include_above_balance_without_counting_repeats() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    h.set_saldo(0, SaldoSource::Manual);
+    let task = Task {
+        id: "d:x".into(),
+        name: MOON.into(),
+        code: "G1".into(),
+        wear: None,
+        seeds: vec![],
+        score: 1.0,
+    };
+    let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let expected = page.listings.iter().filter(|l| l.name == MOON).count() as i64;
+    assert!(expected > 0);
+    detect::process(&h, &task, &page).await.unwrap();
+    detect::process(&h, &task, &page).await.unwrap();
+    let (listings, opportunities): (i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT sum(listings), sum(opportunities) FROM hourly_activity",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!((listings, opportunities), (expected, 0));
+}
+
+#[tokio::test]
 async fn empty_pages_counter_saturates() {
     let (base, _bodies) = serve().await;
     let (db, _dir) = temp_db();

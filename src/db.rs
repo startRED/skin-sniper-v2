@@ -46,6 +46,9 @@ const MIGRATIONS: &[&str] = &[
     "#,
     r#"
     CREATE TABLE hourly_activity (hour_utc INTEGER PRIMARY KEY, listings INTEGER NOT NULL DEFAULT 0, opportunities INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE activity_seen (listing_id TEXT PRIMARY KEY, last_seen INTEGER NOT NULL);
+    CREATE INDEX activity_seen_last ON activity_seen(last_seen);
+    INSERT INTO activity_seen(listing_id, last_seen) SELECT listing_id, last_seen FROM listings_seen;
     "#,
 ];
 
@@ -120,6 +123,10 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
     conn.execute(
         "DELETE FROM hourly_activity WHERE hour_utc < ?1",
         [(now - 30 * DAY).div_euclid(3600)],
+    )?;
+    conn.execute(
+        "DELETE FROM activity_seen WHERE last_seen < ?1",
+        [now - 3 * DAY],
     )?;
     conn.execute_batch("PRAGMA incremental_vacuum;")?;
     Ok(r)
@@ -210,6 +217,28 @@ mod tests {
     }
 
     #[test]
+    fn migration_preserves_seen_listings_for_activity() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.execute(
+            "INSERT INTO listings_seen VALUES ('existing', 'x', 100, NULL, NULL, 1, 2)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        migrate(&mut conn).unwrap();
+        let last: i64 = conn
+            .query_row(
+                "SELECT last_seen FROM activity_seen WHERE listing_id = 'existing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(last, 2);
+    }
+
+    #[test]
     fn retention_drops_only_old_rows() {
         let (db, _dir) = temp_db();
         let conn = db.0.lock().unwrap();
@@ -246,6 +275,13 @@ mod tests {
             [(now - 29 * DAY).div_euclid(3600)],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO activity_seen VALUES ('old', ?1)",
+            [now - 4 * DAY],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO activity_seen VALUES ('new', ?1)", [now - DAY])
+            .unwrap();
         let r = retain(&conn, now).unwrap();
         assert_eq!(
             r,
@@ -263,5 +299,9 @@ mod tests {
             .query_row("SELECT count(*) FROM hourly_activity", [], |r| r.get(0))
             .unwrap();
         assert_eq!(activity, 1);
+        let seen: i64 = conn
+            .query_row("SELECT count(*) FROM activity_seen", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen, 1);
     }
 }

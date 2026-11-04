@@ -168,8 +168,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   erro absoluto e `bias_pct` a média do erro com sinal, ambos `(realizado − médio previsto) / médio previsto`.
   Agrupa pelo nome sem o desgaste e pelo tipo; compras antigas sem tipo nem oportunidade correspondente ficam
   fora da calibração. Horários somam os últimos 30 dias por hora de São Paulo, inclusive horário de verão:
-  anúncios são os novos que couberam no saldo e foram avaliados; oportunidades são novas entradas na lista.
-  Os registros começam na instalação desta versão; não representam todo o mercado nem alteram a agenda.
+  anúncios são os novos vistos nas páginas consultadas, mesmo acima do saldo; oportunidades são novas entradas
+  na lista. IDs sem observação há 3 dias são esquecidos e podem ser contados de novo se reaparecerem. Os registros
+  começam na instalação desta versão; não representam todo o mercado nem alteram a agenda.
 
 ## Compra
 
