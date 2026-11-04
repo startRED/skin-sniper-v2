@@ -1,0 +1,58 @@
+// Contrato da API (docs/projeto.md, "Contrato da API"). Dinheiro em centavos BRL; datas em segundos Unix.
+export type KeyStatus = { set: boolean; ok: boolean | null; detail: string | null };
+export type State = {
+  saldo_cents: number;
+  saldo_source: 'steam' | 'manual' | 'none';
+  hunt: {
+    watching: number;
+    queries_per_min: number;
+    last_query_at: number | null;
+    paused_until: number | null;
+    message: string | null;
+  };
+  combo: { ids: string[]; cost_cents: number; profit_cents: number };
+  keys: { steam: KeyStatus; csfloat: KeyStatus; telegram: KeyStatus };
+};
+export type Tier = { price_cents: number; net_cents: number; profit_cents: number; eta_hours: number | null };
+export type Sell = { high: Tier; mid: Tier; quick: Tier };
+export type Opportunity = {
+  id: string;
+  name: string;
+  icon_url: string;
+  steam_url: string;
+  inspect_url: string | null;
+  wear: string | null;
+  float: number | null;
+  seed: number | null;
+  group: string | null;
+  kind: 'desconto' | 'raro';
+  price_cents: number;
+  sell: Sell;
+  margin_pct: number;
+  safe: boolean;
+  confidence: 'alta' | 'media' | 'baixa';
+  evidence: string;
+  seen_at: number;
+};
+export type Purchase = {
+  id: string;
+  name: string;
+  icon_url: string;
+  price_cents: number;
+  status: 'pending' | 'need_confirmation' | 'bought' | 'failed';
+  message: string | null;
+  bought_at: number | null;
+  tradable_at: number | null;
+  sell: Sell;
+};
+export type History = { points: [number, number, number][]; sell: Sell };
+export type Settings = {
+  steam_login_secure: string | null;
+  csfloat_key: string | null;
+  telegram_token: string | null;
+  telegram_chat_id: string | null;
+  panel_url: string | null;
+  sound: boolean;
+  notify_min_profit_cents: number;
+};
+export type SettingsInput = { [K in keyof Settings]: Settings[K] | null };
