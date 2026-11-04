@@ -123,7 +123,9 @@ function watchRows(): WatchRow[] {
     return {
       name: `${name} (${wear})`, icon_url: icon(name, i), floor_cents: i === 5 ? null : floor,
       max_buy_cents: kind === 'raro' ? null : g == null ? -1 : floor - g,
-      sales_per_day: perDay + 0.4, kind, group, last_checked_at: i === 5 ? null : nowS() - 8 - i * 23
+      sales_per_day: perDay + 0.4, kind, group, last_checked_at: i === 5 ? null : nowS() - 8 - i * 23,
+      mode: kind === 'raro' ? 'seed' : i % 3 === 0 ? 'float' : 'barato',
+      score: i % 3 === 0 ? 1.2 : 0, reason: i % 3 === 0 ? 'quase deu lucro 3 vezes' : 'testando alvo novo'
     };
   }).sort((a, b) => dist(a) - dist(b));
 }

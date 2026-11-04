@@ -10,9 +10,8 @@
     const current = rows();
     if (!daySort) return current;
     return current.sort((a, b) => {
-      if (a.profit_per_day_cents == null) return b.profit_per_day_cents == null ? b.seen_at - a.seen_at : 1;
-      if (b.profit_per_day_cents == null) return -1;
-      return (daySort === 'desc' ? -1 : 1) * (a.profit_per_day_cents - b.profit_per_day_cents) || b.seen_at - a.seen_at;
+      const value = (o: Opportunity) => o.profit_per_day_cents ?? o.sell.mid.profit_cents / 7;
+      return (daySort === 'desc' ? -1 : 1) * (value(a) - value(b)) || b.seen_at - a.seen_at;
     });
   });
   const inCombo = $derived(new Set(app.highlight ? (app.state?.combo.ids ?? []) : []));
@@ -41,7 +40,7 @@
   {#if showProfit}<small class={t.profit_cents > 0 ? 'up' : 'down'}>{signed(t.profit_cents)}</small>{/if}
 {/snippet}
 
-<p class="day-hint">Por dia: lucro estimado dividido pelo tempo até vender, incluindo os 7 dias de trava.</p>
+<p class="day-hint">Por dia: lucro estimado dividido pelo tempo até vender, incluindo os 7 dias de trava. Sem esse dado, a ordem usa o lucro médio dividido por 7, apenas para comparação.</p>
 <div class="table" role="table" aria-label="Skins com lucro">
   <div class="head grid" role="row">
     <div class="h hide" role="columnheader">Skin</div>

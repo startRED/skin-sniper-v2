@@ -6,6 +6,7 @@
   let { collapsed = false }: { collapsed?: boolean } = $props();
 
   const n = $derived(app.watch.length);
+  const modes = { barato: 'Barato', seed: 'Seed', float: 'Float' } as const;
   // Quanto o menor anúncio precisa cair para dar lucro; null sem os dois números (max_buy ≤ 0 = nenhum preço dá lucro).
   const gap = (w: WatchRow) =>
     w.floor_cents != null && w.max_buy_cents != null && w.max_buy_cents > 0 ? w.floor_cents - w.max_buy_cents : null;
@@ -28,7 +29,9 @@
           <img src={w.icon_url} alt="" width="40" height="40" loading="lazy" />
           <span class="names">
             <span class="nm">{w.name}</span>
+            <span class="pill mute" title="{w.score.toFixed(2)} centavos de lucro esperado por consulta">{modes[w.mode] ?? w.mode}</span>
             {#if w.group}<span class="pill {w.kind === 'raro' ? 'warn' : 'mute'}">{w.group}</span>{/if}
+            <small class="reason">{w.reason}</small>
           </span>
         </div>
         <div class="c" role="cell" data-l="Menor anúncio"><b>{w.floor_cents != null ? money(w.floor_cents) : '—'}</b></div>
@@ -62,7 +65,7 @@
 
 <style>
   h2 { font-size: 15px; }
-  section { margin-top: 20px; }
+  section { margin-top: 12px; }
   .sub { margin: 2px 0 8px; }
   .fold { background: var(--panel); border-radius: var(--radius); margin-top: 12px; }
   summary { cursor: pointer; padding: 12px 16px; color: var(--muted); }
@@ -80,6 +83,7 @@
   .skin img { width: 40px; height: 40px; border-radius: 6px; background: var(--panel-2); object-fit: contain; flex: none; }
   .names { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; min-width: 0; }
   .nm { font-weight: 600; }
+  .reason { flex-basis: 100%; color: var(--muted); font-size: 12px; }
 
   @media (max-width: 899px) {
     .head { display: none; }
