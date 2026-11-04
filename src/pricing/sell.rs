@@ -438,7 +438,7 @@ pub struct Evaluation {
     pub safe: bool,
     /// Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 %.
     pub listable: bool,
-    /// Vale avisar: entra na lista, é `safe` e o lucro no `mid` chega ao mínimo do usuário.
+    /// Vale avisar: entra na lista, é `safe`, tem lucro esperado positivo e `mid` chega ao mínimo.
     pub notify: bool,
 }
 
@@ -469,7 +469,6 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
     let listable = valid
         && sell.mid.profit_cents >= MIN_LIST_PROFIT_CENTS
         && margin_pct >= MIN_LIST_MARGIN_PCT;
-    let notify = listable && safe && sell.mid.profit_cents >= notify_min_cents;
     let total: f64 = est.probabilities.iter().sum();
     let ev_profit_cents = est.volatility.filter(|_| total > 0.0).map(|vol| {
         let expected = [
@@ -483,6 +482,10 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         .sum::<f64>();
         (expected - price_cents as f64 * (vol * 7.0_f64.sqrt()).min(1.0)).round() as i64
     });
+    let notify = listable
+        && safe
+        && sell.mid.profit_cents >= notify_min_cents
+        && ev_profit_cents.is_some_and(|profit| profit > 0);
     let days_locked = sell.mid.eta_hours.map(|hours| 7.0 + hours / 24.0);
     let profit_per_day_cents = ev_profit_cents
         .zip(days_locked)
@@ -914,6 +917,21 @@ mod tests {
             estimate(&volatile, NOW, None, None).unwrap().risk,
             Risk::High
         );
+    }
+
+    #[test]
+    fn risk_adjusted_negative_profit_does_not_notify() {
+        let quick = crate::pricing::fees::buyer_pays(10_100);
+        let mid = crate::pricing::fees::buyer_pays(10_500);
+        let mut estimate = est(quick, mid, mid);
+        estimate.probabilities = [0.5, 0.5, 0.0];
+        estimate.volatility = Some(0.05);
+        let ev = evaluate(10_000, &estimate, 100);
+        assert_eq!(ev.sell.mid.profit_cents, 500);
+        assert_eq!(ev.ev_profit_cents, Some(-1023));
+        assert!(ev.listable && ev.safe && !ev.notify);
+        estimate.volatility = None;
+        assert!(!evaluate(10_000, &estimate, 100).notify);
     }
 
     #[test]

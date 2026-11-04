@@ -189,17 +189,20 @@ impl Hunt {
         Ok(())
     }
 
-    /// Melhor combinação das oportunidades ativas que cabe no saldo (lucro no preço médio).
+    /// Melhor combinação das oportunidades ativas que cabe no saldo (lucro esperado ajustado ao risco).
     pub(crate) fn recompute_combo(&self) {
         let mut s = self.lock();
         let cands: Vec<Candidate> = s
             .active
             .values()
-            .map(|a| Candidate {
-                id: a.opp.id.clone(),
-                name: a.opp.name.clone(),
-                cost_cents: a.opp.price_cents,
-                profit_cents: a.opp.sell.mid.profit_cents,
+            .filter_map(|a| {
+                let profit_cents = a.opp.ev_profit_cents.filter(|profit| *profit > 0)?;
+                Some(Candidate {
+                    id: a.opp.id.clone(),
+                    name: a.opp.name.clone(),
+                    cost_cents: a.opp.price_cents,
+                    profit_cents,
+                })
             })
             .collect();
         let c = combo::best_combo(&cands, s.saldo);

@@ -191,13 +191,14 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 - Risco baixo: volatilidade ≤ 2 % ao dia, ≥ 20 vendas/dia e, em raro, n ≥ 8. Médio: volatilidade ≤ 5 %,
   ≥ 5 vendas/dia e, em raro, n ≥ 3. Alto nos demais casos, inclusive sem volatilidade suficiente. Esses
   limites são hipóteses para priorização, não calibração com vendas reais.
-- Combinação: se a de maior lucro tiver uma única skin, prefere duas ou três de nomes distintos quando
+- Combinação: usa lucro esperado ajustado ao risco positivo; sem estimativa ou com resultado ≤ 0, o item não entra. Se a de maior lucro tiver uma única skin, prefere duas ou três de nomes distintos quando
   o lucro delas alcançar pelo menos 90 % do ótimo e couber no saldo.
-- Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 %. `safe` quando lucro no `quick` > 0.
-  Aviso no Telegram/som: `safe` e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00).
+- Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 % (o risco aparece na linha; a lista não esconde por ele).
+  `safe` quando lucro no `quick` > 0. Combinação e aviso exigem lucro esperado ajustado ao risco positivo.
+  Aviso no Telegram/som: lucro esperado ajustado ao risco positivo, `safe` e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00).
 - Calibração: cada compra grava os três preços previstos; quando o Erick vender, o realizado entra numa
   tabela para conferir o erro (v1 só grava; o ajuste fino vem depois com dados).
-- Venda manual aceita preço positivo em centavos, depois da liberação, e permite corrigir o valor. O valor é o
+- Venda manual aceita preço entre 1 e 10.000.000 centavos, depois da liberação, e permite corrigir o valor. O valor é o
   preço pago pelo comprador, incluindo taxas, igual aos três preços previstos. `mean_error_pct` é a média do
   erro absoluto e `bias_pct` a média do erro com sinal, ambos `(realizado − médio previsto) / médio previsto`.
   Agrupa pelo nome sem o desgaste e pelo tipo; compras antigas sem tipo nem oportunidade correspondente ficam

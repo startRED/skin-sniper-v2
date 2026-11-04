@@ -607,3 +607,80 @@ async fn learned_scores_survive_a_restart_and_show_in_the_watch_row() {
     assert_eq!(why, row.reason);
     assert!(score > 0.0);
 }
+
+#[tokio::test]
+async fn combo_uses_positive_expected_profit_including_rare_without_daily_score() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let found = run_until_two(&h, &mut rx).await;
+    let mut high_mid = found[0].clone();
+    high_mid.id = "high_mid".into();
+    high_mid.price_cents = 10_000;
+    high_mid.sell.mid.profit_cents = 3000;
+    high_mid.ev_profit_cents = Some(-1023);
+    let mut rare = found[1].clone();
+    rare.id = "rare".into();
+    rare.price_cents = 10_000;
+    rare.kind = Kind::Raro;
+    rare.profit_per_day_cents = None;
+    rare.ev_profit_cents = Some(100);
+    let mut better = rare.clone();
+    better.id = "better".into();
+    better.ev_profit_cents = Some(200);
+    better.sell.mid.profit_cents = 1;
+    {
+        let mut s = h.lock();
+        s.active.clear();
+        for opp in [high_mid.clone(), rare.clone(), better.clone()] {
+            s.active.insert(
+                opp.id.clone(),
+                Active {
+                    opp,
+                    task: "test".into(),
+                },
+            );
+        }
+    }
+    h.set_saldo(10_000, SaldoSource::Manual);
+    h.recompute_combo();
+    assert_eq!(h.state().combo.ids, vec!["better"]);
+    assert_eq!(h.state().combo.profit_cents, 200);
+    {
+        let mut s = h.lock();
+        s.active.remove("better");
+    }
+    h.recompute_combo();
+    assert_eq!(h.state().combo.ids, vec!["rare"]);
+    {
+        let mut s = h.lock();
+        s.active.get_mut("rare").unwrap().opp.ev_profit_cents = None;
+    }
+    h.recompute_combo();
+    assert!(h.state().combo.ids.is_empty());
+}
+
+#[tokio::test]
+async fn activity_table_failure_does_not_stop_detection() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    db.call(|c| c.execute("DROP TABLE hourly_activity", []).map(|_| ()))
+        .await
+        .unwrap();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    let found = run_until_two(&h, &mut rx).await;
+    assert_eq!(found.len(), 2);
+    let count: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM opportunities WHERE gone_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+}
