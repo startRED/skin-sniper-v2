@@ -332,7 +332,7 @@ async fn evaluate_one(
         mid_cents: ev.sell.mid.net_cents - l.price_cents,
         quick_cents: ev.sell.quick.net_cents - l.price_cents,
     });
-    if !ev.listable || !ev.ev_profit_cents.is_some_and(|profit| profit > 0) {
+    if !ev.listable {
         return Ok(Judged { found: None, near });
     }
     let opp = Opportunity {

@@ -193,8 +193,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   limites são hipóteses para priorização, não calibração com vendas reais.
 - Combinação: usa lucro esperado ajustado ao risco positivo; sem estimativa ou com resultado ≤ 0, o item não entra. Se a de maior lucro tiver uma única skin, prefere duas ou três de nomes distintos quando
   o lucro delas alcançar pelo menos 90 % do ótimo e couber no saldo.
-- Entra na lista: lucro esperado ajustado ao risco positivo, lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 %. Sem
-  dados para calcular o lucro esperado, o anúncio não entra. `safe` quando lucro no `quick` > 0.
+- Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 % (o risco aparece na linha; a lista não esconde por ele).
+  `safe` quando lucro no `quick` > 0. Combinação e aviso exigem lucro esperado ajustado ao risco positivo.
   Aviso no Telegram/som: lucro esperado ajustado ao risco positivo, `safe` e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00).
 - Calibração: cada compra grava os três preços previstos; quando o Erick vender, o realizado entra numa
   tabela para conferir o erro (v1 só grava; o ajuste fino vem depois com dados).
