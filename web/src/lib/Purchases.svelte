@@ -1,7 +1,35 @@
 <script lang="ts">
   import { app, isUncertain } from './store.svelte';
-  import { clock, day, money, until } from './format';
+  import { clock, day, money, until, parseBRL, pct } from './format';
+  import { api } from './api';
   import type { Purchase } from './types';
+
+  let amounts = $state<Record<string, string>>({});
+  let errors = $state<Record<string, string>>({});
+  let saving = $state<Record<string, boolean>>({});
+
+  async function save(p: Purchase) {
+    const cents = parseBRL(amounts[p.id] ?? '');
+    if (cents === null || !Number.isSafeInteger(cents) || cents <= 0) {
+      errors[p.id] = 'Informe um valor válido, maior que zero.';
+      return;
+    }
+    saving[p.id] = true;
+    errors[p.id] = '';
+    try {
+      const updated = await api<Purchase>(`/api/purchases/${encodeURIComponent(p.id)}/sold`, 'POST', { sold_cents: cents });
+      const i = app.purchases.findIndex((item) => item.id === p.id);
+      if (i >= 0) app.purchases[i] = updated;
+    } catch (e) {
+      errors[p.id] = e instanceof Error ? e.message : 'Não consegui salvar a venda.';
+    } finally { saving[p.id] = false; }
+  }
+
+  function comparison(sold: number, predicted: number): string {
+    if (predicted <= 0) return 'sem previsão';
+    const difference = (sold - predicted) * 100 / predicted;
+    return Math.abs(difference) < 0.05 ? 'igual' : `${pct(Math.abs(difference))} ${difference > 0 ? 'acima' : 'abaixo'}`;
+  }
 
   const STATUS: Record<Purchase['status'], [string, string]> = {
     pending: ['mute', 'Comprando…'],
@@ -41,6 +69,21 @@
             <div><dt>Médio</dt><dd>{money(p.sell.mid.price_cents)}</dd></div>
             <div><dt>Alto</dt><dd>{money(p.sell.high.price_cents)}</dd></div>
           </dl>
+          {#if p.status === 'bought' && p.tradable_at && p.tradable_at <= app.now}
+            <div class="sold">
+              {#if p.sold_cents != null}
+                <span>Vendeu por {money(p.sold_cents)}</span>
+                <span class="small muted">Rápido: {comparison(p.sold_cents, p.sell.quick.price_cents)} · Médio: {comparison(p.sold_cents, p.sell.mid.price_cents)} · Alto: {comparison(p.sold_cents, p.sell.high.price_cents)}</span>
+              {/if}
+              <form onsubmit={(event) => { event.preventDefault(); save(p); }}>
+                <label for={'sold-' + p.id}>Vendi por R$</label>
+                <input id={'sold-' + p.id} inputmode="decimal" placeholder="0,00" bind:value={amounts[p.id]} />
+                <button type="submit" disabled={saving[p.id]}>{saving[p.id] ? 'Salvando…' : 'Salvar venda'}</button>
+              </form>
+              <span class="small muted">Informe o preço que o comprador pagou, com as taxas.</span>
+              {#if errors[p.id]}<span class="small" role="alert">{errors[p.id]}</span>{/if}
+            </div>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -62,12 +105,15 @@
   .amber { color: var(--amber); }
   .sell { display: flex; gap: 20px; margin: 0; }
   .sell div { display: flex; flex-direction: column; }
+  .sold { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 4px; }
+  .sold form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .sold input { width: 100px; }
   dt { color: var(--faint); font-size: 12px; }
   dd { margin: 0; font-weight: 650; }
   .empty { color: var(--muted); padding: 18px 16px; background: var(--panel); border-radius: var(--radius); max-width: 70ch; }
   @media (max-width: 899px) {
     li { grid-template-columns: 40px 1fr; row-gap: 8px; }
-    .st, .sell { grid-column: 1 / -1; }
+    .st, .sell, .sold { grid-column: 1 / -1; }
     .sell { justify-content: space-between; }
   }
 </style>

@@ -43,6 +43,8 @@ export type Purchase = {
   message: string | null;
   bought_at: number | null;
   tradable_at: number | null;
+  kind?: 'desconto' | 'raro' | null;
+  sold_cents?: number | null;
   sell: Sell;
 };
 export type History = { points: [number, number, number][]; sell: Sell };

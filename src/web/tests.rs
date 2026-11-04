@@ -52,6 +52,108 @@ fn opp_json(id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn manual_sales_and_calibration_use_saved_predictions() {
+    let s = start().await;
+    let mut p = opp_json("42");
+    p["status"] = json!("bought");
+    p["bought_at"] = json!(1);
+    p["tradable_at"] = json!(2);
+    p["message"] = Value::Null;
+    let p = p.to_string();
+    s.app
+        .db
+        .call(move |c| {
+            c.execute("INSERT INTO purchases VALUES ('42', ?1, 1)", [&p])?;
+            let hour = crate::db::now_unix().div_euclid(3600);
+            c.execute("INSERT INTO hourly_activity VALUES (?1, 3, 1)", [hour])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for (id, amount, status) in [
+        ("missing", 130, StatusCode::NOT_FOUND),
+        ("42", 0, StatusCode::BAD_REQUEST),
+        ("42", 132, StatusCode::OK),
+        ("42", 144, StatusCode::OK),
+    ] {
+        let r = s
+            .send(
+                "POST".parse().unwrap(),
+                &format!("/api/purchases/{id}/sold"),
+                json!({"sold_cents": amount}),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), status);
+    }
+    let purchases: Value = s
+        .get("/api/purchases")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(purchases[0]["sold_cents"], 144);
+    let result: Value = s
+        .get("/api/calibration")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(result["families"][0]["family"], "AK-47 | Redline");
+    assert_eq!(result["families"][0]["kind"], "desconto");
+    assert_eq!(result["families"][0]["n"], 1);
+    assert_eq!(result["families"][0]["mean_error_pct"], 20.0);
+    assert_eq!(result["families"][0]["bias_pct"], 20.0);
+    assert_eq!(
+        result["hours"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["listings"].as_i64().unwrap())
+            .sum::<i64>(),
+        3
+    );
+    let count: i64 = s
+        .app
+        .db
+        .call(|c| c.query_row("SELECT count(*) FROM outcomes", [], |r| r.get(0)))
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn sale_requires_confirmed_unlocked_purchase() {
+    let s = start().await;
+    let mut p = opp_json("42");
+    p["status"] = json!("bought");
+    p["bought_at"] = json!(1);
+    p["tradable_at"] = json!(crate::db::now_unix() + 1000);
+    p["message"] = Value::Null;
+    let p = p.to_string();
+    s.app
+        .db
+        .call(move |c| c.execute("INSERT INTO purchases VALUES ('42', ?1, 1)", [&p]))
+        .await
+        .unwrap();
+    let r = s
+        .send(
+            "POST".parse().unwrap(),
+            "/api/purchases/42/sold",
+            json!({"sold_cents": 100}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn host_and_content_type_guard() {
     let s = start().await;
     let r = s

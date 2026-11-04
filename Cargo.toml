@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 axum = "0.8"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.13", features = ["json", "form", "multipart", "query"] }

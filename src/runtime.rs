@@ -393,6 +393,8 @@ impl Runtime {
             bought_at: None,
             tradable_at: None,
             sell: opp.sell.clone(),
+            kind: Some(opp.kind),
+            sold_cents: None,
         };
         self.save_purchase(&p, now).await?;
 

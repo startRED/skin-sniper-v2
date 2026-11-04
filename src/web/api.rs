@@ -127,6 +127,10 @@ pub struct Purchase {
     pub bought_at: Option<i64>,
     pub tradable_at: Option<i64>,
     pub sell: Sell,
+    #[serde(default)]
+    pub kind: Option<Kind>,
+    #[serde(default)]
+    pub sold_cents: Option<i64>,
 }
 
 /// Resposta de `GET /api/opportunities/:id/history`.
@@ -341,15 +345,22 @@ pub async fn buy(
 }
 
 pub async fn list_purchases(AxState(app): AxState<AppState>) -> ApiResult<Vec<Purchase>> {
-    let rows = app
-        .db
-        .call(|c| {
-            c.prepare("SELECT json FROM purchases ORDER BY created_at DESC")?
-                .query_map([], |r| r.get::<_, String>(0))?
-                .collect()
-        })
-        .await?;
-    Ok(Json(parse_rows("compra", rows)))
+    let rows = app.db.call(|c| {
+        c.prepare("SELECT p.json, (SELECT sold_cents FROM outcomes WHERE purchase_id = p.id ORDER BY rowid DESC LIMIT 1) FROM purchases p ORDER BY p.created_at DESC")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    }).await?;
+    Ok(Json(
+        rows.into_iter()
+            .flat_map(|(json, sold)| {
+                let mut purchases: Vec<Purchase> = parse_rows("compra", vec![json]);
+                for p in &mut purchases {
+                    p.sold_cents = sold;
+                }
+                purchases
+            })
+            .collect(),
+    ))
 }
 
 pub async fn get_settings(AxState(app): AxState<AppState>) -> ApiResult<Settings> {

@@ -367,6 +367,19 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     let mut out = Outcome::default();
     let floor = relevant.iter().map(|l| l.price_cents).min();
     h.lock().floors.insert(task.floor_key(), (floor, now));
+    let ids: Vec<String> = relevant.iter().map(|l| l.listing_id.clone()).collect();
+    h.db.call(move |c| {
+        let tx = c.transaction()?;
+        for id in ids {
+            let is_new = tx.execute("INSERT OR IGNORE INTO activity_seen(listing_id, last_seen) VALUES (?1, ?2)", params![id, now])? == 1;
+            if is_new {
+                tx.execute("INSERT INTO hourly_activity(hour_utc, listings) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET listings = listings + 1", [now.div_euclid(3600)])?;
+            } else {
+                tx.execute("UPDATE activity_seen SET last_seen = ?2 WHERE listing_id = ?1", params![id, now])?;
+            }
+        }
+        tx.commit()
+    }).await?;
 
     // --- sumiu? só com página confiável; fora da primeira página o anúncio pode só ter sido empurrado
     let trust = {
@@ -559,12 +572,16 @@ async fn store_opportunity(
     );
     let at = opp.seen_at;
     h.db.call(move |c| {
-        c.execute(
+        let tx = c.transaction()?;
+        if fresh {
+            tx.execute("INSERT INTO hourly_activity(hour_utc, opportunities) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET opportunities = opportunities + 1", [at.div_euclid(3600)])?;
+        }
+        tx.execute(
             "INSERT OR REPLACE INTO opportunities(id, json, created_at, gone_at, task, listing_json)
              VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
             params![id, json, at, tid, lj],
-        )
-        .map(|_| ())
+        )?;
+        tx.commit()
     })
     .await?;
     {
