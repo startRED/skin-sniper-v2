@@ -157,7 +157,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      e no máximo 2000 linhas) e sobrevivem a reinício. Os parâmetros (12,5 %, meias-vidas, 15 %) são hipóteses de calibração, não medidas.
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 0,20 e 5 % depois da taxa
      (hoje ≈ R$ 1,45). Abaixo disso a taxa mínima de 1 + 1 centavo come o lucro. Os 30 % são hipótese, não medida.
-3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie. Um 429
+3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios ou histórico) não pausa: as leituras seguem sem login por 6 h. Um 429
    pausa 60 s (dobrando até 10 min) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até voltar a 6 s. O degrau da pausa só volta a 60 s após 30 min sem 429.
    Pausa e intervalo do último 429 ficam salvos (`steam_pace`) e valem depois de reiniciar. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar.

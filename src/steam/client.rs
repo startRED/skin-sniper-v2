@@ -37,6 +37,9 @@ const PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
 // O degrau da pausa só volta a 60 s depois de tanto tempo sem 429: uma resposta boa de outro
 // endpoint entre dois 429 não pode zerar a escalada.
 const PAUSE_RESET_AFTER: Duration = Duration::from_secs(30 * 60);
+// Leitura logada levou 429: anúncios e histórico vão sem login por este tempo. Em 04/11 o logado tomou 429
+// por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
+const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
 const BREAKER_THRESHOLD: u32 = 3;
 const BREAKER_OPEN_START: Duration = Duration::from_secs(30);
@@ -326,6 +329,8 @@ struct Inner {
     /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
     extra: Vec<(String, String)>,
     on_pace: Option<PaceHook>,
+    /// Até quando `action` lê sem login (depois de um 429 logado).
+    anon_reads_until: Option<Instant>,
 }
 
 pub struct SteamClient {
@@ -383,6 +388,7 @@ impl SteamClient {
                 cookie: None,
                 extra: Vec::new(),
                 on_pace: None,
+                anon_reads_until: None,
             }),
         })
     }
@@ -390,6 +396,12 @@ impl SteamClient {
     /// Troca (ou remove) o cookie em tempo de execução. Vale para as próximas requisições `auth`.
     pub fn set_cookie(&self, cookie: Option<Cookie>) {
         let mut g = self.inner.lock().unwrap();
+        // Outra conta: o prazo sem login era da anterior. Ao subir (sem cookie antes) o prazo salvo fica.
+        let login = |c: &Option<Cookie>| c.as_ref().map(|c| c.steam_login_secure.clone());
+        if g.cookie.is_some() && login(&g.cookie) != login(&cookie) {
+            g.anon_reads_until = None;
+            Self::notify_pace(&mut g, Instant::now()); // senão o prazo velho volta do banco ao reiniciar
+        }
         g.cookie = cookie;
         g.extra.clear();
     }
@@ -463,14 +475,32 @@ impl SteamClient {
         self.inner.lock().unwrap().limiter.stats(Instant::now())
     }
 
-    /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms`).
-    fn saved_pace(l: &mut Limiter, now: Instant) -> String {
-        let s = l.stats(now);
+    /// Avisa o gancho de ritmo ainda sob o lock: a ordem dos avisos é a ordem dos 429 (o gancho não pode
+    /// chamar o cliente).
+    fn notify_pace(g: &mut Inner, now: Instant) {
+        if let Some(f) = g.on_pace.clone() {
+            f(Self::saved_pace(g, now));
+        }
+    }
+
+    /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms|fim
+    /// das leituras sem login Unix`). Sem pausa ativa, o 1º campo é a hora do último 429: ao subir, a
+    /// escalada só zera 30 min depois dele.
+    fn saved_pace(g: &mut Inner, now: Instant) -> String {
+        let s = g.limiter.stats(now);
+        let last_429 = g
+            .limiter
+            .last_429
+            .map(|t| unix_in(Duration::ZERO) - now.duration_since(t).as_secs() as i64);
+        let anon = g
+            .anon_reads_until
+            .filter(|t| *t > now)
+            .map_or(0, |t| unix_in(t - now));
         format!(
-            "{}|{}|{}",
-            s.paused_until.unwrap_or(0),
+            "{}|{}|{}|{anon}",
+            s.paused_until.or(last_429).unwrap_or(0),
             s.gap_ms,
-            l.pause_len.as_millis()
+            g.limiter.pause_len.as_millis()
         )
     }
 
@@ -482,14 +512,25 @@ impl SteamClient {
         else {
             return;
         };
+        let anon = parts.next();
         let now = Instant::now();
         let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
-        let l = &mut self.inner.lock().unwrap().limiter;
+        let g = &mut *self.inner.lock().unwrap();
+        let anon_left = anon.and_then(|r| r.ok()).unwrap_or(0) - unix_in(Duration::ZERO);
+        if anon_left > 0 {
+            g.anon_reads_until =
+                Some(now + Duration::from_secs(anon_left as u64).min(ANON_AFTER_429));
+        }
+        let l = &mut g.limiter;
         l.gap = ms(gap).clamp(MIN_GAP, MAX_GAP);
         let quiet = unix_in(Duration::ZERO) - until >= PAUSE_RESET_AFTER.as_secs() as i64;
         if let Some(Ok(p)) = pause.filter(|_| !quiet) {
             l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
-            l.last_429 = Some(now); // a escalada segue valendo depois de subir
+            // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
+            // shortcut: salvo durante uma pausa, conta do fim da pausa (mais cauteloso que o 429 real); gravar a
+            // hora do 429 num 5º campo se a escalada longa atrapalhar.
+            let ago = (unix_in(Duration::ZERO) - until).max(0) as u64;
+            l.last_429 = Some(now.checked_sub(Duration::from_secs(ago)).unwrap_or(now));
         }
         l.last_adjust = now;
         let left = until - unix_in(Duration::ZERO);
@@ -498,7 +539,8 @@ impl SteamClient {
         }
     }
 
-    /// Chamado (fora do lock) a cada 429, de qualquer endpoint, com o texto para `restore_pace`.
+    /// Chamado (sob o lock do cliente) a cada 429 e ao trocar de conta, de qualquer endpoint, com o texto para `restore_pace` (o 4º
+    /// campo é o fim das leituras sem login).
     pub fn on_pace_change(&self, f: impl Fn(String) + Send + Sync + 'static) {
         self.inner.lock().unwrap().on_pace = Some(Arc::new(f));
     }
@@ -522,7 +564,8 @@ impl SteamClient {
     }
 
     /// Consulta `GET /market/actions?q=<método>&qp=<json>` e devolve o campo `data`. Vai logado quando há
-    /// cookie, como a página do mercado aberta no navegador (pedido do Erick: ler o mercado logado).
+    /// cookie, como a página do mercado aberta no navegador (pedido do Erick: ler o mercado logado), menos
+    /// nas 6 h depois de um 429 logado (`ANON_AFTER_429`).
     pub async fn action(&self, ep: Endpoint, method: &str, qp: &Value) -> Result<Value> {
         for attempt in 0..2 {
             let req = self
@@ -637,7 +680,10 @@ impl SteamClient {
         let mut sent_by: Option<String> = None;
         if auth {
             let g = self.inner.lock().unwrap();
-            if let Some(c) = &g.cookie {
+            // Decidido depois da vaga: um 429 logado de outra consulta durante a espera já vale para esta.
+            let anon = matches!(ep, Endpoint::Listings | Endpoint::History)
+                && g.anon_reads_until.is_some_and(|t| Instant::now() < t);
+            if let Some(c) = g.cookie.as_ref().filter(|_| !anon) {
                 sent_by = Some(c.steam_login_secure.clone());
                 let mut h = c.header();
                 for (k, v) in &g.extra {
@@ -683,20 +729,28 @@ impl SteamClient {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(Duration::from_secs);
             let mut g = self.inner.lock().unwrap();
+            if sent_by.is_some() && matches!(ep, Endpoint::Listings | Endpoint::History) {
+                // A Steam segurou a conta, não o IP: sem pausa, a próxima leitura (no ritmo) vai sem login.
+                // 429 de uma sessão que já saiu não marca a conta nova.
+                let current = g.cookie.as_ref().map(|c| c.steam_login_secure.as_str());
+                if current == sent_by.as_deref() {
+                    g.anon_reads_until = Some(now + ANON_AFTER_429);
+                    Self::notify_pace(&mut g, now);
+                }
+                drop(g);
+                tracing::warn!(endpoint = ?ep, "Steam: 429 logado; leituras seguem sem login por 6 h");
+                return Err(Error::RateLimited {
+                    until: unix_in(Duration::ZERO),
+                });
+            }
             g.limiter.on_429(now, retry);
             let until = g
                 .limiter
                 .stats(now)
                 .paused_until
                 .unwrap_or_else(|| unix_in(PAUSE_START));
-            let saved = g
-                .on_pace
-                .clone()
-                .map(|f| (f, Self::saved_pace(&mut g.limiter, now)));
+            Self::notify_pace(&mut g, now);
             drop(g);
-            if let Some((f, v)) = saved {
-                f(v);
-            }
             // Qual consulta levou o 429 (e se ia logada): sem isso não dá para saber o que a Steam segura.
             tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(), "Steam: 429");
             return Err(Error::RateLimited { until });
@@ -1138,9 +1192,11 @@ mod tests {
                 "/market/actions",
                 get(|h: axum::http::HeaderMap, q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
                     assert_eq!(h.get("x-valve-request-type").unwrap(), "queryAction");
-                    assert!(h.get("cookie").unwrap().to_str().unwrap().contains("steamLoginSecure=x"), "leitura vai logada");
-                    if q.get("q").map(String::as_str) == Some("Limit") {
-                        return (AxStatus::TOO_MANY_REQUESTS, String::new());
+                    let logged = h.get("cookie").is_some_and(|v| v.to_str().unwrap().contains("steamLoginSecure=x"));
+                    match q.get("q").map(String::as_str) {
+                        Some("Limit") => return (AxStatus::TOO_MANY_REQUESTS, String::new()),
+                        Some("Ok") => assert!(logged, "leitura vai logada"),
+                        _ => assert!(!logged, "depois do 429 logado, a leitura vai sem login"),
                     }
                     (AxStatus::OK, r#"{"data":{"ok":true},"metrics":{}}"#.to_string())
                 }),
@@ -1157,14 +1213,76 @@ mod tests {
             .unwrap();
         assert_eq!(d["ok"], true);
         assert!(c.stats().last_query_at.is_some());
+        let saved = Arc::new(Mutex::new(String::new()));
+        let keep = saved.clone();
+        c.on_pace_change(move |v| *keep.lock().unwrap() = v);
+        // 429 logado: sem pausa nem alongamento; a próxima vai sem login.
         let e = c
             .action(Endpoint::History, "Limit", &serde_json::json!([1]))
             .await
             .unwrap_err();
         assert!(matches!(e, Error::RateLimited { .. }));
         let s = c.stats();
+        assert_eq!((s.paused_until, s.gap_ms), (None, 100));
+        // O prazo sem login sobrevive a um reinício.
+        let v = saved.lock().unwrap().clone();
+        let anon: i64 = v.rsplit('|').next().unwrap().parse().unwrap();
+        assert!(anon > unix_in(Duration::from_secs(5 * 3600)), "{v}");
+        let again = fast(&base);
+        again.set_cookie(c.cookie());
+        again.restore_pace(&v);
+        again
+            .action(Endpoint::Listings, "Anon", &serde_json::json!([1]))
+            .await
+            .unwrap();
+        c.action(Endpoint::Listings, "Anon", &serde_json::json!([1]))
+            .await
+            .unwrap();
+        // 429 sem login: aí é o IP, e o limitador pausa.
+        let e = c
+            .action(Endpoint::Listings, "Limit", &serde_json::json!([1]))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::RateLimited { .. }));
+        let s = c.stats();
         assert!(s.paused_until.is_some());
         assert_eq!(s.gap_ms, 150);
+    }
+
+    #[test]
+    fn other_account_drops_anon_reads_and_saved_pace_keeps_last_429() {
+        let c = SteamClient::with_base("http://127.0.0.1:9").unwrap();
+        let login = |s: &str| {
+            Some(Cookie {
+                steam_login_secure: s.into(),
+                sessionid: None,
+            })
+        };
+        c.set_cookie(login("x"));
+        let anon = |c: &SteamClient| c.inner.lock().unwrap().anon_reads_until.is_some();
+        c.restore_pace(&format!(
+            "0|6000|60000|{}",
+            unix_in(Duration::from_secs(3600))
+        ));
+        assert!(anon(&c));
+        c.set_cookie(login("x"));
+        assert!(anon(&c), "mesma conta mantém o prazo");
+        let saved = Arc::new(Mutex::new(String::new()));
+        let keep = saved.clone();
+        c.on_pace_change(move |v| *keep.lock().unwrap() = v);
+        c.set_cookie(login("y"));
+        assert!(
+            saved.lock().unwrap().ends_with("|0"),
+            "o prazo zerado vai para o banco"
+        );
+        assert!(!anon(&c), "outra conta lê logada de novo");
+        // Pausa vencida: o 1º campo salvo é a hora do último 429, não zero.
+        let mut g = c.inner.lock().unwrap();
+        let now = Instant::now();
+        g.limiter.last_429 = Some(now - Duration::from_secs(600));
+        let v = SteamClient::saved_pace(&mut g, now);
+        let first: i64 = v.split('|').next().unwrap().parse().unwrap();
+        assert!((first - unix_in(Duration::ZERO) + 600).abs() <= 1, "{v}");
     }
 
     #[tokio::test]
