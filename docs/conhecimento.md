@@ -114,7 +114,9 @@ Não foi capturado corpo nulo ao vivo. `testdata/steam_actions_null_contract.jso
 contrato reconstruído do diagnóstico, não captura bruta. Uma página vazia real já tem
 fixture em `steam_actions_karambit_doppler.json` e continua válida.
 
-O cliente tenta novamente uma única vez após pelo menos 5 s para `data:null` em HTTP 200.
+O cliente tenta novamente uma única vez após pelo menos 5 s para o envelope exclusivo
+`{"data":null}` em HTTP 200. Outras chaves mantêm o erro de formato, sem repetição.
+O atraso vale para o limitador global: outras consultas também aguardam esses 5 s.
 O limitador global e o breaker por endpoint continuam valendo; nunca se converte nulo
 em lista vazia, para preservar dados anteriores. Formato desconhecido continua erro.
 

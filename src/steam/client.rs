@@ -573,7 +573,10 @@ impl SteamClient {
             if status == StatusCode::OK
                 && serde_json::from_slice::<Value>(&body)
                     .ok()
-                    .is_some_and(|v| v.get("data") == Some(&Value::Null))
+                    .is_some_and(|v| {
+                        v.as_object().is_some_and(|o| o.len() == 1)
+                            && v.get("data") == Some(&Value::Null)
+                    })
             {
                 return Err(Error::ActionUnavailable { endpoint: ep });
             }
@@ -695,6 +698,32 @@ mod tests {
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert!(c.breaker_open_until(Endpoint::History).is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_envelopes_do_not_retry() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        for body in ["{}", "not json", r#"{"data":null,"success":false}"#] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            let app = Router::new().route(
+                "/market/actions",
+                get(move || {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    async move { body }
+                }),
+            );
+            let c = fast(&serve(app).await);
+            assert!(matches!(
+                c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
+                    .await,
+                Err(Error::Parse(_))
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     fn t0() -> Instant {
