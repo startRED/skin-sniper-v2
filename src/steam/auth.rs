@@ -274,7 +274,7 @@ fn cookie_value(steamid: u64, access_token: &str) -> String {
 }
 
 /// `exp` do access token guardado num cookie `steamLoginSecure` (aceita `||` e `%7C%7C`).
-fn cookie_exp(cookie: &str) -> Option<i64> {
+pub(crate) fn cookie_exp(cookie: &str) -> Option<i64> {
     let token = cookie
         .rsplit_once("%7C%7C")
         .or_else(|| cookie.rsplit_once("||"))?
@@ -282,7 +282,7 @@ fn cookie_exp(cookie: &str) -> Option<i64> {
     jwt_claims(token)?.exp
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
