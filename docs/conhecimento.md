@@ -251,7 +251,7 @@ sessionid=<sessionid>&currency=7&subtotal=<unPrice>&fee=<unFee>&total=<unPrice+u
   (`S/docs/ref/rate-limits.md:15-18`)
 - Reiniciar não zera a cota remota. Medir o 429 só isoladamente, porque há risco de bloqueio temporário de IP.
   (`S/docs/ref/rate-limits.md:406-410`)
-- **Sessão logada muda os limites? HIPÓTESE / não medido.** O cliente aceitava um cookie opcional "de conta secundária
+- **Sessão logada muda os limites? HIPÓTESE / não medido.** Desde 04/11 o v2 lê logado (pedido do Erick) e a 6 s, depois de horas de 429 anônimo a 4 s. O cliente antigo aceitava um cookie opcional "de conta secundária
   (read-only polling)", mas nenhuma medição comparou com e sem sessão. (`S/internal/steam/steam.go:31`,
   `S/docs/ref/steam-market-api.md:161`)
 - CSFloat: `/listings` autenticado tem 200 respostas por janela; `/history` tem balde próprio de 500. Cabeçalhos

@@ -21,8 +21,9 @@ pub const CURRENCY_BRL: i32 = 7;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-// 15 consultas/min: com 3 s (20/min) a Steam deu 429 em série ao vivo em 04/11.
-const BASE_GAP: Duration = Duration::from_secs(4);
+// 10 consultas/min: com 3 s (20/min) e 4 s (15/min) a Steam deu 429 por horas ao vivo em 04/11; o robô
+// antigo leu anúncios a ~6–12/min por 4–10 h sem nenhum 429 (logs de run*.log).
+const BASE_GAP: Duration = Duration::from_secs(6);
 // Piso = base (acima da regra de ≥ 3 s): encurtar só desfaz o alongamento depois de 429.
 const MIN_GAP: Duration = BASE_GAP;
 // Teto do intervalo depois de vários 429 seguidos (acréscimo meu: o desenho não limita o alongamento).
@@ -516,7 +517,8 @@ impl SteamClient {
         format!("{}{path}", self.base)
     }
 
-    /// Consulta `GET /market/actions?q=<método>&qp=<json>` (sem login) e devolve o campo `data`.
+    /// Consulta `GET /market/actions?q=<método>&qp=<json>` e devolve o campo `data`. Vai logado quando há
+    /// cookie, como a página do mercado aberta no navegador (pedido do Erick: ler o mercado logado).
     pub async fn action(&self, ep: Endpoint, method: &str, qp: &Value) -> Result<Value> {
         for attempt in 0..2 {
             let req = self
@@ -526,7 +528,7 @@ impl SteamClient {
                 .header("x-valve-request-type", "queryAction")
                 .header("accept", "application/json, text/javascript, */*");
             let response = self
-                .send_checked(ep, req, false, Some(envelope_problem), attempt == 0)
+                .send_checked(ep, req, true, Some(envelope_problem), attempt == 0)
                 .await;
             if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -940,21 +942,21 @@ mod tests {
         assert!(l.try_acquire(t).is_ok());
         assert_eq!(
             l.try_acquire(t + Duration::from_secs(1)),
-            Err(Duration::from_secs(3))
+            Err(Duration::from_secs(5))
         );
-        assert!(l.try_acquire(t + Duration::from_secs(4)).is_ok());
+        assert!(l.try_acquire(t + Duration::from_secs(6)).is_ok());
     }
 
     #[test]
     fn limiter_shortens_5pct_per_30min_with_floor() {
         let t = t0();
         let mut l = Limiter::new(t);
-        // sem 429 não passa da base de 4 s
-        assert_eq!(l.stats(t + Duration::from_secs(30 * 60)).gap_ms, 4000);
+        // sem 429 não passa da base de 6 s
+        assert_eq!(l.stats(t + Duration::from_secs(30 * 60)).gap_ms, 6000);
         l.on_429(t + Duration::from_secs(30 * 60), None);
         let after = t + Duration::from_secs(60 * 60);
-        assert_eq!(l.stats(after).gap_ms, 5700); // 6000 × 0,95
-        assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 4000);
+        assert_eq!(l.stats(after).gap_ms, 8550); // 9000 × 0,95
+        assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 6000);
     }
 
     #[tokio::test]
@@ -973,7 +975,7 @@ mod tests {
         again.restore_pace(&v);
         let after = again.stats();
         assert_eq!(after.paused_until, before.paused_until);
-        assert_eq!(after.gap_ms, before.gap_ms.max(4000)); // `fast` encurta abaixo do piso
+        assert_eq!(after.gap_ms, before.gap_ms.max(6000)); // `fast` encurta abaixo do piso
         let pause = |c: &SteamClient| c.inner.lock().unwrap().limiter.pause_len;
         assert_eq!(pause(&again), pause(&c)); // a próxima pausa segue dobrada
 
@@ -982,7 +984,7 @@ mod tests {
         fresh.restore_pace(&format!("{}|1500|60000", unix_in(Duration::ZERO) - 5));
         fresh.restore_pace("lixo");
         let s = fresh.stats();
-        assert_eq!((s.gap_ms, s.paused_until), (4000, None));
+        assert_eq!((s.gap_ms, s.paused_until), (6000, None));
         // 429 de mais de 30 min atrás: a escalada não volta
         let old = SteamClient::new().unwrap();
         old.restore_pace(&format!("{}|6000|600000", unix_in(Duration::ZERO) - 3600));
@@ -1002,7 +1004,7 @@ mod tests {
         let mut l = Limiter::new(t);
         l.on_429(t, None);
         let s = l.stats(t);
-        assert_eq!(s.gap_ms, 6000);
+        assert_eq!(s.gap_ms, 9000);
         assert!(s.paused_until.is_some());
         assert_eq!(
             l.try_acquire(t + Duration::from_secs(30)),
@@ -1010,7 +1012,7 @@ mod tests {
         );
         // outro 429 dentro da pausa não avança o degrau
         l.on_429(t + Duration::from_secs(10), None);
-        assert_eq!(l.stats(t).gap_ms, 6000);
+        assert_eq!(l.stats(t).gap_ms, 9000);
         // fim da pausa; novo 429 dobra: 120 s
         let t2 = t + Duration::from_secs(61);
         assert!(l.try_acquire(t2).is_ok());
@@ -1051,9 +1053,9 @@ mod tests {
         let t = t0();
         let mut l = Limiter::new(t);
         for i in 0..5 {
-            assert!(l.try_acquire(t + Duration::from_secs(4 * i)).is_ok());
+            assert!(l.try_acquire(t + Duration::from_secs(6 * i)).is_ok());
         }
-        assert_eq!(l.stats(t + Duration::from_secs(14)).queries_per_min, 5);
+        assert_eq!(l.stats(t + Duration::from_secs(24)).queries_per_min, 5);
         assert_eq!(l.stats(t + Duration::from_secs(63)).queries_per_min, 4); // t=0 saiu da janela de 60 s
     }
 
@@ -1108,7 +1110,7 @@ mod tests {
                 "/market/actions",
                 get(|h: axum::http::HeaderMap, q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
                     assert_eq!(h.get("x-valve-request-type").unwrap(), "queryAction");
-                    assert!(h.get("cookie").is_none(), "leitura anônima não leva cookie");
+                    assert!(h.get("cookie").unwrap().to_str().unwrap().contains("steamLoginSecure=x"), "leitura vai logada");
                     if q.get("q").map(String::as_str) == Some("Limit") {
                         return (AxStatus::TOO_MANY_REQUESTS, String::new());
                     }
