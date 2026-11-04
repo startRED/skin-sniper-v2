@@ -1,7 +1,7 @@
 import { api, ApiError } from './api';
 import { money, signed } from './format';
 import { beep, unlockAudio } from './sound';
-import type { History, Opportunity, Purchase, Settings, SettingsInput, State } from './types';
+import type { History, Opportunity, Purchase, Settings, SettingsInput, State, WatchRow } from './types';
 
 export type SortKey = 'profit' | 'margin' | 'safe' | 'eta' | 'new';
 const DEFAULT_DIR: Record<SortKey, 'asc' | 'desc'> = { profit: 'desc', margin: 'desc', safe: 'desc', eta: 'asc', new: 'desc' };
@@ -15,6 +15,7 @@ export const app = $state({
   opps: {} as Record<string, Opportunity>,
   settings: null as Settings | null,
   purchases: [] as Purchase[],
+  watch: [] as WatchRow[], // o que a caça vigia (ordem do servidor: mais perto de dar lucro primeiro)
   now: Math.floor(Date.now() / 1000),
   sort: { key: 'profit' as SortKey, dir: 'desc' as 'asc' | 'desc' },
   fresh: {} as Record<string, true>, // chegaram ao vivo há pouco: ganham destaque
@@ -135,6 +136,16 @@ export function notify(o: Opportunity) {
   say(`Nova oportunidade: ${o.name}, lucro ${signed(o.sell.mid.profit_cents)}.`);
 }
 
+let watchBusy = false;
+export async function loadWatch() {
+  if (watchBusy) return;
+  watchBusy = true;
+  try {
+    app.watch = await api<WatchRow[]>('/api/watch');
+  } catch {} // fica a lista anterior; a próxima tentativa vem em 30 s ou no próximo estado
+  watchBusy = false;
+}
+
 const reason = (r: PromiseRejectedResult) => (r.reason instanceof ApiError ? r.reason.message : 'Não consegui carregar uma parte dos dados.');
 
 // Devolve true se o essencial (estado) carregou. As outras rotas falhando só viram aviso.
@@ -205,7 +216,10 @@ function connect() {
     delete app.opps[id];
     if (app.expanded === id) app.expanded = null;
   });
-  on('state', (s: State) => (app.state = s));
+  on('state', (s: State) => {
+    app.state = s;
+    void loadWatch();
+  });
   on('purchase', (p: Purchase) => upsertPurchase(p));
 }
 
@@ -214,5 +228,7 @@ export function start() {
   window.addEventListener('pointerdown', unlockAudio, { once: true });
   window.addEventListener('keydown', unlockAudio, { once: true });
   void load();
+  void loadWatch();
+  setInterval(loadWatch, 30000);
   connect();
 }

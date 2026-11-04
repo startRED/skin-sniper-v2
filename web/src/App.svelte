@@ -4,6 +4,7 @@
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
   import OppTable from './lib/OppTable.svelte';
+  import Watch from './lib/Watch.svelte';
   import Purchases from './lib/Purchases.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
 
@@ -56,13 +57,16 @@
             <h3>Nenhuma skin com lucro agora</h3>
             <p>Continuamos vigiando. Quando aparecer uma que dê lucro depois das taxas e caiba no seu saldo, ela entra aqui sozinha{app.settings?.sound ? ' e você ouve um aviso' : ''}.</p>
           {/if}
+          {#if app.state?.hunt.message}<p class="hunt-msg">{app.state.hunt.message}.</p>{/if}
           {#if noSteam}
             <p>Dica: conecte a sua conta da Steam para eu ler o saldo e poder comprar.</p>
             <button class="btn" onclick={() => (app.settingsOpen = true)}>Abrir configurações</button>
           {/if}
         </div>
+        <Watch />
       {:else}
         <OppTable />
+        <Watch collapsed />
       {/if}
     </section>
 
@@ -83,6 +87,7 @@
   .empty p, .empty h3, .empty h2 { max-width: 62ch; }
   .empty h3, .empty h2 { font-size: 17px; }
   .empty p { color: var(--muted); }
+  .empty .hunt-msg { color: var(--ink); }
   @media (max-width: 899px) {
     main { padding: 12px 12px 60px; }
     .banner, .warn { padding: 8px 14px; }

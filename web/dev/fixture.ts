@@ -2,7 +2,7 @@
 // Todos os números são inventados para desenvolver a tela. Nada aqui vem da Steam.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
-import type { History, Opportunity, Purchase, Sell, Settings, State, Tier } from '../src/lib/types';
+import type { History, Opportunity, Purchase, Sell, Settings, State, Tier, WatchRow } from '../src/lib/types';
 
 export const FIXTURE_MARK = '__SKIN_SNIPER_FIXTURE__';
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -98,7 +98,7 @@ function combo(): State['combo'] {
 function state(): State {
   return {
     saldo_cents: saldoSource === 'none' ? 0 : saldoCents, saldo_source: saldoSource,
-    hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, message: 'Dados de exemplo (modo dev): nada aqui vem da Steam.' },
+    hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, message: '20 anúncios conferidos em 1 min; nenhum deu lucro, o mais perto dava R$ 0,78 de prejuízo (exemplo do modo dev)' },
     combo: combo(),
     keys: {
       steam: { set: !!settings.steam_login_secure, ok: !!settings.steam_login_secure, detail: settings.steam_login_secure ? 'Conta exemplo_erick' : null },
@@ -106,6 +106,21 @@ function state(): State {
       telegram: { set: !!settings.telegram_token, ok: settings.telegram_token ? false : null, detail: settings.telegram_token ? 'O Telegram recusou o token (exemplo de erro).' : null }
     }
   };
+}
+
+// Vigiados de exemplo: um já no teto, alguns perto, um raro sem teto, um sem consulta, dois sem lucro possível.
+function watchRows(): WatchRow[] {
+  const gaps = [-30, 78, 140, 260, 520, null, null, 900, 40, 1300, 15, 610];
+  const dist = (w: WatchRow) => (w.floor_cents == null || w.max_buy_cents == null || w.max_buy_cents <= 0 ? 1e9 : w.floor_cents - w.max_buy_cents);
+  return TPL.map(([name, wear, group, kind, base, , , , perDay], i): WatchRow => {
+    const g = gaps[i];
+    const floor = base + (i % 3) * 7;
+    return {
+      name: `${name} (${wear})`, icon_url: icon(name, i), floor_cents: i === 5 ? null : floor,
+      max_buy_cents: kind === 'raro' ? null : g == null ? -1 : floor - g,
+      sales_per_day: perDay + 0.4, kind, group, last_checked_at: i === 5 ? null : nowS() - 8 - i * 23
+    };
+  }).sort((a, b) => dist(a) - dist(b));
 }
 
 function history(o: Opportunity): History {
@@ -158,6 +173,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   }
   if (p === '/api/state') return send(res, 200, state());
   if (p === '/api/opportunities') return send(res, 200, opps);
+  if (p === '/api/watch') return send(res, 200, watchRows());
   if (p === '/api/purchases') return send(res, 200, purchases);
   if (p === '/api/settings' && m === 'GET') return send(res, 200, settings);
   if (p === '/api/settings' && m === 'PUT') {
