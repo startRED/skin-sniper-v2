@@ -213,8 +213,8 @@ async fn unwired_routes_say_so_and_db_routes_read_db() {
     s.app
         .db
         .call(move |c| {
-            c.execute("INSERT INTO opportunities VALUES ('42', ?1, 1, NULL)", [&o])?;
-            c.execute("INSERT INTO opportunities VALUES ('43', ?1, 1, 5)", [&o]) // encerrada
+            c.execute("INSERT INTO opportunities(id, json, created_at, gone_at) VALUES ('42', ?1, 1, NULL)", [&o])?;
+            c.execute("INSERT INTO opportunities(id, json, created_at, gone_at) VALUES ('43', ?1, 1, 5)", [&o]) // encerrada
         })
         .await
         .unwrap();

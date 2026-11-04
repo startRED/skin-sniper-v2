@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::client::{CURRENCY_BRL, Endpoint, Error, Result, SteamClient, path_escape};
@@ -183,6 +184,16 @@ impl PropFilter {
 /// aproximada: a captura de 2026-11-03 mostra inversões de ~1 % em BRL (a Steam ordena por outro preço-base).
 /// Uma faixa por propriedade: dois filtros na mesma propriedade viram um erro, não uma sobrescrita silenciosa.
 pub fn build_qp(code: &str, start: u32, filters: &[PropFilter]) -> Result<Value> {
+    build_qp_wear(code, start, None, filters)
+}
+
+/// Como `build_qp`, com o filtro de desgaste (`Exterior`: 0 = FN … 4 = BS) do lado da Valve.
+pub fn build_qp_wear(
+    code: &str,
+    start: u32,
+    wear: Option<u8>,
+    filters: &[PropFilter],
+) -> Result<Value> {
     if !is_item_code(code) {
         return Err(Error::Parse(format!("código G inválido: {code}")));
     }
@@ -198,7 +209,7 @@ pub fn build_qp(code: &str, start: u32, filters: &[PropFilter]) -> Result<Value>
     Ok(json!([{
         "appid": 730,
         "strItemName": code,
-        "filters": {},
+        "filters": wear.map_or(json!({}), |w| json!({"Exterior": [format!("WearCategory{w}")]})),
         "accessoryFilters": {},
         "propertyFilters": props,
         "sort": {"field": 0, "direction": 0},
@@ -213,7 +224,18 @@ pub async fn query_listings(
     start: u32,
     filters: &[PropFilter],
 ) -> Result<ListingsPage> {
-    let qp = build_qp(code, start, filters)?;
+    query_listings_wear(c, code, start, None, filters).await
+}
+
+/// Como `query_listings`, restrita a um desgaste (o código cobre todos eles).
+pub async fn query_listings_wear(
+    c: &SteamClient,
+    code: &str,
+    start: u32,
+    wear: Option<u8>,
+    filters: &[PropFilter],
+) -> Result<ListingsPage> {
+    let qp = build_qp_wear(code, start, wear, filters)?;
     let data = c
         .action(Endpoint::Listings, "QueryListingsForItem", &qp)
         .await?;
@@ -223,7 +245,7 @@ pub async fn query_listings(
 // ---------------------------------------------------------------------------------------------
 // Resultado
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Accessory {
     /// `market_hash_name` que a Valve manda (nunca reconstruído).
     pub name: String,
@@ -233,7 +255,7 @@ pub struct Accessory {
     pub template: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Listing {
     pub listing_id: String,
     /// `market_hash_name`.

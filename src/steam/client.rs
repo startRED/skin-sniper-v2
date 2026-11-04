@@ -363,6 +363,12 @@ impl SteamClient {
         self.inner.lock().unwrap().cookie.clone()
     }
 
+    /// Só para teste: encurta o intervalo do limitador para não dormir 3 s por consulta.
+    #[cfg(test)]
+    pub(crate) fn set_gap_for_test(&self, gap: Duration) {
+        self.inner.lock().unwrap().limiter.gap = gap;
+    }
+
     pub fn stats(&self) -> Stats {
         self.inner.lock().unwrap().limiter.stats(Instant::now())
     }
