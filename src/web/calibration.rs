@@ -24,10 +24,10 @@ pub async fn sold(
     Path(id): Path<String>,
     Json(input): Json<SoldInput>,
 ) -> Result<Json<Purchase>, ApiError> {
-    if !(1..=9_007_199_254_740_991).contains(&input.sold_cents) {
+    if !(1..=crate::pricing::sell::MAX_PRICE_CENTS).contains(&input.sold_cents) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
-            "Informe um valor de venda válido em centavos.",
+            "Informe um valor de venda entre 1 e 10.000.000 centavos.",
         ));
     }
     let now = now_unix();

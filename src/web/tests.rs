@@ -73,6 +73,14 @@ async fn manual_sales_and_calibration_use_saved_predictions() {
     for (id, amount, status) in [
         ("missing", 130, StatusCode::NOT_FOUND),
         ("42", 0, StatusCode::BAD_REQUEST),
+        (
+            "42",
+            crate::pricing::sell::MAX_PRICE_CENTS + 1,
+            StatusCode::BAD_REQUEST,
+        ),
+        ("42", i64::MAX, StatusCode::BAD_REQUEST),
+        ("42", 1, StatusCode::OK),
+        ("42", crate::pricing::sell::MAX_PRICE_CENTS, StatusCode::OK),
         ("42", 132, StatusCode::OK),
         ("42", 144, StatusCode::OK),
     ] {

@@ -462,15 +462,10 @@ impl SteamClient {
                 .header("x-valve-request-type", "queryAction")
                 .header("accept", "application/json, text/javascript, */*");
             let response = self
-                .send_checked(ep, req, false, Some(envelope_problem))
+                .send_checked(ep, req, false, Some(envelope_problem), attempt == 0)
                 .await;
             if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
-                // A próxima vaga continua respeitando pausas maiores do limitador e do breaker.
-                let mut g = self.inner.lock().unwrap();
-                g.limiter.next_at = g
-                    .limiter
-                    .next_at
-                    .max(Instant::now() + Duration::from_secs(5));
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
             let (_, body) = response.map_err(|e| match e {
@@ -538,7 +533,7 @@ impl SteamClient {
         req: RequestBuilder,
         auth: bool,
     ) -> Result<(Parts, Vec<u8>)> {
-        self.send_checked(ep, req, auth, None).await
+        self.send_checked(ep, req, auth, None, true).await
     }
 
     /// Como `send`, mas `check(status, corpo)` pode dizer que a resposta (200) não é o envelope esperado:
@@ -549,6 +544,7 @@ impl SteamClient {
         mut req: RequestBuilder,
         auth: bool,
         check: Option<EnvelopeCheck>,
+        reset_on_success: bool,
     ) -> Result<(Parts, Vec<u8>)> {
         loop {
             let wait = {
@@ -633,7 +629,7 @@ impl SteamClient {
             if status.is_server_error() || status == StatusCode::FORBIDDEN || bad_envelope.is_some()
             {
                 g.breakers[ep.idx()].on_fail(now);
-            } else {
+            } else if reset_on_success {
                 g.breakers[ep.idx()].on_ok();
             }
         }
@@ -750,6 +746,59 @@ mod tests {
             assert!(started.elapsed() >= Duration::from_secs(5));
             assert!(c.breaker_open_until(ep).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn retry_wait_does_not_delay_other_endpoints_and_alternating_failures_open_breaker() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = Router::new()
+            .route(
+                "/market/actions",
+                get(move || {
+                    let n = seen.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if n.is_multiple_of(2) {
+                            include_str!("../../testdata/steam_actions_null_contract.json")
+                        } else {
+                            r#"{"data":{"ok":true}}"#
+                        }
+                    }
+                }),
+            )
+            .route("/other", get(|| async { r#"{"ok":true}"# }));
+        let c = Arc::new(fast(&serve(app).await));
+        let first = c.clone();
+        let task = tokio::spawn(async move {
+            first
+                .action(Endpoint::Listings, "Query", &serde_json::json!([]))
+                .await
+        });
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let other = tokio::time::timeout(
+            Duration::from_secs(2),
+            c.get_json(Endpoint::History, "/other", &[]),
+        )
+        .await;
+        assert!(other.unwrap().is_ok());
+        assert!(task.await.unwrap().is_ok());
+        assert!(
+            c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
+                .await,
+            Err(Error::BreakerOpen { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 
     #[tokio::test]

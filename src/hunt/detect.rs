@@ -332,7 +332,7 @@ async fn evaluate_one(
         mid_cents: ev.sell.mid.net_cents - l.price_cents,
         quick_cents: ev.sell.quick.net_cents - l.price_cents,
     });
-    if !ev.listable {
+    if !ev.listable || !ev.ev_profit_cents.is_some_and(|profit| profit > 0) {
         return Ok(Judged { found: None, near });
     }
     let opp = Opportunity {
@@ -385,7 +385,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     let floor = relevant.iter().map(|l| l.price_cents).min();
     h.lock().floors.insert(task.floor_key(), (floor, now));
     let ids: Vec<String> = relevant.iter().map(|l| l.listing_id.clone()).collect();
-    h.db.call(move |c| {
+    if let Err(error) = h.db.call(move |c| {
         let tx = c.transaction()?;
         for id in ids {
             let is_new = tx.execute("INSERT OR IGNORE INTO activity_seen(listing_id, last_seen) VALUES (?1, ?2)", params![id, now])? == 1;
@@ -396,7 +396,9 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             }
         }
         tx.commit()
-    }).await?;
+    }).await {
+        tracing::warn!(%error, "falha ao registrar atividade de anúncios");
+    }
 
     // --- sumiu? só com página confiável; fora da primeira página o anúncio pode só ter sido empurrado
     let trust = {
@@ -603,8 +605,9 @@ async fn store_opportunity(
     let at = opp.seen_at;
     h.db.call(move |c| {
         let tx = c.transaction()?;
-        if fresh {
-            tx.execute("INSERT INTO hourly_activity(hour_utc, opportunities) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET opportunities = opportunities + 1", [at.div_euclid(3600)])?;
+        if fresh
+            && let Err(error) = tx.execute("INSERT INTO hourly_activity(hour_utc, opportunities) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET opportunities = opportunities + 1", [at.div_euclid(3600)]) {
+            tracing::warn!(%error, "falha ao registrar atividade de oportunidades");
         }
         tx.execute(
             "INSERT OR REPLACE INTO opportunities(id, json, created_at, gone_at, task, listing_json)
