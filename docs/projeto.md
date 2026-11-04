@@ -159,7 +159,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      (hoje ≈ R$ 1,45). Abaixo disso a taxa mínima de 1 + 1 centavo come o lucro. Os 30 % são hipótese, não medida.
 3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios ou histórico) não pausa: as leituras seguem sem login por 6 h. Um 429
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até voltar a 6 s. O degrau da pausa só volta a 60 s após 60 min sem 429.
-   Pausa e intervalo do último 429 ficam salvos (`steam_pace`) e valem depois de reiniciar. Breaker por endpoint.
+   Pausa e intervalo do último 429 ficam salvos (`steam_pace`) e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar.
 4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
