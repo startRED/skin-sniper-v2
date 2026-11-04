@@ -459,11 +459,29 @@ async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Último 429: `fim da pausa (Unix)|intervalo em ms`, retomado ao subir.
+const PACE_KEY: &str = "steam_pace";
+
+pub async fn load_pace(h: &Hunt) -> anyhow::Result<()> {
+    let saved = catalog::get_setting(&h.db, PACE_KEY).await?;
+    if let Some((until, gap)) = saved.as_deref().and_then(|v| v.split_once('|'))
+        && let (Ok(until), Ok(gap)) = (until.parse::<i64>(), gap.parse::<u64>())
+    {
+        h.steam.restore_pace(Some(until), gap);
+    }
+    Ok(())
+}
+
 /// Erro de consulta: 429 e breaker já seguram o limitador; o resto espera um pouco para não girar em falso.
 async fn backoff(h: &Hunt, e: &anyhow::Error) {
     let pause = match e.downcast_ref::<SteamError>() {
         Some(SteamError::RateLimited { .. }) => {
             tracing::warn!("Steam respondeu 429; o limitador segura a próxima consulta");
+            let s = h.steam.stats();
+            let value = format!("{}|{}", s.paused_until.unwrap_or(0), s.gap_ms);
+            if let Err(e) = catalog::set_setting(&h.db, PACE_KEY, value).await {
+                tracing::warn!("ritmo da Steam não salvou: {e:#}");
+            }
             return;
         }
         Some(SteamError::BreakerOpen { endpoint, .. }) => {

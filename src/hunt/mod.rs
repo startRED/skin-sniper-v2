@@ -174,6 +174,7 @@ impl Hunt {
         let ratio = catalog::load_ratio(&self.db).await?;
         scheduler::load_stats(self).await?;
         self.refresh_correction().await?;
+        scheduler::load_pace(self).await?;
         {
             let mut s = self.lock();
             for (json, task) in rows {

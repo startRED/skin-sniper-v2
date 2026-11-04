@@ -159,8 +159,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      e no máximo 2000 linhas) e sobrevivem a reinício. Os parâmetros (12,5 %, meias-vidas, 15 %) são hipóteses de calibração, não medidas.
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 0,20 e 5 % depois da taxa
      (hoje ≈ R$ 1,45). Abaixo disso a taxa mínima de 1 + 1 centavo come o lucro. Os 30 % são hipótese, não medida.
-3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 3 s. Cada 30 min sem 429 encurta 5 %
-   (piso 1,5 s); um 429 pausa 60 s (dobrando até 10 min) e alonga o intervalo 50 %. Breaker por endpoint.
+3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 3 s, que também é o piso (regra 7 do AGENTS.md). Um 429
+   pausa 60 s (dobrando até 10 min) e alonga o intervalo 50 %; cada 30 min sem 429 encurta 5 %, até voltar a 3 s.
+   Pausa e intervalo do último 429 ficam salvos (`steam_pace`) e valem depois de reiniciar. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar.
 4. **Detecção:** cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.

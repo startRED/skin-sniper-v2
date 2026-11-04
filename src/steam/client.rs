@@ -22,7 +22,8 @@ pub const CURRENCY_BRL: i32 = 7;
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 const BASE_GAP: Duration = Duration::from_secs(3);
-const MIN_GAP: Duration = Duration::from_millis(1500);
+// Piso = base: a regra do projeto é ≥ 3 s; encurtar só desfaz o alongamento depois de 429.
+const MIN_GAP: Duration = BASE_GAP;
 // Teto do intervalo depois de vários 429 seguidos (acréscimo meu: o desenho não limita o alongamento).
 const MAX_GAP: Duration = Duration::from_secs(60);
 const SHORTEN_EVERY: Duration = Duration::from_secs(30 * 60);
@@ -432,6 +433,18 @@ impl SteamClient {
 
     pub fn stats(&self) -> Stats {
         self.inner.lock().unwrap().limiter.stats(Instant::now())
+    }
+
+    /// Retoma pausa e intervalo salvos antes de um reinício: reiniciar não zera a cota da Steam.
+    pub fn restore_pace(&self, paused_until: Option<i64>, gap_ms: u64) {
+        let now = Instant::now();
+        let left = paused_until.map(|u| u - unix_in(Duration::ZERO));
+        let l = &mut self.inner.lock().unwrap().limiter;
+        l.gap = Duration::from_millis(gap_ms).clamp(MIN_GAP, MAX_GAP);
+        l.last_adjust = now;
+        if let Some(s) = left.filter(|s| *s > 0) {
+            l.paused_until = Some(now + Duration::from_secs(s as u64));
+        }
     }
 
     /// Fim da pausa do breaker do endpoint (segundos Unix), se estiver aberto.
@@ -877,10 +890,26 @@ mod tests {
     fn limiter_shortens_5pct_per_30min_with_floor() {
         let t = t0();
         let mut l = Limiter::new(t);
-        assert_eq!(l.stats(t + Duration::from_secs(30 * 60)).gap_ms, 2850);
-        assert_eq!(l.stats(t + Duration::from_secs(60 * 60)).gap_ms, 2707); // 2850 × 0,95 = 2707,5
-        // depois de muitas horas fica no piso de 1,5 s
-        assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 1500);
+        // sem 429 não passa da base de 3 s (regra do projeto)
+        assert_eq!(l.stats(t + Duration::from_secs(30 * 60)).gap_ms, 3000);
+        l.on_429(t + Duration::from_secs(30 * 60), None);
+        let after = t + Duration::from_secs(60 * 60);
+        assert_eq!(l.stats(after).gap_ms, 4275); // 4500 × 0,95
+        assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 3000);
+    }
+
+    #[test]
+    fn restored_pace_keeps_pause_and_gap_across_restart() {
+        let c = SteamClient::new().unwrap();
+        c.restore_pace(Some(unix_in(Duration::from_secs(120))), 6750);
+        let s = c.stats();
+        assert_eq!(s.gap_ms, 6750);
+        assert!(s.paused_until.unwrap() >= unix_in(Duration::from_secs(110)));
+        // pausa vencida não volta; intervalo abaixo do piso sobe para 3 s
+        let c = SteamClient::new().unwrap();
+        c.restore_pace(Some(unix_in(Duration::ZERO) - 5), 1500);
+        let s = c.stats();
+        assert_eq!((s.gap_ms, s.paused_until), (3000, None));
     }
 
     #[test]
