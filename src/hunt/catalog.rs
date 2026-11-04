@@ -61,7 +61,8 @@ const HISTORY_PER_ROUND: usize = 25;
 /// Reseleciona a cada tantos históricos novos, para a vigilância começar antes do fim da descoberta.
 const RESELECT_EVERY: u32 = 5;
 const RATIO_KEY: &str = "usd_brl_ratio";
-const SCAN_KEY: &str = "catalog_scan_at";
+/// O sufixo muda quando a varredura muda de forma: uma leitura feita pela forma antiga não vale e é refeita.
+const SCAN_KEY: &str = "catalog_scan_at_cauda";
 const DAY: i64 = 86_400;
 
 #[derive(Debug, Clone, PartialEq)]
