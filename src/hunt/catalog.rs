@@ -31,7 +31,9 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 pub const SCAN_ROUNDS: u32 = 6;
 pub const HISTORY_TTL: i64 = 6 * 3600;
 pub const CATALOG_TTL: i64 = 24 * 3600;
-pub const MIN_SALES_PER_DAY: f64 = 3.0;
+pub const MIN_SALES_PER_DAY: f64 = 1.0;
+/// Acima disso vender mais rápido não ajuda quem compra uma unidade: a nota passa a ser só o lucro.
+const SCORE_SALES_CAP: f64 = 10.0;
 pub const WATCH_MAX: usize = 40;
 pub const RARE_MAX_TASKS: usize = 24;
 /// Rank das entradas vindas da busca por nome de skin com tabela (depois da popularidade); não rebaixa o rank
@@ -181,10 +183,10 @@ pub fn observed(floors: &HashMap<String, (Option<i64>, i64)>, id: &str, now: i64
     o
 }
 
-/// Nota de um item: vendas/dia × lucro possível em reais (≈ lucro/dia se cada venda desse dinheiro). Sem lucro
+/// Nota de um item: vendas/dia (até `SCORE_SALES_CAP`) × lucro possível em reais. Sem lucro
 /// possível pelo histórico o item não sai, só fica no fim: um anúncio fora da curva ainda pode dar lucro.
 pub fn score(sales_per_day: f64, possible_profit_cents: i64) -> f64 {
-    sales_per_day * (possible_profit_cents.max(0) + 1) as f64 / 100.0
+    sales_per_day.min(SCORE_SALES_CAP) * (possible_profit_cents.max(0) + 1) as f64 / 100.0
 }
 
 /// Mudou mais de 20 % (ou não havia saldo antes).
@@ -202,7 +204,7 @@ pub struct Ctx<'a> {
     pub floors: &'a HashMap<String, (Option<i64>, i64)>,
 }
 
-/// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 3 vendas/dia e lucro possível ≥ mínimo, por nota
+/// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 1 venda/dia e lucro possível ≥ mínimo, por nota
 /// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela × desgaste cujo piso cabe no saldo (até
 /// `RARE_MAX_TASKS`), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
@@ -943,6 +945,9 @@ mod tests {
         let (cheap, dear) = (possible_profit(200, 0.3), possible_profit(2000, 0.3));
         assert!(score(100.0, cheap) < score(50.0, dear));
         assert_eq!(score(10.0, -5), 0.1); // sem lucro possível: só o desempate de 1 centavo
+        // giro de 600/dia com R$ 0,05 de folga não passa na frente de 2/dia com R$ 1,00
+        assert!(score(600.0, 5) < score(2.0, 100));
+        assert_eq!(score(600.0, 99), score(10.0, 99));
     }
 
     #[test]
@@ -1070,9 +1075,31 @@ mod tests {
     }
 
     #[test]
+    fn slow_seller_with_real_margin_beats_crowd_of_fast_thin_ones() {
+        let mut items: Vec<Item> = (0..60)
+            .map(|i| item(&format!("F{i} (Field-Tested)"), 300, i, 600.0, 0.15))
+            .collect();
+        items.push(item("Slow (Field-Tested)", 300, 99, 1.0, 0.3));
+        let tasks = select(&items, &ctx(100_000, &NO_HITS(), &HashMap::new()));
+        assert!(tasks.iter().any(|t| t.id == "d:Slow (Field-Tested)"));
+        // abaixo de 1 venda/dia não entra
+        items.last_mut().unwrap().sales_per_day = Some(0.9);
+        let tasks = select(&items, &ctx(100_000, &NO_HITS(), &HashMap::new()));
+        assert!(tasks.iter().all(|t| t.id != "d:Slow (Field-Tested)"));
+    }
+
+    #[test]
     fn selection_caps_and_ranks_commons() {
         let items: Vec<Item> = (0..100)
-            .map(|i| item(&format!("S{i} (Field-Tested)"), 300, i, 5.0 + i as f64, 0.3))
+            .map(|i| {
+                item(
+                    &format!("S{i} (Field-Tested)"),
+                    300,
+                    i,
+                    5.0 + i as f64 * 0.05,
+                    0.3,
+                )
+            })
             .collect();
         let (floors, hits) = (HashMap::new(), NO_HITS());
         let commons = |tasks: Vec<Task>| -> Vec<Task> {
@@ -1083,7 +1110,7 @@ mod tests {
         };
         let tasks = commons(select(&items, &ctx(100_000, &hits, &floors)));
         assert_eq!(tasks.len(), WATCH_MAX);
-        // mais vendas, mais nota; acertos recentes sobem
+        // mais vendas (abaixo do teto), mais nota; acertos recentes sobem
         assert_eq!(tasks[0].id, "d:S99 (Field-Tested)");
         let hits = HashMap::from([("d:S0 (Field-Tested)".to_string(), 1000)]);
         let tasks = commons(select(&items, &ctx(100_000, &hits, &floors)));
