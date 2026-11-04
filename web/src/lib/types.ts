@@ -56,3 +56,13 @@ export type Settings = {
   notify_min_profit_cents: number;
 };
 export type SettingsInput = { [K in keyof Settings]: Settings[K] | null };
+export type WatchRow = {
+  name: string;
+  icon_url: string;
+  floor_cents: number | null;
+  max_buy_cents: number | null; // ≤ 0 ou null: sem preço que dê lucro / sem estimativa
+  sales_per_day: number;
+  kind: 'desconto' | 'raro';
+  group: string | null;
+  last_checked_at: number | null;
+};
