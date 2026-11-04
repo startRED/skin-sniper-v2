@@ -2,9 +2,9 @@
 //! ritmo do limitador do `SteamClient`.
 //!
 //! Braço = alvo (skin × desgaste × modo de busca): `d:` mais barato primeiro, `r:` faixas de seed raras,
-//! `f:` float baixo (faixa filtrada no servidor). A frequência de consulta de cada um é a própria alocação do
-//! bandido: quem rende por consulta gasta ganha mais consultas. O limitador (≥ 1,5 s) segue sendo o gargalo:
-//! `Queue::next` devolve exatamente um braço por chamada, então nenhuma consulta é criada além das de antes.
+//! sem braço adicional de float. A frequência de consulta de cada um é a própria alocação do
+//! bandido: quem rende por consulta gasta ganha mais consultas. O limitador (≥ 6 s) segue sendo o gargalo:
+//! Uma busca pode conferir vários braços; os preços próximos do teto geram consultas adicionais de anúncios.
 //! A descoberta divide a mesma vaga: cada consulta de vigilância rende 0,25 de crédito e cada passo de
 //! descoberta gasta 1 (≈ 20 % do total); enquanto há poucas tarefas (arranque), a descoberta pode usar tudo.
 //!
@@ -13,13 +13,14 @@
 //! para caber em [0, 1]; a cauda pesada (um T1 vale dezenas de consultas vazias) é amortecida pelo piso de
 //! exploração e pelo decaimento. Três mecanismos além do UCB:
 //! - **Cota de exploração** (`EXPLORE_SHARE`): 1 consulta em 8 vai para o braço menos testado, sempre; o slot
-//!   gira entre os modos (barato, seed, float), então cada modo tem um piso próprio, não importa quantos braços tem.
+//!   gira entre os modos (barato, seed), então cada modo tem um piso próprio, não importa quantos braços tem.
 //! - **Decaimento** (meia-vida `HALF_LIFE`): o passado antigo pesa menos, o mercado muda.
 //! - **Seca** (`DRY_HALF_LIFE`): a média vale pela metade a cada 4 h sem recompensa nenhuma.
 
-use super::{Hunt, catalog, detect};
+use super::{Hunt, catalog, detect, watch};
 use crate::steam::client::Error as SteamError;
 use crate::steam::listings::{self, PropFilter};
+use crate::steam::search;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,7 +52,6 @@ const SAVE_EVERY_SECS: i64 = 30;
 pub enum Mode {
     Cheap,
     Seed,
-    Float,
 }
 
 impl Mode {
@@ -59,28 +59,14 @@ impl Mode {
         match self {
             Mode::Cheap => "barato",
             Mode::Seed => "seed",
-            Mode::Float => "float",
         }
     }
 }
 
-/// Faixa de float "baixo" do desgaste (0 = FN … 4 = BS): do começo do desgaste até 30 milésimos, ou 40 % da
-/// largura se for menor. Fixa por desgaste, não por skin (a Steam só devolve o que existe na faixa).
-pub fn low_float_band(wear: u8) -> (f64, f64) {
-    let (lo, hi) = match wear {
-        0 => (0.0, 0.07),
-        1 => (0.07, 0.15),
-        2 => (0.15, 0.38),
-        3 => (0.38, 0.45),
-        _ => (0.45, 1.0),
-    };
-    (lo, lo + 0.03_f64.min(0.4 * (hi - lo)))
-}
-
-/// Uma consulta recorrente: `QueryListingsForItem` do código, com desgaste e/ou faixa de seed ou de float.
+/// Uma consulta recorrente: `QueryListingsForItem` do código, com desgaste e/ou faixa de seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Task {
-    /// `d:<market_hash_name>` (mais barato), `f:<market_hash_name>` (float baixo) ou `r:<código>:<desgaste>`
+    /// `d:<market_hash_name>` (mais barato) ou `r:<código>:<desgaste>`
     /// (raro: uma tarefa por skin × desgaste).
     pub id: String,
     /// `market_hash_name` com o desgaste, para log e para filtrar a resposta.
@@ -100,20 +86,10 @@ impl Task {
     }
 
     pub fn mode(&self) -> Mode {
-        if self.rare() {
-            Mode::Seed
-        } else if self.id.starts_with("f:") {
-            Mode::Float
-        } else {
-            Mode::Cheap
-        }
+        if self.rare() { Mode::Seed } else { Mode::Cheap }
     }
 
     pub fn filters(&self) -> Vec<PropFilter> {
-        if let (Mode::Float, Some(w)) = (self.mode(), self.wear) {
-            let (lo, hi) = low_float_band(w);
-            return vec![PropFilter::float(lo, hi)];
-        }
         self.seeds
             .first()
             .map(|&(lo, hi)| PropFilter::seed(lo, hi))
@@ -371,6 +347,18 @@ impl Queue {
         }
     }
 
+    fn record_scan(&mut self, id: &str, now: i64) {
+        let stat = self.stats.entry(id.to_string()).or_insert_with(|| Stat {
+            first_at: now,
+            updated_at: now,
+            ..Stat::default()
+        });
+        stat.decay(now);
+        stat.n += 1.0;
+        stat.queries += 1;
+        self.dirty.insert(id.to_string());
+    }
+
     pub fn may_discover(&self) -> bool {
         self.credit >= 1.0 || self.entries.len() < BOOT_TASKS
     }
@@ -462,13 +450,141 @@ fn set_idle_message(h: &Hunt) {
     h.set_message((watching == 0).then(|| "procurando o que caçar com esse saldo…".to_string()));
 }
 
-async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
+// shortcut: 10 % é hipótese para ruído da razão e arredondamento; calibrar com preços reais.
+const SCAN_TOLERANCE_PERCENT: i64 = 10;
+
+fn base_name(name: &str) -> &str {
+    let name = name.strip_prefix("StatTrak™ ").unwrap_or(name);
+    let name = name.strip_prefix("Souvenir ").unwrap_or(name);
+    name.rsplit_once(" (").map_or(name, |(base, _)| base)
+}
+
+fn same_query(a: &Task, b: &Task) -> bool {
+    a.code == b.code && a.wear == b.wear && a.filters() == b.filters()
+}
+
+fn affordable(price: i64, max: i64) -> bool {
+    i128::from(price) * 100 <= i128::from(max) * (100 + i128::from(SCAN_TOLERANCE_PERCENT))
+}
+
+pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
     let task = h.lock().queue.focus(task.clone());
-    let task = &task;
+    if task.rare() {
+        return query_group(h, &task, vec![task.clone()]).await;
+    }
+    let (tasks, ratio, active) = {
+        let s = h.lock();
+        (
+            s.queue.tasks(),
+            s.ratio.map(|r| r.0),
+            s.active
+                .values()
+                .map(|a| a.task.clone())
+                .collect::<HashSet<_>>(),
+        )
+    };
+    let Some(ratio) = ratio.filter(|r| r.is_finite() && *r > 0.0) else {
+        return query_group(h, &task, tasks).await;
+    };
+    let base = base_name(&task.name);
+    let q = [
+        ("query", base.replace(" | ", " ")),
+        ("start", "0".into()),
+        ("count", "20".into()),
+        ("search_descriptions", "0".into()),
+        ("sort_column", "popular".into()),
+        ("sort_dir", "desc".into()),
+        ("appid", "730".into()),
+        ("norender", "1".into()),
+    ];
+    let v = h
+        .steam
+        .get_json(
+            crate::steam::client::Endpoint::Search,
+            "/market/search/render/",
+            &q,
+        )
+        .await?;
+    let page = search::parse_page(&v)?;
+    let limits: HashMap<String, Option<i64>> = watch::list(h)
+        .await?
+        .into_iter()
+        .filter(|r| r.mode == "barato")
+        .map(|r| (r.name, r.max_buy_cents))
+        .collect();
+    let group: Vec<Task> = tasks
+        .iter()
+        .filter(|t| !t.rare() && base_name(&t.name) == base)
+        .cloned()
+        .collect();
+    let mut eligible = Vec::new();
+    for t in &group {
+        let price = page
+            .entries
+            .iter()
+            .find(|e| e.name == t.name)
+            .map(|e| catalog::usd_to_brl(e.sell_price_usd_cents, ratio));
+        let max = limits.get(&t.name).copied().flatten();
+        if price.is_some() && t.id != task.id {
+            h.lock().queue.record_scan(&t.id, h.now());
+        }
+        if active.contains(&t.id) || price.zip(max).is_none_or(|(p, m)| affordable(p, m)) {
+            if price.is_some() || t.id == task.id || active.contains(&t.id) {
+                eligible.push(t.clone());
+            }
+        } else {
+            h.lock().cycle.saved_listings += 1;
+        }
+    }
+    while let Some(t) = eligible.pop() {
+        let duplicates: Vec<Task> = eligible
+            .iter()
+            .filter(|other| same_query(&t, other))
+            .cloned()
+            .collect();
+        eligible.retain(|other| !same_query(&t, other));
+        let mut targets = vec![t.clone()];
+        targets.extend(duplicates);
+        {
+            let mut s = h.lock();
+            s.queue.credit = (s.queue.credit + DISCOVERY_SHARE).min(CREDIT_CAP);
+        }
+        query_group(h, &t, targets).await?;
+    }
+    Ok(())
+}
+
+async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Result<()> {
+    let mut targets: Vec<Task> = tasks.into_iter().filter(|t| same_query(task, t)).collect();
+    {
+        let mut s = h.lock();
+        let others = s.queue.tasks();
+        for other in others {
+            if targets.iter().any(|t| t.id == other.id) {
+                continue;
+            }
+            let focused = if other.rare() {
+                let Some(entry) = s.queue.entries.get(&other.id) else {
+                    continue;
+                };
+                Task {
+                    seeds: vec![other.seeds[entry.cursor % other.seeds.len()]],
+                    ..other.clone()
+                }
+            } else {
+                other.clone()
+            };
+            if same_query(task, &focused) {
+                targets.push(s.queue.focus(other));
+            }
+        }
+    }
     let page =
         listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &task.filters()).await?;
-    let out = detect::process(h, task, &page).await?;
-    h.lock().queue.reward(&task.id, h.now(), out.rewarded);
+    for t in &targets {
+        let out = detect::process(h, t, &page).await?;
+        h.lock().queue.reward(&t.id, h.now(), out.rewarded);
+    }
     Ok(())
 }
 
@@ -602,6 +718,20 @@ pub async fn run(h: Arc<Hunt>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_threshold_includes_tolerance_and_groups_variants() {
+        assert!(affordable(110, 100));
+        assert!(!affordable(111, 100));
+        assert_eq!(
+            base_name("StatTrak™ Glock-18 | Moonrise (Factory New)"),
+            base_name("Glock-18 | Moonrise (Field-Tested)")
+        );
+        assert_eq!(
+            base_name("Souvenir Glock-18 | Moonrise (Battle-Scarred)"),
+            "Glock-18 | Moonrise"
+        );
+    }
 
     fn task(id: &str, score: f64) -> Task {
         Task {
@@ -838,23 +968,6 @@ mod tests {
         assert_eq!(task("d", 1.0).floor_key(), "d");
     }
 
-    #[test]
-    fn float_arm_filters_low_float_on_the_server() {
-        let t = task("f:X (Field-Tested)", 1.0);
-        assert_eq!(t.mode(), Mode::Float);
-        let PropFilter::Float { min, max, .. } = t.filters()[0] else {
-            panic!("esperava filtro de float");
-        };
-        assert!(
-            (min - 0.15).abs() < 1e-9 && (max - 0.18).abs() < 1e-9,
-            "{min} {max}"
-        );
-        // Factory New: largura 0,07 → 40 % = 0,028 (menor que 0,03)
-        let (lo, hi) = low_float_band(0);
-        assert!(lo == 0.0 && (hi - 0.028).abs() < 1e-9);
-        assert_eq!(task("d:X", 1.0).mode(), Mode::Cheap);
-    }
-
     fn rare(id: &str) -> Task {
         Task {
             seeds: vec![(1, 2)],
@@ -866,7 +979,7 @@ mod tests {
     /// pesos deixava 1 raro entre 40 descontos com 4 % e 24 raros contra 1 desconto com 90 %).
     #[test]
     fn every_mode_keeps_its_floor_whatever_its_arm_count() {
-        let floor = EXPLORE_SHARE / 3.0 * 0.9; // ~3,75 %: a cota de exploração dividida por 3 modos
+        let floor = EXPLORE_SHARE / 2.0 * 0.9; // cota de exploração dividida por 2 modos
         let run = |tasks: Vec<Task>, mode: Mode| {
             let mut q = Queue::default();
             q.set_tasks(tasks);

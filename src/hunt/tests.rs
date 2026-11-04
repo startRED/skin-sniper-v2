@@ -18,6 +18,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const NOW: i64 = 1_793_754_060; // um minuto depois do último ponto da captura de histórico
@@ -66,7 +67,8 @@ fn csfloat_body() -> Value {
 struct Bodies {
     listings: Mutex<Value>,
     history: Value,
-    search: Value,
+    search: Mutex<Value>,
+    listing_queries: AtomicUsize,
     csfloat: Value,
 }
 
@@ -74,7 +76,8 @@ async fn serve() -> (String, Arc<Bodies>) {
     let b = Arc::new(Bodies {
         listings: Mutex::new(listings_body()),
         history: fixture("steam_pricehistory_moonrise_ft.json"),
-        search: search_body(),
+        search: Mutex::new(search_body()),
+        listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
     });
     async fn actions(
@@ -83,6 +86,7 @@ async fn serve() -> (String, Arc<Bodies>) {
     ) -> Json<Value> {
         match q.get("q").map(String::as_str) {
             Some("QueryListingsForItem") => {
+                b.listing_queries.fetch_add(1, Ordering::Relaxed);
                 let mut body = b.listings.lock().unwrap().clone();
                 // como a Valve: faixa de seed (propriedade 1) filtra os anúncios
                 let qp: Value = serde_json::from_str(q.get("qp").unwrap()).unwrap();
@@ -108,7 +112,9 @@ async fn serve() -> (String, Arc<Bodies>) {
         .route("/market/actions", get(actions))
         .route(
             "/market/search/render/",
-            get(|AxState(b): AxState<Arc<Bodies>>| async move { Json(b.search.clone()) }),
+            get(|AxState(b): AxState<Arc<Bodies>>| async move {
+                Json(b.search.lock().unwrap().clone())
+            }),
         )
         .route(
             "/history/{name}/sales",
@@ -324,6 +330,43 @@ async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Ve
         }
     }
     found
+}
+
+#[tokio::test]
+async fn search_skips_expensive_and_deduplicates_affordable_listings() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    run_until_two(&h, &mut rx).await;
+    let task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    let mut duplicate = task.clone();
+    duplicate.id = format!("d:duplicada:{MOON}");
+    {
+        let mut s = h.lock();
+        s.queue.set_tasks(vec![task.clone(), duplicate.clone()]);
+        s.active.clear();
+        s.floors.clear();
+        s.cycle.saved_listings = 0;
+    }
+    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(10000);
+    let before = bodies.listing_queries.load(Ordering::Relaxed);
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), before);
+    assert_eq!(h.lock().cycle.saved_listings, 2);
+
+    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(100);
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), before + 1);
+    let s = h.lock();
+    assert!(s.floors.contains_key(&task.id));
+    assert!(s.floors.contains_key(&duplicate.id));
 }
 
 #[tokio::test]

@@ -129,12 +129,6 @@ pub enum PropFilter {
         min: i64,
         max: i64,
     },
-    /// Float (wear = propriedade 2). Vai como número.
-    Float {
-        property_id: u32,
-        min: f64,
-        max: f64,
-    },
 }
 
 impl PropFilter {
@@ -146,17 +140,9 @@ impl PropFilter {
         }
     }
 
-    pub fn float(min: f64, max: f64) -> Self {
-        Self::Float {
-            property_id: PROP_WEAR as u32,
-            min,
-            max,
-        }
-    }
-
     fn id(&self) -> u32 {
         match self {
-            Self::Int { property_id, .. } | Self::Float { property_id, .. } => *property_id,
+            Self::Int { property_id, .. } => *property_id,
         }
     }
 
@@ -168,13 +154,6 @@ impl PropFilter {
                 max,
             } => {
                 json!({"property_id": property_id, "int_min": min.to_string(), "int_max": max.to_string()})
-            }
-            Self::Float {
-                property_id,
-                min,
-                max,
-            } => {
-                json!({"property_id": property_id, "float_min": min, "float_max": max})
             }
         }
     }
@@ -573,18 +552,12 @@ mod tests {
 
     #[test]
     fn qp_has_string_ints_and_price_sort() {
-        let qp = build_qp(
-            "G180420B6053004",
-            20,
-            &[PropFilter::seed(58, 66), PropFilter::float(0.0, 0.02)],
-        )
-        .unwrap();
+        let qp = build_qp("G180420B6053004", 20, &[PropFilter::seed(58, 66)]).unwrap();
         let q = &qp[0];
         assert_eq!(
             q["propertyFilters"]["1"],
             json!({"property_id": 1, "int_min": "58", "int_max": "66"})
         );
-        assert_eq!(q["propertyFilters"]["2"]["float_max"], json!(0.02));
         assert_eq!(q["sort"], json!({"field": 0, "direction": 0}));
         assert_eq!(q["start"], 20);
         assert_eq!(q["strItemName"], "G180420B6053004");

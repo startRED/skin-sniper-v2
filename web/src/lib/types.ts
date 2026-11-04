@@ -72,7 +72,7 @@ export type WatchRow = {
   kind: 'desconto' | 'raro';
   group: string | null;
   last_checked_at: number | null;
-  mode: 'barato' | 'seed' | 'float';
+  mode: 'barato' | 'seed';
   score: number;
   reason: string;
 };

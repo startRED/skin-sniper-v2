@@ -39,8 +39,7 @@ Para desligar: Gerenciador de Tarefas → `skin-sniper.exe` → Finalizar tarefa
 - **Melhor combinação:** as skins que cabem juntas no seu saldo e rendem mais, já contando o risco.
   O aviso no celular e no PC só sai para skin que ainda dá lucro contando o risco.
 - **Vigiando:** as skins que o Skin Sniper está olhando agora e até quanto compraria cada uma. As
-  etiquetas dizem o que ele procura nela: **Barato** (anúncio abaixo do normal), **Seed** (pattern raro)
-  e **Float** (desgaste raro). Ele vigia mais o que mais rendeu.
+  etiquetas dizem o que ele procura nela: **Barato** (anúncio abaixo do normal) e **Seed** (pattern raro). Ele vigia mais o que mais rendeu.
 - **Perdidas nas últimas 24 h:** oportunidades que saíram da lista (alguém comprou antes, o anúncio
   sumiu ou deixou de dar lucro). Ficam apagadas, sem botão de compra, só para você ver o que escapou.
 - **"A Steam pediu calma":** a Steam limitou as consultas; a caça para sozinha e volta depois.
