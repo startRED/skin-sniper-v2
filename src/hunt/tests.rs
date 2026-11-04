@@ -366,6 +366,66 @@ async fn cheaper_competitor_reevaluates_known_opportunity() {
 }
 
 #[tokio::test]
+async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    // passa pelo fluxo real uma vez (catálogo, histórico, CSFloat); o T1 sai com o médio a R$ 8,87
+    assert_eq!(run_until_two(&h, &mut rx).await.len(), 2);
+    let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let t1 = page
+        .listings
+        .iter()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap()
+        .clone();
+    let ranges = crate::pricing::groups::seed_ranges(MOON);
+    let (lo, hi) = *ranges.iter().find(|r| !(r.0..=r.1).contains(&59)).unwrap();
+    let rare = |seeds| Task {
+        id: "r:G1:ft".into(),
+        name: MOON.into(),
+        code: "G1".into(),
+        wear: None,
+        seeds,
+        score: 1.0,
+    };
+    let only = |l: Listing| {
+        let mut p = page.clone();
+        p.listings = vec![l];
+        p
+    };
+    // outro T1 Center Star na faixa de seed vizinha: a página do T1 a R$ 7,00 não o mostra
+    let range59 = *ranges.iter().find(|r| (r.0..=r.1).contains(&59)).unwrap();
+    let mut rival = t1.clone();
+    rival.listing_id = "1".into();
+    rival.seed = Some(lo);
+    let mut gone = None;
+    // R$ 9,50 fica acima do médio (R$ 8,87): nada muda. R$ 8,00 limita o médio a R$ 7,99, líquido abaixo dos
+    // R$ 7,00 pagos, e o T1 deixa de ser oportunidade.
+    for price in [950, 800] {
+        rival.price_cents = price;
+        detect::process(&h, &rare(vec![(lo, hi)]), &only(rival.clone()))
+            .await
+            .unwrap();
+        detect::process(&h, &rare(vec![range59]), &only(t1.clone()))
+            .await
+            .unwrap();
+        assert_eq!(h.lock().evaluated[ID_T1].2, Some(price));
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Gone { id } = ev {
+                gone = Some(id);
+            }
+        }
+        if price == 950 {
+            assert_eq!(gone, None);
+            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, 887);
+        }
+    }
+    assert_eq!(gone.as_deref(), Some(ID_T1));
+}
+
+#[tokio::test]
 async fn search_skips_expensive_and_deduplicates_affordable_listings() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();

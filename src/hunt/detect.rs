@@ -2,7 +2,7 @@
 //! no banco e evento SSE; anúncio que sumiu numa nova consulta da mesma tarefa → `gone`.
 //! Docs/projeto.md, "Caça" 4 e "Precificação".
 
-use super::catalog::{HISTORY_TTL, min_profit, wear_label, window_stats};
+use super::catalog::{FLOOR_TTL, HISTORY_TTL, min_profit, wear_label, window_stats};
 use super::scheduler::{Found, NEAR_WEIGHT, Task};
 use super::{Active, Hunt};
 use crate::notify::{Alert, NotifyError};
@@ -401,6 +401,33 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     let mut out = Outcome::default();
     let floor = relevant.iter().map(|l| l.price_cents).min();
     h.lock().floors.insert(task.floor_key(), (floor, now));
+    let key = |x: &Listing| group_of(&x.name, x.seed.map(u32::from), x.paint_index).map(|g| g.key);
+    // Raro: o menor anúncio de cada (nome, grupo) nas outras faixas, vistas há menos de FLOOR_TTL.
+    // shortcut: o concorrente novo de uma faixa só pesa na oportunidade de outra quando a dela é consultada de
+    // novo; se isso deixar lucro velho na tela, reavaliar as ativas do mesmo grupo aqui.
+    let mut elsewhere = super::Rivals::new();
+    if task.rare() {
+        let mut here = super::Rivals::new();
+        for l in &relevant {
+            let p = here
+                .entry((l.name.clone(), key(l)))
+                .or_insert(l.price_cents);
+            *p = (*p).min(l.price_cents);
+        }
+        let (mine, prefix) = (task.floor_key(), format!("{}#", task.id));
+        let mut s = h.lock();
+        for (_, (_, m)) in s
+            .rivals
+            .iter()
+            .filter(|(k, (at, _))| **k != mine && k.starts_with(&prefix) && now - at < FLOOR_TTL)
+        {
+            for (g, &p) in m {
+                let e = elsewhere.entry(g.clone()).or_insert(p);
+                *e = (*e).min(p);
+            }
+        }
+        s.rivals.insert(mine, (now, here));
+    }
     let ids: Vec<String> = relevant.iter().map(|l| l.listing_id.clone()).collect();
     if let Err(error) = h.db.call(move |c| {
         let tx = c.transaction()?;
@@ -490,15 +517,14 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             continue; // não cabe agora; se o saldo subir, ainda é novo
         }
         // Concorrência = outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns): um comum
-        // barato não segura a venda de um T1.
-        let key =
-            |x: &Listing| group_of(&x.name, x.seed.map(u32::from), x.paint_index).map(|g| g.key);
+        // barato não segura a venda de um T1. Inclui as outras faixas do mesmo raro.
         let mine = key(l);
         let others_min = page
             .listings
             .iter()
             .filter(|o| o.name == l.name && o.listing_id != l.listing_id && key(o) == mine)
             .map(|o| o.price_cents)
+            .chain(elsewhere.get(&(l.name.clone(), mine.clone())).copied())
             .min();
         // Já visto: só reavalia se o preço, o histórico ou o menor concorrente mudaram desde a última
         // avaliação (ou se é oportunidade ativa e o histórico passou do prazo: a avaliação pode rebaixá-la).
