@@ -10,8 +10,8 @@
 //!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
 //!    caber no saldo.
 //!
-//! shortcut: a varredura cobre `SCAN_ROUNDS` páginas (60 itens) por categoria, não o catálogo inteiro (cada
-//! página custa uma consulta e há milhares); subir se faltarem candidatos para o saldo.
+//! shortcut: a varredura cobre `SCAN_ROUNDS` páginas do topo e `TAIL_ROUNDS` amostras da cauda por categoria,
+//! não o catálogo inteiro (cada página custa uma consulta e há milhares); subir se faltarem candidatos para o saldo.
 
 use super::scheduler::Task;
 use super::{Hunt, detect};
@@ -29,6 +29,9 @@ use rusqlite::{OptionalExtension, params};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 pub const SCAN_ROUNDS: u32 = 6;
+/// Rodadas depois do topo: uma página por faixa de popularidade que dobra (60–120, 120–240, … 1920–3840), outra
+/// a cada dia. É lá que ficam as de giro lento, com mais folga de preço que as de centenas de vendas/dia.
+pub const TAIL_ROUNDS: u32 = 6;
 pub const HISTORY_TTL: i64 = 6 * 3600;
 pub const CATALOG_TTL: i64 = 24 * 3600;
 pub const MIN_SALES_PER_DAY: f64 = 1.0;
@@ -125,6 +128,22 @@ pub fn window_stats(points: &[PricePoint], now: i64) -> Option<(f64, f64)> {
     let p50 = weighted_quantile(&pairs, 0.5)?;
     let p10 = weighted_quantile(&pairs, 0.1)?;
     Some((total / 7.0, ((p50 - p10) / p50).max(0.0)))
+}
+
+/// Início da página da rodada: o topo em sequência, depois uma página da faixa da cauda que gira com o dia.
+/// A faixa termina no total da categoria (quando já visto); faixa toda além dele não gasta consulta (`None`).
+pub fn scan_start(round: u32, day: i64, total: Option<u32>) -> Option<u32> {
+    let (lo, hi) = if round < SCAN_ROUNDS {
+        (round * 10, round * 10 + 10)
+    } else {
+        let base = (SCAN_ROUNDS * 10) << (round - SCAN_ROUNDS).min(20);
+        (base, 2 * base)
+    };
+    let pages = hi
+        .min(total.unwrap_or(u32::MAX))
+        .saturating_sub(lo)
+        .div_ceil(10);
+    (pages > 0).then(|| lo + day.rem_euclid(i64::from(pages)) as u32 * 10)
 }
 
 /// Lucro mínimo para entrar na lista a esse preço de compra: R$ 0,20 e 5 % (as mesmas regras de `sell::evaluate`).
@@ -306,6 +325,8 @@ pub struct Discovery {
     scanning: bool,
     round: u32,
     scan_left: VecDeque<search::Category>,
+    /// `total_count` de cada categoria, visto na última página dela.
+    totals: HashMap<search::Category, u32>,
     /// Skins com tabela ainda sem busca por nome neste ciclo.
     skins_left: VecDeque<String>,
     history: VecDeque<String>,
@@ -396,7 +417,10 @@ pub async fn step(h: &Hunt) -> Result<bool> {
             }
             Next::Scan(cat, start) => {
                 let r = scan_page(h, cat, start).await;
-                finish_scan(h, cat, r).await?;
+                if let Ok(total) = r {
+                    h.lock().disc.totals.insert(cat, total);
+                }
+                finish_scan(h, cat, r.map(|_| ())).await?;
                 return Ok(true);
             }
             Next::Skin(name) => {
@@ -462,9 +486,12 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
         let mut s = h.lock();
         let ratio_known = s.ratio.is_some();
         let d = &mut s.disc;
-        if let Some(cat) = d.scan_left.front().copied() {
-            d.scan_left.pop_front();
-            Pre::Done(Next::Scan(cat, d.round * 10))
+        let day = now.div_euclid(DAY);
+        let scan = std::iter::from_fn(|| d.scan_left.pop_front()).find_map(|cat| {
+            scan_start(d.round, day, d.totals.get(&cat).copied()).map(|s| (cat, s))
+        });
+        if let Some((cat, start)) = scan {
+            Pre::Done(Next::Scan(cat, start))
         } else if let Some(name) = d.skins_left.pop_front() {
             Pre::Done(Next::Skin(name))
         } else if d.want_samples && d.samples.len() < RATIO_SAMPLES && d.tries < RATIO_MAX_TRIES {
@@ -477,7 +504,7 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
             d.hist_ready = false; // lote cheio: pode haver mais candidatos nesta rodada
             d.last_batch = 0;
             Pre::Again
-        } else if d.scanning && d.round + 1 < SCAN_ROUNDS {
+        } else if d.scanning && d.round + 1 < SCAN_ROUNDS + TAIL_ROUNDS {
             Pre::Advance
         } else {
             d.finished = true;
@@ -536,9 +563,11 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
     }
 }
 
-async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
+/// Grava a página e devolve o `total_count` da categoria.
+async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<u32> {
     let page = search::fetch_page(&h.steam, cat, start).await?;
-    store_entries(h, page.entries, i64::from(start)).await
+    store_entries(h, page.entries, i64::from(start)).await?;
+    Ok(page.total_count)
 }
 
 /// Busca por nome de uma skin com tabela: traz todos os desgastes com o código G e o piso em USD. Falha
@@ -937,6 +966,28 @@ mod tests {
         assert_eq!(possible_profit(1000, 0.2), 1088 - 1000);
         assert_eq!(min_profit(1000), 50);
         assert_eq!(min_profit(100), 20);
+    }
+
+    #[test]
+    fn scan_covers_the_top_then_samples_the_tail_by_day() {
+        let at = |r, day| scan_start(r, day, None).unwrap();
+        let top: Vec<u32> = (0..SCAN_ROUNDS).map(|r| at(r, 7)).collect();
+        assert_eq!(top, [0, 10, 20, 30, 40, 50]);
+        assert_eq!((at(6, 0), at(6, 5), at(6, 6)), (60, 110, 60));
+        for r in SCAN_ROUNDS..SCAN_ROUNDS + TAIL_ROUNDS {
+            let base = 60 << (r - SCAN_ROUNDS);
+            for day in [-1, 0, 1, 20_000] {
+                assert!((base..2 * base).contains(&at(r, day)));
+            }
+        }
+        assert_ne!(at(11, 0), at(11, 1));
+        // rifles com 2.947: a última faixa (1920–3840) só pede páginas que existem
+        assert!((0..400).all(|d| scan_start(11, d, Some(2947)).unwrap() < 2947));
+        assert_eq!(scan_start(11, 103, Some(2947)), Some(1920));
+        // categoria pequena: faixa além do total não gasta consulta, nem a do topo
+        assert_eq!(scan_start(9, 0, Some(450)), None);
+        assert_eq!(scan_start(5, 0, Some(45)), None);
+        assert_eq!(scan_start(4, 0, Some(45)), Some(40));
     }
 
     #[test]

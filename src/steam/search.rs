@@ -9,7 +9,7 @@ use super::client::{Endpoint, Error, Result, SteamClient};
 const ICON_BASE: &str = "https://community.fastly.steamstatic.com/economy/image/";
 
 /// Categorias de arma. Faca e luva ficam de fora de propósito: nunca cabem numa banca pequena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Category {
     Pistol,
     Rifle,

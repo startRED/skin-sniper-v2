@@ -244,8 +244,9 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
 
 ## Desvios registrados (caça, implementação)
 
-- Varredura limitada a 6 páginas (60 itens) por categoria por ciclo, intercaladas entre as categorias: cada página
-  é uma consulta e o catálogo tem milhares. Os candidatos vêm só do que a varredura viu.
+- Varredura limitada a 6 páginas do topo (60 itens) e 6 amostras da cauda por categoria por ciclo, intercaladas
+  entre as categorias: cada página é uma consulta e o catálogo tem milhares. A cauda pega uma página por faixa de
+  popularidade que dobra (60–120 … 1920–3840), outra a cada dia: é onde ficam as de giro lento. Os candidatos vêm só do que a varredura viu.
 - A razão BRL/USD é a mediana de até 3 amostras (menor anúncio em BRL ÷ menor ask em USD do mesmo item, de US$ 1 a
   US$ 20), guardada em `settings` (`usd_brl_ratio`) e remedida a cada 24 h.
 - Consulta de desconto e de raro levam o filtro de desgaste do nome (`Exterior`); o código cobre todos os
