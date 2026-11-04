@@ -162,10 +162,15 @@ pub mod tempfile_dir {
     impl Dir {
         pub fn new() -> Dir {
             static N: AtomicU32 = AtomicU32::new(0);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
             let p = std::env::temp_dir().join(format!(
-                "sniper-test-{}-{}",
+                "sniper-test-{}-{}-{}",
                 std::process::id(),
-                N.fetch_add(1, Ordering::Relaxed)
+                N.fetch_add(1, Ordering::Relaxed),
+                timestamp
             ));
             std::fs::create_dir_all(&p).unwrap();
             Dir(p)
