@@ -470,13 +470,17 @@ impl SteamClient {
     }
 
     /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms`).
-    fn saved_pace(l: &mut Limiter, now: Instant) -> String {
-        let s = l.stats(now);
+    fn saved_pace(g: &mut Inner, now: Instant) -> String {
+        let s = g.limiter.stats(now);
+        let anon = g
+            .anon_reads_until
+            .filter(|t| *t > now)
+            .map_or(0, |t| unix_in(t - now));
         format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{anon}",
             s.paused_until.unwrap_or(0),
             s.gap_ms,
-            l.pause_len.as_millis()
+            g.limiter.pause_len.as_millis()
         )
     }
 
@@ -488,9 +492,16 @@ impl SteamClient {
         else {
             return;
         };
+        let anon = parts.next();
         let now = Instant::now();
         let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
-        let l = &mut self.inner.lock().unwrap().limiter;
+        let g = &mut *self.inner.lock().unwrap();
+        let anon_left = anon.and_then(|r| r.ok()).unwrap_or(0) - unix_in(Duration::ZERO);
+        if anon_left > 0 {
+            g.anon_reads_until =
+                Some(now + Duration::from_secs(anon_left as u64).min(ANON_AFTER_429));
+        }
+        let l = &mut g.limiter;
         l.gap = ms(gap).clamp(MIN_GAP, MAX_GAP);
         let quiet = unix_in(Duration::ZERO) - until >= PAUSE_RESET_AFTER.as_secs() as i64;
         if let Some(Ok(p)) = pause.filter(|_| !quiet) {
@@ -504,7 +515,8 @@ impl SteamClient {
         }
     }
 
-    /// Chamado (fora do lock) a cada 429, de qualquer endpoint, com o texto para `restore_pace`.
+    /// Chamado (fora do lock) a cada 429, de qualquer endpoint, com o texto para `restore_pace` (o 4º
+    /// campo é o fim das leituras sem login).
     pub fn on_pace_change(&self, f: impl Fn(String) + Send + Sync + 'static) {
         self.inner.lock().unwrap().on_pace = Some(Arc::new(f));
     }
@@ -532,10 +544,6 @@ impl SteamClient {
     /// nas 6 h depois de um 429 logado (`ANON_AFTER_429`).
     pub async fn action(&self, ep: Endpoint, method: &str, qp: &Value) -> Result<Value> {
         for attempt in 0..2 {
-            let auth = {
-                let g = self.inner.lock().unwrap();
-                g.anon_reads_until.is_none_or(|t| Instant::now() >= t)
-            };
             let req = self
                 .http
                 .get(self.url("/market/actions"))
@@ -543,7 +551,7 @@ impl SteamClient {
                 .header("x-valve-request-type", "queryAction")
                 .header("accept", "application/json, text/javascript, */*");
             let response = self
-                .send_checked(ep, req, auth, Some(envelope_problem), attempt == 0)
+                .send_checked(ep, req, true, Some(envelope_problem), attempt == 0)
                 .await;
             if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -648,7 +656,10 @@ impl SteamClient {
         let mut sent_by: Option<String> = None;
         if auth {
             let g = self.inner.lock().unwrap();
-            if let Some(c) = &g.cookie {
+            // Decidido depois da vaga: um 429 logado de outra consulta durante a espera já vale para esta.
+            let anon = matches!(ep, Endpoint::Listings | Endpoint::History)
+                && g.anon_reads_until.is_some_and(|t| Instant::now() < t);
+            if let Some(c) = g.cookie.as_ref().filter(|_| !anon) {
                 sent_by = Some(c.steam_login_secure.clone());
                 let mut h = c.header();
                 for (k, v) in &g.extra {
@@ -696,8 +707,20 @@ impl SteamClient {
             let mut g = self.inner.lock().unwrap();
             if sent_by.is_some() && matches!(ep, Endpoint::Listings | Endpoint::History) {
                 // A Steam segurou a conta, não o IP: sem pausa, a próxima leitura (no ritmo) vai sem login.
-                g.anon_reads_until = Some(now + ANON_AFTER_429);
+                // 429 de uma sessão que já saiu não marca a conta nova.
+                let current = g.cookie.as_ref().map(|c| c.steam_login_secure.as_str());
+                let saved = if current == sent_by.as_deref() {
+                    g.anon_reads_until = Some(now + ANON_AFTER_429);
+                    g.on_pace
+                        .clone()
+                        .map(|f| (f, Self::saved_pace(&mut g, now)))
+                } else {
+                    None
+                };
                 drop(g);
+                if let Some((f, v)) = saved {
+                    f(v);
+                }
                 tracing::warn!(endpoint = ?ep, "Steam: 429 logado; leituras seguem sem login por 6 h");
                 return Err(Error::RateLimited {
                     until: unix_in(Duration::ZERO),
@@ -712,7 +735,7 @@ impl SteamClient {
             let saved = g
                 .on_pace
                 .clone()
-                .map(|f| (f, Self::saved_pace(&mut g.limiter, now)));
+                .map(|f| (f, Self::saved_pace(&mut g, now)));
             drop(g);
             if let Some((f, v)) = saved {
                 f(v);
@@ -1179,6 +1202,9 @@ mod tests {
             .unwrap();
         assert_eq!(d["ok"], true);
         assert!(c.stats().last_query_at.is_some());
+        let saved = Arc::new(Mutex::new(String::new()));
+        let keep = saved.clone();
+        c.on_pace_change(move |v| *keep.lock().unwrap() = v);
         // 429 logado: sem pausa nem alongamento; a próxima vai sem login.
         let e = c
             .action(Endpoint::History, "Limit", &serde_json::json!([1]))
@@ -1187,6 +1213,17 @@ mod tests {
         assert!(matches!(e, Error::RateLimited { .. }));
         let s = c.stats();
         assert_eq!((s.paused_until, s.gap_ms), (None, 100));
+        // O prazo sem login sobrevive a um reinício.
+        let v = saved.lock().unwrap().clone();
+        let anon: i64 = v.rsplit('|').next().unwrap().parse().unwrap();
+        assert!(anon > unix_in(Duration::from_secs(5 * 3600)), "{v}");
+        let again = fast(&base);
+        again.set_cookie(c.cookie());
+        again.restore_pace(&v);
+        again
+            .action(Endpoint::Listings, "Anon", &serde_json::json!([1]))
+            .await
+            .unwrap();
         c.action(Endpoint::Listings, "Anon", &serde_json::json!([1]))
             .await
             .unwrap();
