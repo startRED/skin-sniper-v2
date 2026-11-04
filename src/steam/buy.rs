@@ -5,6 +5,7 @@
 //! são montadas a partir da forma documentada, não capturadas. Nenhum teste faz compra real.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -34,17 +35,37 @@ pub enum BuyOutcome {
     Uncertain { message: String },
 }
 
+/// Estado de cada anúncio já tocado. Só `Awaiting` aceita reenvio (com o id da confirmação); os outros
+/// recusam um novo POST: um anúncio não é comprado duas vezes por engano.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListingState {
+    /// POST em andamento.
+    InFlight,
+    /// A Steam pediu confirmação no app; aguardando reenvio com este id.
+    Awaiting {
+        id: String,
+    },
+    Bought,
+    /// Recusa conclusiva da Steam (anúncio vendido, etc.).
+    Failed,
+    /// Não sabemos se comprou (5xx, rede, corpo ilegível, prazo). Só sai por `resolve`.
+    Uncertain,
+}
+
 struct Cfg {
     /// Saldo conhecido (centavos). `None` = não sei, não bloqueia.
     balance: Option<i64>,
     /// `tradefee_tax`; esperado 0 na conta BR (HIPÓTESE, pesquisa-web 3.1) até que se indique outro valor.
     tradefee_tax: i64,
+    states: HashMap<String, ListingState>,
 }
 
 /// Uma compra por vez: o lock é segurado durante todo o fluxo, inclusive as tentativas de confirmação.
 pub struct Buyer {
     lock: tokio::sync::Mutex<()>,
     cfg: Mutex<Cfg>,
+    /// Prazo absoluto de cada operação (espera do limitador + resposta + reenvios).
+    timeout: Duration,
 }
 
 impl Default for Buyer {
@@ -60,7 +81,9 @@ impl Buyer {
             cfg: Mutex::new(Cfg {
                 balance: None,
                 tradefee_tax: 0,
+                states: HashMap::new(),
             }),
+            timeout: CONFIRM_TIMEOUT,
         }
     }
 
@@ -76,7 +99,32 @@ impl Buyer {
         self.cfg.lock().unwrap().tradefee_tax = cents.max(0);
     }
 
-    /// Primeiro envio (`confirmation = "0"`). Recusa sem tocar na rede se o total passa do saldo conhecido.
+    /// Estado do anúncio (para o painel mostrar "confira na Steam").
+    pub fn state_of(&self, listing_id: &str) -> Option<ListingState> {
+        self.cfg.lock().unwrap().states.get(listing_id).cloned()
+    }
+
+    /// Reconciliação explícita de um resultado incerto (ou de uma confirmação que estourou o prazo):
+    /// depois de conferir inventário/saldo na Steam, diga se comprou. `false` libera nova tentativa.
+    /// Só vale em `Uncertain` e `Awaiting`; devolve se algo mudou.
+    pub fn resolve(&self, listing_id: &str, bought: bool) -> bool {
+        let mut c = self.cfg.lock().unwrap();
+        match c.states.get(listing_id) {
+            Some(ListingState::Uncertain | ListingState::Awaiting { .. }) => {
+                if bought {
+                    c.states
+                        .insert(listing_id.to_string(), ListingState::Bought);
+                } else {
+                    c.states.remove(listing_id);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Primeiro envio (`confirmation = "0"`). Recusa sem tocar na rede se o anúncio já foi tocado ou se
+    /// o total passa do saldo conhecido.
     pub async fn buy_listing(
         &self,
         client: &SteamClient,
@@ -84,11 +132,12 @@ impl Buyer {
         wallet_currency: i32,
     ) -> BuyOutcome {
         let _g = self.lock.lock().await;
-        self.send_locked(client, listing, wallet_currency, "0")
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        self.send_locked(client, listing, wallet_currency, None, deadline)
             .await
     }
 
-    /// Reenvio com o id da confirmação.
+    /// Reenvio com o id da confirmação; só vale para um anúncio em `Awaiting`.
     pub async fn retry_confirmed(
         &self,
         client: &SteamClient,
@@ -97,10 +146,13 @@ impl Buyer {
         id: &str,
     ) -> BuyOutcome {
         let _g = self.lock.lock().await;
-        self.send_locked(client, listing, wallet_currency, id).await
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        self.send_locked(client, listing, wallet_currency, Some(id), deadline)
+            .await
     }
 
-    /// Compra e, se pedir confirmação, reenvia a cada 2 s por até 60 s. Segura o lock do começo ao fim.
+    /// Compra e, se pedir confirmação, reenvia a cada 2 s. O prazo de 60 s vale para a operação inteira,
+    /// incluindo a espera do limitador e a resposta de cada POST. Segura o lock do começo ao fim.
     pub async fn buy_until_confirmed(
         &self,
         client: &SteamClient,
@@ -108,28 +160,56 @@ impl Buyer {
         wallet_currency: i32,
     ) -> BuyOutcome {
         let _g = self.lock.lock().await;
+        let deadline = tokio::time::Instant::now() + self.timeout;
         let first = self
-            .send_locked(client, listing, wallet_currency, "0")
+            .send_locked(client, listing, wallet_currency, None, deadline)
             .await;
         let clock = TokioClock::new();
-        buy_until_confirmed(&clock, first, |id| async move {
-            self.send_locked(client, listing, wallet_currency, &id)
+        buy_until_confirmed(&clock, self.timeout, first, |id| async move {
+            self.send_locked(client, listing, wallet_currency, Some(&id), deadline)
                 .await
         })
         .await
     }
 
+    /// `confirmation`: `None` = primeiro envio ("0"); `Some(id)` = reenvio confirmado.
     async fn send_locked(
         &self,
         client: &SteamClient,
         l: &Listing,
         wallet_currency: i32,
-        confirmation: &str,
+        confirmation: Option<&str>,
+        deadline: tokio::time::Instant,
     ) -> BuyOutcome {
-        let (balance, tax) = {
+        let (balance, tax, state) = {
             let c = self.cfg.lock().unwrap();
-            (c.balance, c.tradefee_tax)
+            (
+                c.balance,
+                c.tradefee_tax,
+                c.states.get(&l.listing_id).cloned(),
+            )
         };
+        match (&state, confirmation) {
+            (None, None) | (Some(ListingState::Awaiting { .. }), Some(_)) => {}
+            (None, Some(_)) => return failed("Esse anúncio não está esperando confirmação."),
+            (Some(ListingState::Awaiting { .. }), None) => {
+                return failed("Esse anúncio já está esperando confirmação no app da Steam.");
+            }
+            (Some(ListingState::InFlight), _) => {
+                return failed("Já existe uma compra desse anúncio em andamento.");
+            }
+            (Some(ListingState::Bought), _) => return failed("Esse anúncio já foi comprado."),
+            (Some(ListingState::Failed), _) => {
+                return failed(
+                    "A Steam já recusou esse anúncio (provavelmente foi vendido). Atualize a lista e escolha outro.",
+                );
+            }
+            (Some(ListingState::Uncertain), _) => {
+                return BuyOutcome::Uncertain {
+                    message: "O resultado dessa compra não foi confirmado. Confira seu inventário e o saldo na Steam antes de tentar de novo.".into(),
+                };
+            }
+        }
         let total = l.seller_cents + l.fee_cents + tax;
         if l.currency != wallet_currency {
             return failed(
@@ -163,20 +243,62 @@ impl Buyer {
                 ),
             )
             .header("origin", "https://steamcommunity.com")
-            .multipart(form(l, wallet_currency, tax, &sessionid, confirmation));
-        match client.send(Endpoint::Buy, req, true).await {
-            Ok((parts, body)) => {
+            .multipart(form(
+                l,
+                wallet_currency,
+                tax,
+                &sessionid,
+                confirmation.unwrap_or("0"),
+            ));
+        self.cfg
+            .lock()
+            .unwrap()
+            .states
+            .insert(l.listing_id.clone(), ListingState::InFlight);
+        // O prazo cobre a espera do limitador e a resposta. Se estourar, o POST pode ter saído: incerto.
+        let sent = tokio::time::timeout_at(deadline, client.send(Endpoint::Buy, req, true)).await;
+        let (out, new_state) = match sent {
+            Err(_) => (
+                BuyOutcome::Uncertain {
+                    message: "A Steam não respondeu a tempo. Confira seu inventário e o saldo antes de tentar de novo.".into(),
+                },
+                Some(ListingState::Uncertain),
+            ),
+            Ok(Ok((parts, body))) => {
                 let out = parse_response(parts.status, &body);
-                if let BuyOutcome::Bought {
-                    new_balance_cents: Some(nb),
-                } = &out
-                {
-                    self.cfg.lock().unwrap().balance = Some(*nb);
-                }
-                out
+                let st = match &out {
+                    BuyOutcome::Bought { .. } => Some(ListingState::Bought),
+                    BuyOutcome::NeedConfirmation { id } => Some(ListingState::Awaiting { id: id.clone() }),
+                    BuyOutcome::Uncertain { .. } => Some(ListingState::Uncertain),
+                    // 429: a Steam recusou sem comprar; dá para tentar de novo depois
+                    _ if parts.status == 429 => state,
+                    _ => Some(ListingState::Failed),
+                };
+                (out, st)
             }
-            Err(e) => map_client_error(&e),
+            Ok(Err(e)) => {
+                let out = map_client_error(&e);
+                let st = match &out {
+                    BuyOutcome::Uncertain { .. } => Some(ListingState::Uncertain),
+                    // nada saiu (breaker/limite) ou sessão recusada: volta ao estado de antes
+                    _ => state,
+                };
+                (out, st)
+            }
+        };
+        let mut c = self.cfg.lock().unwrap();
+        if let BuyOutcome::Bought { new_balance_cents } = &out {
+            // sem saldo novo válido, desconta o total confirmado: a próxima compra não passa com saldo velho
+            c.balance = match new_balance_cents {
+                Some(nb) => Some(*nb),
+                None => c.balance.map(|b| (b - total).max(0)),
+            };
         }
+        match new_state {
+            Some(s) => c.states.insert(l.listing_id.clone(), s),
+            None => c.states.remove(&l.listing_id),
+        };
+        out
     }
 }
 
@@ -256,11 +378,18 @@ pub fn parse_response(status: u16, body: &[u8]) -> BuyOutcome {
     if status == 429 {
         return failed("A Steam pediu para ir mais devagar. Espere um pouco e tente de novo.");
     }
-    if (500..600).contains(&status) || (!msg.is_empty() && status != 200) {
-        return failed(friendly(msg, status));
+    if (500..600).contains(&status) {
+        // 5xx só é recusa quando a mensagem é um erro conhecido; senão a compra pode ter saído
+        return match known_message(msg) {
+            Some(m) => failed(m),
+            None => uncertain_5xx(status),
+        };
+    }
+    if !msg.is_empty() && status != 200 {
+        return failed(friendly(msg));
     }
     if status == 200 && v.is_some() && !msg.is_empty() {
-        return failed(friendly(msg, status));
+        return failed(friendly(msg));
     }
     // 200 sem wallet_info ou corpo ilegível: o pedido saiu e não sabemos o que aconteceu.
     BuyOutcome::Uncertain {
@@ -277,28 +406,38 @@ fn confirmation_id(v: &Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Erros conhecidos (pesquisa-web 3.3) em português simples; o resto mostra o texto original.
-fn friendly(msg: &str, status: u16) -> String {
+/// Erros conhecidos (pesquisa-web 3.3) em português simples; `None` para texto que não reconhecemos.
+fn known_message(msg: &str) -> Option<String> {
     let m = msg.to_lowercase();
-    if m.contains("may have been removed") || m.contains("listing") && m.contains("removed") {
-        "Esse anúncio já foi vendido ou saiu do ar. Atualize a lista e escolha outro.".into()
+    let s = if m.contains("may have been removed") || m.contains("listing") && m.contains("removed")
+    {
+        "Esse anúncio já foi vendido ou saiu do ar. Atualize a lista e escolha outro."
     } else if m.contains("previous action completes") {
         "A Steam ainda está processando a compra anterior. Espere alguns segundos e tente de novo."
-            .into()
     } else if m.contains("too many purchases without confirmation") {
-        "Compras demais sem confirmar. Confirme as pendentes no app da Steam e espere uns 5 minutos.".into()
-    } else if m.contains("too many requests") || m.contains("too many") {
-        "A Steam pediu para ir mais devagar. Espere um pouco e tente de novo.".into()
+        "Compras demais sem confirmar. Confirme as pendentes no app da Steam e espere uns 5 minutos."
+    } else if m.contains("too many") {
+        "A Steam pediu para ir mais devagar. Espere um pouco e tente de novo."
     } else if m.contains("not enough") || m.contains("insufficient") || m.contains("funds") {
-        "Saldo da carteira Steam insuficiente para esta compra (a taxa também conta).".into()
-    } else if m.contains("must be logged in") || m.contains("sign in") || m.contains("logged in") {
-        "A sessão da Steam expirou. Cole o cookie de novo nas configurações.".into()
-    } else if !msg.is_empty() {
-        format!("A Steam recusou a compra: {msg}")
+        "Saldo da carteira Steam insuficiente para esta compra (a taxa também conta)."
+    } else if m.contains("logged in") || m.contains("sign in") {
+        "A sessão da Steam expirou. Cole o cookie de novo nas configurações."
     } else {
-        format!(
-            "A Steam não respondeu direito (HTTP {status}). O anúncio pode já ter sido vendido; atualize e tente de novo."
-        )
+        return None;
+    };
+    Some(s.into())
+}
+
+/// Conhecido em português; senão mostra o texto original da Steam.
+fn friendly(msg: &str) -> String {
+    known_message(msg).unwrap_or_else(|| format!("A Steam recusou a compra: {msg}"))
+}
+
+fn uncertain_5xx(status: u16) -> BuyOutcome {
+    BuyOutcome::Uncertain {
+        message: format!(
+            "A Steam não confirmou a compra (HTTP {status}). Confira seu inventário antes de tentar de novo."
+        ),
     }
 }
 
@@ -307,7 +446,8 @@ fn map_client_error(e: &Error) -> BuyOutcome {
         Error::RateLimited { .. } => failed("A Steam pediu para ir mais devagar. Nada foi comprado; espere um pouco."),
         Error::BreakerOpen { .. } => failed("As compras estão em pausa depois de falhas seguidas. Nada foi comprado; espere um pouco."),
         Error::Http { status: 403, .. } => failed("A Steam recusou a sessão. Cole o cookie de novo nas configurações."),
-        Error::Http { status, .. } => BuyOutcome::Failed { message: friendly("", *status) },
+        // 5xx sem corpo útil: a compra pode ter saído
+        Error::Http { status, .. } => uncertain_5xx(*status),
         // o pedido pode ter chegado à Steam antes da queda
         Error::Transport(_) => BuyOutcome::Uncertain { message: "A conexão caiu durante a compra. Confira o inventário e o saldo antes de tentar de novo.".into() },
         other => failed(other.to_string()),
@@ -357,6 +497,7 @@ impl Clock for TokioClock {
 /// seja um novo pedido de confirmação encerra. Passado o prazo devolve `ConfirmTimeout`.
 pub async fn buy_until_confirmed<C, F, Fut>(
     clock: &C,
+    timeout: Duration,
     first: BuyOutcome,
     mut retry: F,
 ) -> BuyOutcome
@@ -370,7 +511,7 @@ where
     };
     let start = clock.now();
     loop {
-        if clock.now() - start >= CONFIRM_TIMEOUT {
+        if clock.now() - start >= timeout {
             return BuyOutcome::ConfirmTimeout { id };
         }
         clock.sleep(CONFIRM_INTERVAL).await;
@@ -479,10 +620,14 @@ mod tests {
         }
         // mensagem desconhecida mostra o texto original
         let out = parse_response(502, br#"{"message":"Algo novo"}"#);
+        // 5xx com texto desconhecido não é recusa conclusiva: a compra pode ter saído
+        assert!(matches!(out, BuyOutcome::Uncertain { message } if message.contains("502")));
+        // 4xx com texto desconhecido mostra o original
+        let out = parse_response(400, br#"{"message":"Algo novo"}"#);
         assert!(matches!(out, BuyOutcome::Failed { message } if message.contains("Algo novo")));
         // 502 sem corpo
         assert!(
-            matches!(parse_response(502, b""), BuyOutcome::Failed { message } if message.contains("502"))
+            matches!(parse_response(502, b""), BuyOutcome::Uncertain { message } if message.contains("não confirmou"))
         );
     }
 
@@ -555,6 +700,7 @@ mod tests {
         let calls = Cell::new(0);
         let out = buy_until_confirmed(
             &clock,
+            CONFIRM_TIMEOUT,
             BuyOutcome::NeedConfirmation { id: "7".into() },
             |id| {
                 assert_eq!(id, "7");
@@ -588,6 +734,7 @@ mod tests {
         let calls = Cell::new(0);
         let out = buy_until_confirmed(
             &clock,
+            CONFIRM_TIMEOUT,
             BuyOutcome::NeedConfirmation { id: "7".into() },
             |_| {
                 calls.set(calls.get() + 1);
@@ -600,6 +747,7 @@ mod tests {
         // resultado que não é confirmação passa direto, sem esperar
         let out = buy_until_confirmed(
             &clock,
+            CONFIRM_TIMEOUT,
             BuyOutcome::Failed {
                 message: "x".into(),
             },
@@ -726,16 +874,127 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_502_with_message_is_mapped() {
+    async fn http_502_is_uncertain_and_blocks_a_second_post() {
         let (hits, seen) = (Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(vec![])));
-        let base = serve(r#"{"message":"There was a problem purchasing your item. The listing may have been removed."}"#, 502, hits, seen).await;
-        let out = Buyer::new()
-            .buy_listing(&client(&base), &listing(), 7)
-            .await;
-        // o cliente descarta o corpo de 5xx: a mensagem genérica de 502 cobre o caso
+        let base = serve("", 502, hits.clone(), seen).await;
+        let c = client(&base);
+        let b = Buyer::new();
+        let out = b.buy_listing(&c, &listing(), 7).await;
         assert!(
-            matches!(out, BuyOutcome::Failed { message } if message.contains("502") || message.contains("vendido"))
+            matches!(&out, BuyOutcome::Uncertain { message } if message.contains("confira") || message.contains("Confira"))
         );
+        assert_eq!(b.state_of("5276355668"), Some(ListingState::Uncertain));
+        // segundo envio do mesmo anúncio: recusado sem rede
+        assert!(matches!(
+            b.buy_listing(&c, &listing(), 7).await,
+            BuyOutcome::Uncertain { .. }
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // só a reconciliação explícita libera
+        assert!(b.resolve("5276355668", false));
+        assert_eq!(b.state_of("5276355668"), None);
+    }
+
+    #[tokio::test]
+    async fn same_listing_is_posted_once_even_when_concurrent_and_after_success() {
+        let (hits, seen) = (Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(vec![])));
+        let base = serve(
+            r#"{"wallet_info":{"success":1,"wallet_balance":"412"}}"#,
+            200,
+            hits.clone(),
+            seen,
+        )
+        .await;
+        let c = client(&base);
+        let b = Buyer::new();
+        let (l1, l2) = (listing(), listing());
+        let (x, y) = tokio::join!(b.buy_listing(&c, &l1, 7), b.buy_listing(&c, &l2, 7));
+        let bought = [&x, &y]
+            .iter()
+            .filter(|o| matches!(o, BuyOutcome::Bought { .. }))
+            .count();
+        assert_eq!(bought, 1, "{x:?} / {y:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(b.state_of("5276355668"), Some(ListingState::Bought));
+        assert!(
+            matches!(b.buy_listing(&c, &listing(), 7).await, BuyOutcome::Failed { message } if message.contains("já foi comprado"))
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn definitive_refusal_blocks_resend_and_awaiting_accepts_only_retry() {
+        let (hits, seen) = (Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(vec![])));
+        let base = serve(
+            r#"{"message":"The listing may have been removed."}"#,
+            400,
+            hits.clone(),
+            seen,
+        )
+        .await;
+        let c = client(&base);
+        let b = Buyer::new();
+        assert!(matches!(
+            b.buy_listing(&c, &listing(), 7).await,
+            BuyOutcome::Failed { .. }
+        ));
+        assert_eq!(b.state_of("5276355668"), Some(ListingState::Failed));
+        assert!(matches!(
+            b.buy_listing(&c, &listing(), 7).await,
+            BuyOutcome::Failed { .. }
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // retry sem estar esperando confirmação também recusa
+        assert!(matches!(
+            b.retry_confirmed(&c, &listing(), 7, "1").await,
+            BuyOutcome::Failed { .. }
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn success_without_balance_deducts_total_from_known_balance() {
+        let (hits, seen) = (Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(vec![])));
+        let base = serve(r#"{"wallet_info":{"success":1}}"#, 200, hits, seen).await;
+        let c = client(&base);
+        let b = Buyer::new();
+        b.set_balance(Some(1000));
+        assert_eq!(
+            b.buy_listing(&c, &listing(), 7).await,
+            BuyOutcome::Bought {
+                new_balance_cents: None
+            }
+        );
+        assert_eq!(b.balance(), Some(412)); // 1000 - (512 + 76)
+        let mut other = listing();
+        other.listing_id = "999".into();
+        let out = b.buy_listing(&c, &other, 7).await;
+        assert!(
+            matches!(out, BuyOutcome::Failed { message } if message.contains("Saldo insuficiente"))
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_covers_the_whole_request_and_leaves_uncertain() {
+        use axum::{Router, routing::post};
+        let app = Router::new().route(
+            "/market/buylisting/{id}",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                "{}"
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = client(&format!("http://{addr}"));
+        let mut b = Buyer::new();
+        b.timeout = Duration::from_millis(300);
+        let t = std::time::Instant::now();
+        let out = b.buy_until_confirmed(&c, &listing(), 7).await;
+        assert!(t.elapsed() < Duration::from_secs(5));
+        assert!(matches!(out, BuyOutcome::Uncertain { .. }), "{out:?}");
+        assert_eq!(b.state_of("5276355668"), Some(ListingState::Uncertain));
     }
 
     #[tokio::test]
