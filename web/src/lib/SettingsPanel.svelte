@@ -127,14 +127,14 @@
             </div>
           {:else if phase === 'done'}
             <p class="ok-msg" role="status">Conectado{account ? ` como ${account}` : ''}. Confirmando…</p>
+          {:else if keys?.steam.ok === true}
+            <p class="ok-msg">{keys.steam.detail && keys.steam.detail !== 'conta conectada' ? `Conectado como ${keys.steam.detail}.` : 'Conta conectada.'}</p>
           {:else if phase === 'expired'}
             <p class="down" role="alert">O QR venceu. Gere outro e escaneie de novo.</p>
           {:else if phase === 'error'}
             <p class="down" role="alert">{qrError || 'Não consegui entrar. Tente de novo.'}</p>
           {:else if !keys?.steam}
             <p class="muted">Verificando…</p>
-          {:else if keys.steam.ok === true}
-            <p class="ok-msg">{keys.steam.detail && keys.steam.detail !== 'conta conectada' ? `Conectado como ${keys.steam.detail}.` : 'Conta conectada.'}</p>
           {:else if keys.steam.ok === false}
             <p class="down">{keys.steam.detail?.includes('carteira') ? 'A carteira desta conta não está em reais. Use uma conta com carteira em reais.' : 'Login expirado. Entre de novo pelo QR.'}</p>
           {:else if keys.steam.set}
@@ -211,7 +211,7 @@
   }
   dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
   .box { padding: 20px 24px 40px; display: flex; flex-direction: column; gap: 24px; }
-  .bar { display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: var(--panel); padding: 4px 0; }
+  .bar { display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 1; background: var(--panel); padding: 4px 0; }
   h2 { font-size: 18px; }
   h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
   section { display: flex; flex-direction: column; gap: 16px; }
