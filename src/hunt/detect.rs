@@ -276,7 +276,7 @@ fn api_confidence(c: SellConfidence) -> Confidence {
     }
 }
 
-fn api_sell(s: &sell::Sell) -> Sell {
+fn api_sell(s: &sell::Sell, correction: f64) -> Sell {
     let t = |t: &sell::SellTier| Tier {
         price_cents: t.price_cents,
         net_cents: t.net_cents,
@@ -287,6 +287,7 @@ fn api_sell(s: &sell::Sell) -> Sell {
         high: t(&s.high),
         mid: t(&s.mid),
         quick: t(&s.quick),
+        correction,
     }
 }
 
@@ -314,18 +315,26 @@ async fn evaluate_one(
     notify_min: i64,
 ) -> Result<Judged> {
     let now = h.now();
-    let points = points_for(h, &l.name, now).await?;
+    let mut points = points_for(h, &l.name, now).await?;
     let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index);
+    let correction = h.correction(group.is_some());
+    sell::discount(&mut points, correction);
     let rare = match &group {
         Some(g) => Some(rare_evidence(h, &l.name, &g.key).await),
         None => None,
     };
-    let Ok(est) = sell::estimate(&points, now, others_min, rare) else {
+    let Ok(mut est) = sell::estimate(&points, now, others_min, rare) else {
         return Ok(Judged {
             found: None,
             near: None,
         });
     };
+    if correction < 1.0 {
+        est.evidence += &format!(
+            " · suas vendas saíram {}% abaixo do previsto, já descontado",
+            ((1.0 - correction) * 100.0).round()
+        );
+    }
     let ev = sell::evaluate(l.price_cents, &est, notify_min);
     let near = Some(Near {
         name: l.name.clone(),
@@ -352,7 +361,7 @@ async fn evaluate_one(
             Kind::Desconto
         },
         price_cents: l.price_cents,
-        sell: api_sell(&ev.sell),
+        sell: api_sell(&ev.sell, correction),
         margin_pct: ev.margin_pct,
         safe: ev.safe,
         confidence: api_confidence(est.confidence),

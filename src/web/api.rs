@@ -69,6 +69,13 @@ pub struct Sell {
     pub high: Tier,
     pub mid: Tier,
     pub quick: Tier,
+    /// Fator das vendas reais já aplicado a estes preços (1 = nenhum); a calibração compara sem ele.
+    #[serde(default = "one")]
+    pub correction: f64,
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

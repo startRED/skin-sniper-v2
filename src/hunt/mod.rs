@@ -63,6 +63,8 @@ pub(crate) struct Shared {
     pub cycle: detect::Cycle,
     /// Por tarefa: menor anúncio visto na última consulta (se havia algum) e quando foi.
     pub floors: HashMap<String, (Option<i64>, i64)>,
+    /// Desconto do histórico pelas vendas reais, `[desconto, raro]` (`web::calibration::correction`).
+    pub correction: [f64; 2],
 }
 
 pub struct Hunt {
@@ -127,6 +129,7 @@ impl Hunt {
                 evaluated: HashMap::new(),
                 cycle: detect::Cycle::default(),
                 floors: HashMap::new(),
+                correction: [1.0; 2],
             }),
         })
     }
@@ -170,6 +173,7 @@ impl Hunt {
             .await?;
         let ratio = catalog::load_ratio(&self.db).await?;
         scheduler::load_stats(self).await?;
+        self.refresh_correction().await?;
         {
             let mut s = self.lock();
             for (json, task) in rows {
@@ -187,6 +191,24 @@ impl Hunt {
         }
         self.recompute_combo();
         Ok(())
+    }
+
+    /// Relê as vendas registradas; chamado ao subir e a cada venda informada no painel.
+    pub async fn refresh_correction(&self) -> anyhow::Result<()> {
+        let c = crate::web::calibration::load_correction(&self.db).await?;
+        let mut s = self.lock();
+        if c != s.correction {
+            tracing::info!(desconto = c[0], raro = c[1], "fator das vendas reais");
+            s.correction = c;
+            // Previsões mudaram: cada anúncio volta a ser avaliado na próxima consulta.
+            s.evaluated.clear();
+        }
+        Ok(())
+    }
+
+    /// Fator das vendas reais para o tipo (raro = item de grupo).
+    pub(crate) fn correction(&self, rare: bool) -> f64 {
+        self.lock().correction[usize::from(rare)]
     }
 
     /// Melhor combinação das oportunidades ativas que cabe no saldo (lucro esperado ajustado ao risco).

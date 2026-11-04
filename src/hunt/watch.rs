@@ -67,6 +67,7 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
         })
         .await?;
 
+    let correction = h.lock().correction;
     let mut rows: Vec<WatchRow> = tasks
         .iter()
         .zip(facts)
@@ -79,10 +80,11 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
                 .seeds
                 .first()
                 .and_then(|&(lo, _)| group_of(&t.name, Some(u32::from(lo)), None));
-            let (icon, spd, pts) = match f {
+            let (icon, spd, mut pts) = match f {
                 Some((_, i, s, p)) => (i, s, p),
                 None => (String::new(), 0.0, vec![]),
             };
+            sell::discount(&mut pts, correction[usize::from(rare)]);
             // Raro: o teto vem do prêmio do grupo (vendas do CSFloat já em cache); com menos de
             // `RARE_MIN_SALES` vendas não há teto honesto.
             let evidence = if rare {
