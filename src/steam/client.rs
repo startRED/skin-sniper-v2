@@ -37,6 +37,9 @@ const PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
 // O degrau da pausa só volta a 60 s depois de tanto tempo sem 429: uma resposta boa de outro
 // endpoint entre dois 429 não pode zerar a escalada.
 const PAUSE_RESET_AFTER: Duration = Duration::from_secs(30 * 60);
+// Leitura logada levou 429: anúncios e histórico vão sem login por este tempo. Em 04/11 o logado tomou 429
+// por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
+const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
 const BREAKER_THRESHOLD: u32 = 3;
 const BREAKER_OPEN_START: Duration = Duration::from_secs(30);
@@ -326,6 +329,8 @@ struct Inner {
     /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
     extra: Vec<(String, String)>,
     on_pace: Option<PaceHook>,
+    /// Até quando `action` lê sem login (depois de um 429 logado).
+    anon_reads_until: Option<Instant>,
 }
 
 pub struct SteamClient {
@@ -383,6 +388,7 @@ impl SteamClient {
                 cookie: None,
                 extra: Vec::new(),
                 on_pace: None,
+                anon_reads_until: None,
             }),
         })
     }
@@ -522,9 +528,14 @@ impl SteamClient {
     }
 
     /// Consulta `GET /market/actions?q=<método>&qp=<json>` e devolve o campo `data`. Vai logado quando há
-    /// cookie, como a página do mercado aberta no navegador (pedido do Erick: ler o mercado logado).
+    /// cookie, como a página do mercado aberta no navegador (pedido do Erick: ler o mercado logado), menos
+    /// nas 6 h depois de um 429 logado (`ANON_AFTER_429`).
     pub async fn action(&self, ep: Endpoint, method: &str, qp: &Value) -> Result<Value> {
         for attempt in 0..2 {
+            let auth = {
+                let g = self.inner.lock().unwrap();
+                g.anon_reads_until.is_none_or(|t| Instant::now() >= t)
+            };
             let req = self
                 .http
                 .get(self.url("/market/actions"))
@@ -532,7 +543,7 @@ impl SteamClient {
                 .header("x-valve-request-type", "queryAction")
                 .header("accept", "application/json, text/javascript, */*");
             let response = self
-                .send_checked(ep, req, true, Some(envelope_problem), attempt == 0)
+                .send_checked(ep, req, auth, Some(envelope_problem), attempt == 0)
                 .await;
             if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -683,6 +694,15 @@ impl SteamClient {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(Duration::from_secs);
             let mut g = self.inner.lock().unwrap();
+            if sent_by.is_some() && matches!(ep, Endpoint::Listings | Endpoint::History) {
+                // A Steam segurou a conta, não o IP: sem pausa, a próxima leitura (no ritmo) vai sem login.
+                g.anon_reads_until = Some(now + ANON_AFTER_429);
+                drop(g);
+                tracing::warn!(endpoint = ?ep, "Steam: 429 logado; leituras seguem sem login por 6 h");
+                return Err(Error::RateLimited {
+                    until: unix_in(Duration::ZERO),
+                });
+            }
             g.limiter.on_429(now, retry);
             let until = g
                 .limiter
@@ -1138,9 +1158,11 @@ mod tests {
                 "/market/actions",
                 get(|h: axum::http::HeaderMap, q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
                     assert_eq!(h.get("x-valve-request-type").unwrap(), "queryAction");
-                    assert!(h.get("cookie").unwrap().to_str().unwrap().contains("steamLoginSecure=x"), "leitura vai logada");
-                    if q.get("q").map(String::as_str) == Some("Limit") {
-                        return (AxStatus::TOO_MANY_REQUESTS, String::new());
+                    let logged = h.get("cookie").is_some_and(|v| v.to_str().unwrap().contains("steamLoginSecure=x"));
+                    match q.get("q").map(String::as_str) {
+                        Some("Limit") => return (AxStatus::TOO_MANY_REQUESTS, String::new()),
+                        Some("Ok") => assert!(logged, "leitura vai logada"),
+                        _ => assert!(!logged, "depois do 429 logado, a leitura vai sem login"),
                     }
                     (AxStatus::OK, r#"{"data":{"ok":true},"metrics":{}}"#.to_string())
                 }),
@@ -1157,8 +1179,20 @@ mod tests {
             .unwrap();
         assert_eq!(d["ok"], true);
         assert!(c.stats().last_query_at.is_some());
+        // 429 logado: sem pausa nem alongamento; a próxima vai sem login.
         let e = c
             .action(Endpoint::History, "Limit", &serde_json::json!([1]))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::RateLimited { .. }));
+        let s = c.stats();
+        assert_eq!((s.paused_until, s.gap_ms), (None, 100));
+        c.action(Endpoint::Listings, "Anon", &serde_json::json!([1]))
+            .await
+            .unwrap();
+        // 429 sem login: aí é o IP, e o limitador pausa.
+        let e = c
+            .action(Endpoint::Listings, "Limit", &serde_json::json!([1]))
             .await
             .unwrap_err();
         assert!(matches!(e, Error::RateLimited { .. }));
