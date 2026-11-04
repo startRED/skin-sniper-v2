@@ -366,11 +366,9 @@ impl SteamClient {
     }
 
     pub(crate) fn with_base(base: &str) -> anyhow::Result<Self> {
+        // Sem `accept-language`: em 04/11 o mesmo `/market/actions`, do mesmo IP e no mesmo minuto, deu 429
+        // com `en-US,…` e 200 sem o cabeçalho, repetido em itens diferentes. Sem ele a Steam respondeu em inglês.
         let mut h = HeaderMap::new();
-        h.insert(
-            "accept-language",
-            HeaderValue::from_static("en-US,en;q=0.9,pt-BR;q=0.8"),
-        );
         h.insert(
             "referer",
             HeaderValue::from_static("https://steamcommunity.com/market/"),
