@@ -19,15 +19,19 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
-    if: hashFiles('web/package.json') != ''
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+      # hashFiles não vale no `if` do trabalho; só no do passo.
       - uses: actions/setup-node@v4
+        if: hashFiles('web/package.json') != ''
         with:
           node-version: 24
-      - run: npm ci
-      - run: npm run check
-      - run: npm run build
+      - if: hashFiles('web/package.json') != ''
+        run: npm ci
+      - if: hashFiles('web/package.json') != ''
+        run: npm run check
+      - if: hashFiles('web/package.json') != ''
+        run: npm run build
