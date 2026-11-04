@@ -527,6 +527,8 @@ impl SteamClient {
         if let Some(Ok(p)) = pause.filter(|_| !quiet) {
             l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
             // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
+            // shortcut: salvo durante uma pausa, conta do fim da pausa (mais cauteloso que o 429 real); gravar a
+            // hora do 429 num 5º campo se a escalada longa atrapalhar.
             let ago = (unix_in(Duration::ZERO) - until).max(0) as u64;
             l.last_429 = Some(now.checked_sub(Duration::from_secs(ago)).unwrap_or(now));
         }
