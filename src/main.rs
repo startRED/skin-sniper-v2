@@ -141,3 +141,24 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_rotates_keeping_three_files() {
+        let dir = db::tempfile_dir::Dir::new();
+        let path = dir.path().join("sniper.log");
+        let mut log = RotatingLog::open(path.clone()).unwrap();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..16 {
+            log.write_all(&chunk).unwrap();
+        }
+        let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
+        assert!(size(&path).unwrap() <= LOG_MAX);
+        assert!(size(&dir.path().join("sniper.log.1")).is_some());
+        assert!(size(&dir.path().join("sniper.log.2")).is_some());
+        assert!(size(&dir.path().join("sniper.log.3")).is_none());
+    }
+}
