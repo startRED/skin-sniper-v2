@@ -41,15 +41,18 @@ pub enum Endpoint {
     Search,
     Session,
     Buy,
+    /// api.steampowered.com (login por QR e renovação): mesmo limitador global, breaker próprio.
+    Auth,
 }
 
 impl Endpoint {
-    const ALL: [Endpoint; 5] = [
+    const ALL: [Endpoint; 6] = [
         Self::Listings,
         Self::History,
         Self::Search,
         Self::Session,
         Self::Buy,
+        Self::Auth,
     ];
     fn idx(self) -> usize {
         self as usize
@@ -283,7 +286,7 @@ impl Breaker {
 
 struct Inner {
     limiter: Limiter,
-    breakers: [Breaker; 5],
+    breakers: [Breaker; 6],
     cookie: Option<Cookie>,
     /// Cookies que a Steam setou nas respostas autenticadas (`webTradeEligibility` etc.); valem enquanto
     /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
@@ -341,7 +344,7 @@ impl SteamClient {
             base: base.trim_end_matches('/').to_string(),
             inner: Mutex::new(Inner {
                 limiter: Limiter::new(Instant::now()),
-                breakers: [Breaker::new(); 5],
+                breakers: [Breaker::new(); 6],
                 cookie: None,
                 extra: Vec::new(),
             }),
@@ -578,6 +581,11 @@ impl SteamClient {
                 .collect();
             self.keep_cookies(&set);
         }
+        let eresult = resp
+            .headers()
+            .get("x-eresult")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i32>().ok());
         if status == StatusCode::TOO_MANY_REQUESTS {
             let retry = resp
                 .headers()
@@ -622,6 +630,7 @@ impl SteamClient {
             Parts {
                 status: status.as_u16(),
                 location,
+                eresult,
             },
             body.to_vec(),
         ))
@@ -630,6 +639,11 @@ impl SteamClient {
     /// Para o `buy.rs` (outra etapa): POST com cookie, pelo mesmo limitador e breaker.
     pub(crate) fn request(&self, method: Method, path: &str) -> RequestBuilder {
         self.http.request(method, self.url(path))
+    }
+
+    /// Como `request`, mas com URL completa (api.steampowered.com), pelo mesmo limitador e breaker.
+    pub(crate) fn request_url(&self, method: Method, url: &str) -> RequestBuilder {
+        self.http.request(method, url)
     }
 }
 
@@ -664,6 +678,8 @@ type EnvelopeCheck = fn(u16, &[u8]) -> Option<String>;
 pub(crate) struct Parts {
     pub status: u16,
     pub location: Option<String>,
+    /// Header `x-eresult` (API da Steam).
+    pub eresult: Option<i32>,
 }
 
 #[cfg(test)]

@@ -9,6 +9,9 @@ use std::fmt;
 use tokio::sync::broadcast;
 
 const SALDO_KEY: &str = "saldo_manual_cents";
+/// Token de renovação do login por QR (interno; o painel nunca o vê).
+pub const REFRESH_KEY: &str = "steam_refresh_token";
+const COOKIE_KEY: &str = "steam_login_secure";
 const DEFAULT_MIN_PROFIT: i64 = 100;
 const MASK: &str = "••••";
 
@@ -123,7 +126,13 @@ impl SettingsStore {
             .filter_map(|(k, v)| Some((k, v?)))
             .filter(|(_, v)| !v.as_deref().is_some_and(|s| s.starts_with(MASK)))
             .collect();
-        let keys: Vec<&'static str> = writes.iter().map(|(k, _)| *k).collect();
+        let mut keys: Vec<&'static str> = writes.iter().map(|(k, _)| *k).collect();
+        // Cookie trocado ou apagado à mão: o refresh token da conta antiga não pode sobreviver e
+        // restaurar o login velho na próxima renovação.
+        let drop_refresh = keys.contains(&COOKIE_KEY);
+        if drop_refresh {
+            keys.push(REFRESH_KEY);
+        }
         self.db
             .call(move |c| {
                 let tx = c.transaction()?;
@@ -136,6 +145,9 @@ impl SettingsStore {
                         )?,
                         None => tx.execute("DELETE FROM settings WHERE key = ?1", [k])?,
                     };
+                }
+                if drop_refresh {
+                    tx.execute("DELETE FROM settings WHERE key = ?1", [REFRESH_KEY])?;
                 }
                 tx.commit()
             })
@@ -153,6 +165,50 @@ impl SettingsStore {
     /// `None` apaga o saldo manual (volta a ler da Steam).
     pub async fn set_saldo(&self, cents: Option<i64>) -> Result<()> {
         self.set_raw(SALDO_KEY, cents.map(|c| c.to_string())).await
+    }
+
+    /// Grava várias chaves internas numa transação, só se `guard` ainda vale (a chave guardada tem o
+    /// valor esperado). `false` = nada foi gravado. Uso: renovação que não pode sobrescrever outra conta.
+    pub async fn write_if(
+        &self,
+        guard: (&'static str, Option<String>),
+        writes: Vec<(&'static str, Option<String>)>,
+    ) -> Result<bool> {
+        let keys: Vec<_> = writes.iter().map(|(k, _)| *k).collect();
+        let done = self
+            .db
+            .call(move |c| {
+                let tx = c.transaction()?;
+                let now: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM settings WHERE key = ?1",
+                        [guard.0],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if now != guard.1 {
+                    return Ok(false);
+                }
+                for (k, v) in writes {
+                    match v {
+                        Some(v) => tx.execute(
+                            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+                             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            params![k, v],
+                        )?,
+                        None => tx.execute("DELETE FROM settings WHERE key = ?1", [k])?,
+                    };
+                }
+                tx.commit()?;
+                Ok(true)
+            })
+            .await?;
+        if done {
+            for k in keys {
+                let _ = self.changed.send(k.to_string());
+            }
+        }
+        Ok(done)
     }
 
     /// Grava (ou apaga, com `None`) uma chave interna que o painel não edita, como o token de renovação.
@@ -234,6 +290,50 @@ mod tests {
         assert!(!dbg.contains("SEGREDO"));
     }
 
+    #[tokio::test]
+    async fn manual_cookie_change_or_clear_drops_refresh_token_atomically() {
+        let (db, _dir) = temp_db();
+        let s = SettingsStore::new(db);
+        for json in [
+            r#"{"steam_login_secure":"outra-conta"}"#,
+            r#"{"steam_login_secure":null}"#,
+        ] {
+            s.set_raw(REFRESH_KEY, Some("refresh-da-conta-antiga".into()))
+                .await
+                .unwrap();
+            s.apply(input(json)).await.unwrap();
+            assert!(s.get(REFRESH_KEY).await.unwrap().is_none(), "{json}");
+        }
+        // mexer em outra chave, ou salvar a máscara de volta, não apaga o refresh token
+        s.set_raw(REFRESH_KEY, Some("r".into())).await.unwrap();
+        s.apply(input(r#"{"sound":false,"steam_login_secure":"••••abcd"}"#))
+            .await
+            .unwrap();
+        assert_eq!(s.get(REFRESH_KEY).await.unwrap().as_deref(), Some("r"));
+    }
+
+    #[tokio::test]
+    async fn write_if_only_writes_when_guard_holds() {
+        let (db, _dir) = temp_db();
+        let s = SettingsStore::new(db);
+        s.set_raw(REFRESH_KEY, Some("a".into())).await.unwrap();
+        let w = vec![("steam_login_secure", Some("x".to_string()))];
+        assert!(
+            !s.write_if((REFRESH_KEY, Some("b".into())), w.clone())
+                .await
+                .unwrap()
+        );
+        assert!(s.get("steam_login_secure").await.unwrap().is_none());
+        assert!(
+            s.write_if((REFRESH_KEY, Some("a".into())), w)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            s.get("steam_login_secure").await.unwrap().as_deref(),
+            Some("x")
+        );
+    }
     #[tokio::test]
     async fn saldo_roundtrip_and_validation() {
         let (db, _dir) = temp_db();
