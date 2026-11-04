@@ -1,0 +1,67 @@
+:root {
+  --bg: #0e1114;
+  --panel: #151a1f;
+  --panel-2: #1b2128;
+  --line: #262e37;
+  --ink: #e9edf1;
+  --muted: #98a4b0;
+  --faint: #6c7884;
+  --green: #3ecf8e;
+  --green-ink: #06281a;
+  --green-bg: rgba(62, 207, 142, 0.1);
+  --amber: #f2b64b;
+  --amber-bg: rgba(242, 182, 75, 0.12);
+  --red: #f26d6d;
+  --red-bg: rgba(242, 109, 109, 0.12);
+  --radius: 8px;
+  --font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.4 var(--font);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, p { margin: 0; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
+}
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 36px; padding: 0 14px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--panel-2); text-decoration: none; white-space: nowrap;
+}
+.btn:hover:not(:disabled) { background: #232b34; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.primary { background: var(--green); border-color: var(--green); color: var(--green-ink); font-weight: 650; }
+.btn.primary:hover:not(:disabled) { background: #5be0a4; }
+.btn.danger { color: var(--red); }
+
+.up { color: var(--green); }
+.down { color: var(--red); }
+.muted { color: var(--muted); }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 99px;
+  font-size: 12px; font-weight: 600; line-height: 18px; white-space: nowrap;
+}
+.pill.ok { background: var(--green-bg); color: var(--green); }
+.pill.warn { background: var(--amber-bg); color: var(--amber); }
+.pill.bad { background: var(--red-bg); color: var(--red); }
+.pill.mute { background: var(--panel-2); color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
