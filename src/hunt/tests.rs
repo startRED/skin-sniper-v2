@@ -684,3 +684,34 @@ async fn activity_table_failure_does_not_stop_detection() {
         .unwrap();
     assert_eq!(count, 2);
 }
+
+#[tokio::test]
+async fn no_saldo_message_clears_when_saldo_arrives() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(0, SaldoSource::Manual);
+    assert_eq!(tick(&h).await, Tick::Idle);
+    assert!(
+        h.lock()
+            .message
+            .as_deref()
+            .is_some_and(|m| m.starts_with("sem saldo"))
+    );
+    // Steam em pausa: a descoberta fica esperando o limitador, e o aviso já tem que ter saído
+    h.steam
+        .restore_pace(&format!("{}|6000|60000", crate::db::now_unix() + 600));
+    h.set_saldo(3608, SaldoSource::Steam);
+    while rx.try_recv().is_ok() {}
+    let _ = tokio::time::timeout(Duration::from_millis(300), tick(&h)).await;
+    let no_saldo = |m: &Option<String>| m.as_deref().is_some_and(|m| m.starts_with("sem saldo"));
+    assert!(!no_saldo(&h.lock().message));
+    // e o painel recebeu um estado sem o aviso
+    let mut sent = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let Event::State(s) = ev {
+            sent = !no_saldo(&s.hunt.message);
+        }
+    }
+    assert!(sent);
+}

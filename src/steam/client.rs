@@ -1,7 +1,7 @@
 //! HTTP único da Steam: cookie trocável, limitador global adaptativo e breaker por endpoint.
 //!
-//! Ritmo (docs/projeto.md, "Caça → Ritmo"): começa em 1 consulta a cada 6 s (também o piso); cada 30 min sem
-//! 429 encurta 5 %; um 429 pausa 60 s (dobrando até 10 min) e alonga o intervalo em 50 %.
+//! Ritmo (docs/projeto.md, "Caça → Ritmo"): começa em 1 consulta a cada 6 s (também o piso); cada 10 min sem
+//! 429 encurta 15 %; um 429 pausa 60 s (dobrando até 10 min) e alonga o intervalo em 50 %.
 //! O limitador é um só para todos os endpoints; os breakers são um por endpoint (conhecimento 2): falhas
 //! repetidas que não são 429 (5xx, rede) abrem só o breaker daquele endpoint.
 #![allow(dead_code)]
@@ -28,7 +28,10 @@ const BASE_GAP: Duration = Duration::from_secs(6);
 const MIN_GAP: Duration = BASE_GAP;
 // Teto do intervalo depois de vários 429 seguidos (acréscimo meu: o desenho não limita o alongamento).
 const MAX_GAP: Duration = Duration::from_secs(60);
-const SHORTEN_EVERY: Duration = Duration::from_secs(30 * 60);
+// Volta da pausa: cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h). Com 5 % a cada 30 min, depois
+// de uma série de 429 o intervalo ficava perto de 60 s por quase um dia (visto ao vivo em 04/11).
+const SHORTEN_EVERY: Duration = Duration::from_secs(10 * 60);
+const SHORTEN_FACTOR: f64 = 0.85;
 const PAUSE_START: Duration = Duration::from_secs(60);
 const PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
 // O degrau da pausa só volta a 60 s depois de tanto tempo sem 429: uma resposta boa de outro
@@ -166,7 +169,7 @@ pub(crate) struct Limiter {
     paused_until: Option<Instant>,
     pause_len: Duration,
     last_429: Option<Instant>,
-    /// Último 429 ou último encurtamento; o próximo encurta 30 min depois.
+    /// Último 429 ou último encurtamento; o próximo encurta 10 min depois.
     last_adjust: Instant,
     last_query: Option<Instant>,
     recent: VecDeque<Instant>,
@@ -188,7 +191,7 @@ impl Limiter {
 
     fn shorten(&mut self, now: Instant) {
         while now.duration_since(self.last_adjust) >= SHORTEN_EVERY {
-            self.gap = self.gap.mul_f64(0.95).max(MIN_GAP);
+            self.gap = self.gap.mul_f64(SHORTEN_FACTOR).max(MIN_GAP);
             self.last_adjust += SHORTEN_EVERY;
         }
     }
@@ -694,6 +697,8 @@ impl SteamClient {
             if let Some((f, v)) = saved {
                 f(v);
             }
+            // Qual consulta levou o 429 (e se ia logada): sem isso não dá para saber o que a Steam segura.
+            tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(), "Steam: 429");
             return Err(Error::RateLimited { until });
         }
         let body = resp
@@ -952,14 +957,14 @@ mod tests {
     }
 
     #[test]
-    fn limiter_shortens_5pct_per_30min_with_floor() {
+    fn limiter_shortens_15pct_per_10min_with_floor() {
         let t = t0();
         let mut l = Limiter::new(t);
         // sem 429 não passa da base de 6 s
         assert_eq!(l.stats(t + Duration::from_secs(30 * 60)).gap_ms, 6000);
         l.on_429(t + Duration::from_secs(30 * 60), None);
-        let after = t + Duration::from_secs(60 * 60);
-        assert_eq!(l.stats(after).gap_ms, 8550); // 9000 × 0,95
+        let after = t + Duration::from_secs(40 * 60);
+        assert_eq!(l.stats(after).gap_ms, 7650); // 9000 × 0,85
         assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 6000);
     }
 
