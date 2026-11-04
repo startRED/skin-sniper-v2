@@ -53,6 +53,10 @@ pub(crate) struct Shared {
     /// Consultas seguidas que vieram vazias por tarefa (uma página vazia pode ser transitória).
     pub empty_streak: HashMap<String, u8>,
     pub last_state_pub: i64,
+    /// Último (preço, `history_at`) com que cada anúncio foi avaliado: muda → avalia de novo.
+    pub evaluated: HashMap<String, (i64, i64)>,
+    /// Balanço do ciclo de 10 min (o que foi conferido e o que chegou perto).
+    pub cycle: detect::Cycle,
 }
 
 pub struct Hunt {
@@ -112,6 +116,8 @@ impl Hunt {
                 csfloat_cache: HashMap::new(),
                 empty_streak: HashMap::new(),
                 last_state_pub: 0,
+                evaluated: HashMap::new(),
+                cycle: detect::Cycle::default(),
             }),
         })
     }
@@ -209,7 +215,8 @@ impl Hunt {
                 message: if paused.is_some() {
                     Some("a Steam pediu calma (429); caça em pausa".into())
                 } else {
-                    s.message.clone()
+                    let now = self.now();
+                    s.message.clone().or_else(|| s.cycle.message(now))
                 },
             },
             combo: s.combo.clone(),

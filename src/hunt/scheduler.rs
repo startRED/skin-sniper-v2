@@ -163,6 +163,7 @@ fn now_ms(h: &Hunt) -> i64 {
 
 /// Um passo do laço: descoberta (se há crédito) ou a próxima consulta de vigilância.
 pub async fn tick(h: &Arc<Hunt>) -> Tick {
+    detect::roll_cycle(h);
     if h.saldo() <= 0 {
         h.set_message(Some(
             "sem saldo: informe um valor ou configure o cookie da Steam".into(),

@@ -6,7 +6,7 @@
 //! recebe seed 59 (tier 1 do Moonrise) e custa R$ 7,00, e a primeira entrada da busca vira o Moonrise FT
 //! a US$ 1,00. No CSFloat, três vendas sem adesivo ganham seeds do tier 1 e preço ×1,5.
 
-use super::scheduler::{Tick, tick};
+use super::scheduler::{Task, Tick, tick};
 use super::*;
 use crate::db::temp_db;
 use crate::steam::listings::Listing;
@@ -255,4 +255,183 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         .await
         .unwrap();
     assert_eq!(gone_at, Some(NOW));
+}
+
+/// Roda a caça até aparecerem as duas oportunidades da fixture.
+async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Vec<Opportunity> {
+    let mut found = vec![];
+    for _ in 0..400 {
+        if tick(h).await == Tick::Idle {
+            break;
+        }
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Opportunity(o) = ev {
+                found.push(o);
+            }
+        }
+        if found.len() >= 2 {
+            break;
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn seen_listing_is_reevaluated_when_history_changes() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    let found = run_until_two(&h, &mut rx).await;
+    let before = found.iter().find(|o| o.id == ID_CHEAP).unwrap().clone();
+    while rx.try_recv().is_ok() {}
+
+    // o histórico do item muda (mediana 10 % menor): a oportunidade ativa é reavaliada, mesma posição
+    // na lista, preço de venda menor e nenhum aviso novo
+    db.call(|c| {
+        c.execute(
+            "UPDATE price_points SET median_cents = median_cents * 9 / 10",
+            [],
+        )?;
+        c.execute("UPDATE items SET history_at = history_at - 1", [])
+            .map(|_| ())
+    })
+    .await
+    .unwrap();
+    let mut updated = None;
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Opportunity(o) = ev
+                && o.id == ID_CHEAP
+            {
+                updated = Some(o);
+            }
+        }
+        if updated.is_some() {
+            break;
+        }
+    }
+    let updated = updated.expect("oportunidade reavaliada");
+    assert_eq!(updated.seen_at, before.seen_at);
+    assert!(updated.sell.mid.price_cents < before.sell.mid.price_cents);
+
+    // sem estimativa possível, a oportunidade ativa deixa de valer
+    db.call(|c| {
+        c.execute("DELETE FROM price_points", [])?;
+        c.execute("UPDATE items SET history_at = history_at - 1", [])
+            .map(|_| ())
+    })
+    .await
+    .unwrap();
+    let mut gone = vec![];
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Gone { id } = ev {
+                gone.push(id);
+            }
+        }
+        if gone.contains(&ID_CHEAP.to_string()) {
+            break;
+        }
+    }
+    assert!(gone.contains(&ID_CHEAP.to_string()), "{gone:?}");
+}
+
+#[tokio::test]
+async fn empty_pages_counter_saturates() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let task = Task {
+        id: "d:x".into(),
+        name: MOON.into(),
+        code: "G1".into(),
+        wear: None,
+        seeds: None,
+        score: 1.0,
+    };
+    let page = crate::steam::listings::ListingsPage {
+        start: 0,
+        total_count: 0,
+        more: false,
+        listings: vec![],
+    };
+    for _ in 0..300 {
+        detect::process(&h, &task, &page).await.unwrap();
+    }
+    assert_eq!(h.lock().empty_streak["d:x"], 255);
+}
+
+#[tokio::test]
+async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static T: AtomicI64 = AtomicI64::new(NOW);
+    fn clock2() -> i64 {
+        T.load(Ordering::SeqCst)
+    }
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (events, _rx) = broadcast::channel(512);
+    let steam = Arc::new(SteamClient::with_base(&base).unwrap());
+    let h = Hunt::with_clock(
+        HuntDeps {
+            settings: SettingsStore::new(db.clone()),
+            db,
+            steam,
+            csfloat: Arc::new(CsfloatClient::with_base(&base).unwrap()),
+            events,
+        },
+        clock2,
+    );
+    let near = |name: &str, mid: i64| detect::Near {
+        name: name.into(),
+        price_cents: 500,
+        mid_cents: mid,
+        quick_cents: mid - 30,
+    };
+    detect::roll_cycle(&h); // abre o ciclo
+    {
+        let mut s = h.lock();
+        for (n, m) in [("A", -40), ("B", 12), ("C", -5), ("D", -300)] {
+            s.cycle.record(false, Some(near(n, m)));
+        }
+        s.cycle.record(false, None);
+    }
+    h.set_message(None);
+    // parcial antes de fechar
+    assert!(
+        h.state()
+            .hunt
+            .message
+            .unwrap()
+            .starts_with("5 anúncios conferidos em 1 min")
+    );
+    T.store(NOW + 600, Ordering::SeqCst);
+    detect::roll_cycle(&h);
+    assert_eq!(
+        h.state().hunt.message.as_deref(),
+        Some(
+            "5 anúncios conferidos em 10 min; nenhum deu lucro, o mais perto dava R$ 0,12 de lucro"
+        )
+    );
+    // o ciclo novo começa zerado e o balanço antigo segue até o próximo fechar
+    assert!(
+        h.lock()
+            .cycle
+            .message(NOW + 601)
+            .unwrap()
+            .starts_with("5 anúncios")
+    );
+    T.store(NOW + 1200, Ordering::SeqCst);
+    detect::roll_cycle(&h);
+    assert!(
+        h.state()
+            .hunt
+            .message
+            .unwrap()
+            .starts_with("0 anúncios conferidos em 10 min")
+    );
 }

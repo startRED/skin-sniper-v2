@@ -7,6 +7,7 @@ use super::scheduler::Task;
 use super::{Active, Hunt};
 use crate::pricing::groups::group_of;
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
+use crate::steam::buy::brl;
 use crate::steam::history;
 use crate::steam::listings::{Listing, ListingsPage};
 use crate::web::api::{Confidence, Event, Kind, Opportunity, Sell, Tier};
@@ -17,6 +18,100 @@ use std::collections::HashSet;
 const DAY: i64 = 86_400;
 /// Uma página vazia pode ser transitória (conhecimento 1.3): só vale como "sumiram" na segunda seguida.
 const EMPTY_PAGES_TO_TRUST: u8 = 2;
+/// Balanço do que foi conferido a cada 10 min, para o painel e o log.
+const CYCLE_SECS: i64 = 600;
+const NEAR_KEEP: usize = 3;
+/// shortcut: o mapa de avaliados só esvazia quando enche; subir se a reavaliação em massa pesar.
+const EVALUATED_MAX: usize = 50_000;
+
+/// Anúncio que chegou perto de virar oportunidade (lucro pode ser negativo).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Near {
+    pub name: String,
+    pub price_cents: i64,
+    pub mid_cents: i64,
+    pub quick_cents: i64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Cycle {
+    started: i64,
+    evaluated: u32,
+    passed: u32,
+    near: Vec<Near>,
+    last: Option<String>,
+}
+
+fn profit_text(c: i64) -> String {
+    if c >= 0 {
+        format!("{} de lucro", brl(c))
+    } else {
+        format!("{} de prejuízo", brl(-c))
+    }
+}
+
+impl Cycle {
+    pub(crate) fn record(&mut self, passed: bool, near: Option<Near>) {
+        self.evaluated += 1;
+        self.passed += u32::from(passed);
+        if let Some(n) = near {
+            self.near.push(n);
+            self.near.sort_by_key(|n| std::cmp::Reverse(n.mid_cents));
+            self.near.truncate(NEAR_KEEP);
+        }
+    }
+
+    fn text(&self, secs: i64) -> String {
+        let min = (secs / 60).max(1);
+        let mut t = format!("{} anúncios conferidos em {min} min", self.evaluated);
+        if self.passed > 0 {
+            t += &format!("; {} deram lucro", self.passed);
+        } else if let Some(n) = self.near.first() {
+            t += &format!(
+                "; nenhum deu lucro, o mais perto dava {}",
+                profit_text(n.mid_cents)
+            );
+        } else if self.evaluated > 0 {
+            t += "; nenhum deu para estimar o preço de venda";
+        }
+        t
+    }
+
+    /// Último balanço fechado; antes do primeiro, o parcial.
+    pub(crate) fn message(&self, now: i64) -> Option<String> {
+        self.last
+            .clone()
+            .or_else(|| (self.evaluated > 0).then(|| self.text(now - self.started)))
+    }
+}
+
+/// Fecha o ciclo de 10 min: guarda o texto do painel e loga os 3 que chegaram mais perto.
+pub(crate) fn roll_cycle(h: &Hunt) {
+    let now = h.now();
+    let mut s = h.lock();
+    if s.cycle.started == 0 {
+        s.cycle.started = now;
+        return;
+    }
+    if now - s.cycle.started < CYCLE_SECS {
+        return;
+    }
+    let c = std::mem::take(&mut s.cycle);
+    s.cycle.started = now;
+    let text = c.text(now - c.started);
+    s.cycle.last = Some(text.clone());
+    drop(s);
+    tracing::info!(avaliados = c.evaluated, passaram = c.passed, "{text}");
+    for n in &c.near {
+        tracing::info!(
+            "perto: {} a {}; no preço médio {}, no rápido {}",
+            n.name,
+            brl(n.price_cents),
+            profit_text(n.mid_cents),
+            profit_text(n.quick_cents)
+        );
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Outcome {
@@ -59,6 +154,18 @@ fn to_sell_point(p: &history::PricePoint) -> PricePoint {
         median_cents: p.median_cents,
         purchases: p.purchases,
     }
+}
+
+async fn history_at(h: &Hunt, name: &str) -> Result<Option<i64>> {
+    let n = name.to_string();
+    h.db.call(move |c| {
+        c.query_row("SELECT history_at FROM items WHERE name = ?1", [n], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+        .optional()
+        .map(Option::flatten)
+    })
+    .await
 }
 
 /// Pontos dos últimos 15 dias do nome (a tendência usa até 14); baixa o histórico se passou de 6 h.
@@ -162,7 +269,14 @@ fn steam_url(code: &str, l: &Listing) -> String {
     )
 }
 
-/// Avalia um anúncio novo. `Ok(None)`: sem estimativa ou sem lucro (conclusivo). `Err`: falha de rede
+/// Resultado de uma avaliação conclusiva.
+struct Judged {
+    /// Virou (ou segue) oportunidade; o bool é o `notify` da avaliação.
+    found: Option<(Opportunity, bool)>,
+    near: Option<Near>,
+}
+
+/// Avalia um anúncio. `Ok` sem `found`: sem estimativa ou sem lucro (conclusivo). `Err`: falha de rede
 /// ao buscar histórico — o anúncio não é marcado como visto e volta a ser avaliado na próxima consulta.
 async fn evaluate_one(
     h: &Hunt,
@@ -170,7 +284,7 @@ async fn evaluate_one(
     l: &Listing,
     others_min: Option<i64>,
     notify_min: i64,
-) -> Result<Option<(Opportunity, bool)>> {
+) -> Result<Judged> {
     let now = h.now();
     let points = points_for(h, &l.name, now).await?;
     let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index);
@@ -179,11 +293,20 @@ async fn evaluate_one(
         None => None,
     };
     let Ok(est) = sell::estimate(&points, now, others_min, rare) else {
-        return Ok(None);
+        return Ok(Judged {
+            found: None,
+            near: None,
+        });
     };
     let ev = sell::evaluate(l.price_cents, &est, notify_min);
+    let near = Some(Near {
+        name: l.name.clone(),
+        price_cents: l.price_cents,
+        mid_cents: ev.sell.mid.net_cents - l.price_cents,
+        quick_cents: ev.sell.quick.net_cents - l.price_cents,
+    });
     if !ev.listable {
-        return Ok(None);
+        return Ok(Judged { found: None, near });
     }
     let opp = Opportunity {
         id: l.listing_id.clone(),
@@ -208,7 +331,10 @@ async fn evaluate_one(
         evidence: est.evidence,
         seen_at: now,
     };
-    Ok(Some((opp, ev.notify)))
+    Ok(Judged {
+        found: Some((opp, ev.notify)),
+        near,
+    })
 }
 
 /// Processa uma página de uma tarefa. Ver o módulo para as regras.
@@ -227,7 +353,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         let mut s = h.lock();
         if page.listings.is_empty() {
             let n = s.empty_streak.entry(task.id.clone()).or_default();
-            *n += 1;
+            *n = n.saturating_add(1);
             *n >= EMPTY_PAGES_TO_TRUST
         } else {
             s.empty_streak.remove(&task.id);
@@ -279,13 +405,21 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         .copied()
         .filter(|l| known.contains(&l.listing_id))
         .collect();
-    for l in relevant
-        .iter()
-        .copied()
-        .filter(|l| !known.contains(&l.listing_id))
-    {
-        if l.price_cents > saldo {
+    for l in relevant.iter().copied() {
+        let was_known = known.contains(&l.listing_id);
+        let active = h.lock().active.get(&l.listing_id).map(|a| a.opp.clone());
+        if l.price_cents > saldo && active.is_none() {
             continue; // não cabe agora; se o saldo subir, ainda é novo
+        }
+        // Já visto: só reavalia se o preço ou o histórico do item mudaram desde a última avaliação
+        // (ou se é oportunidade ativa e o histórico passou do prazo: a avaliação pode rebaixá-la).
+        let hist = history_at(h, &l.name).await?;
+        if was_known {
+            let last = h.lock().evaluated.get(&l.listing_id).copied();
+            let aged = active.is_some() && hist.is_none_or(|t| now - t >= HISTORY_TTL);
+            if last == Some((l.price_cents, hist.unwrap_or(0))) && !aged {
+                continue;
+            }
         }
         // Concorrência = outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns): um comum
         // barato não segura a venda de um T1.
@@ -298,15 +432,42 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .filter(|o| o.name == l.name && o.listing_id != l.listing_id && key(o) == mine)
             .map(|o| o.price_cents)
             .min();
-        match evaluate_one(h, task, l, others_min, notify_min).await {
-            Ok(found) => {
-                seen.push(l);
-                if let Some((opp, notify)) = found {
-                    store_opportunity(h, task, l, &opp).await?;
-                    out.found.push((opp, notify));
-                }
+        let judged = match evaluate_one(h, task, l, others_min, notify_min).await {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("avaliação de {} adiada: {e:#}", l.listing_id);
+                continue;
             }
-            Err(e) => tracing::warn!("avaliação de {} adiada: {e:#}", l.listing_id),
+        };
+        let hist_now = history_at(h, &l.name).await?.unwrap_or(0);
+        {
+            let mut s = h.lock();
+            if s.evaluated.len() >= EVALUATED_MAX {
+                s.evaluated.clear();
+            }
+            s.evaluated
+                .insert(l.listing_id.clone(), (l.price_cents, hist_now));
+            s.cycle.record(judged.found.is_some(), judged.near);
+        }
+        if !was_known {
+            seen.push(l);
+        }
+        match (judged.found, active) {
+            (Some((mut opp, notify)), prev) => {
+                let fresh = prev.is_none();
+                if let Some(p) = &prev {
+                    opp.seen_at = p.seen_at; // a ordem da lista não muda por reavaliar
+                    if serde_json::to_string(&opp)? == serde_json::to_string(p)? {
+                        continue;
+                    }
+                }
+                store_opportunity(h, task, l, &opp, fresh).await?;
+                out.found.push((opp, fresh && notify));
+            }
+            (None, Some(_)) => out
+                .gone
+                .extend(mark_gone(h, vec![l.listing_id.clone()]).await?),
+            (None, None) => {}
         }
     }
     store_seen(h, &seen, now).await?;
@@ -340,7 +501,8 @@ async fn store_seen(h: &Hunt, seen: &[&Listing], now: i64) -> Result<()> {
             tx.execute(
                 "INSERT INTO listings_seen(listing_id, name, price_cents, seed, \"float\", first_seen, last_seen)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-                 ON CONFLICT(listing_id) DO UPDATE SET last_seen = excluded.last_seen",
+                 ON CONFLICT(listing_id) DO UPDATE SET last_seen = excluded.last_seen,
+                    price_cents = excluded.price_cents",
                 params![id, name, price, seed, float, now],
             )?;
         }
@@ -350,7 +512,13 @@ async fn store_seen(h: &Hunt, seen: &[&Listing], now: i64) -> Result<()> {
 }
 
 /// Guarda a oportunidade e o anúncio inteiro (a compra refaz o pedido a partir dele) e publica o evento.
-async fn store_opportunity(h: &Hunt, task: &Task, l: &Listing, opp: &Opportunity) -> Result<()> {
+async fn store_opportunity(
+    h: &Hunt,
+    task: &Task,
+    l: &Listing,
+    opp: &Opportunity,
+    fresh: bool,
+) -> Result<()> {
     let (id, json, lj, tid) = (
         opp.id.clone(),
         serde_json::to_string(opp)?,
@@ -376,7 +544,9 @@ async fn store_opportunity(h: &Hunt, task: &Task, l: &Listing, opp: &Opportunity
                 task: task.id.clone(),
             },
         );
-        s.queue.add_hit(&task.id);
+        if fresh {
+            s.queue.add_hit(&task.id);
+        }
     }
     let _ = h.events.send(Event::Opportunity(opp.clone()));
     Ok(())
