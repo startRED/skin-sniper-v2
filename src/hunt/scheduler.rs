@@ -487,6 +487,15 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         return query_group(h, &task, tasks).await;
     };
     let base = base_name(&task.name);
+    let group: Vec<Task> = tasks
+        .iter()
+        .filter(|t| !t.rare() && base_name(&t.name) == base)
+        .cloned()
+        .collect();
+    // Uma busca só economiza quando cobre duas ou mais versões vigiadas; com uma só, ela custaria a mais.
+    if group.len() < 2 {
+        return query_group(h, &task, tasks).await;
+    }
     let q = [
         ("query", base.replace(" | ", " ")),
         ("start", "0".into()),
@@ -511,11 +520,6 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         .into_iter()
         .filter(|r| r.mode == "barato")
         .map(|r| (r.name, r.max_buy_cents))
-        .collect();
-    let group: Vec<Task> = tasks
-        .iter()
-        .filter(|t| !t.rare() && base_name(&t.name) == base)
-        .cloned()
         .collect();
     let mut eligible = Vec::new();
     for t in &group {
