@@ -400,6 +400,7 @@ impl SteamClient {
         let login = |c: &Option<Cookie>| c.as_ref().map(|c| c.steam_login_secure.clone());
         if g.cookie.is_some() && login(&g.cookie) != login(&cookie) {
             g.anon_reads_until = None;
+            Self::notify_pace(&mut g, Instant::now()); // senão o prazo velho volta do banco ao reiniciar
         }
         g.cookie = cookie;
         g.extra.clear();
@@ -525,7 +526,9 @@ impl SteamClient {
         let quiet = unix_in(Duration::ZERO) - until >= PAUSE_RESET_AFTER.as_secs() as i64;
         if let Some(Ok(p)) = pause.filter(|_| !quiet) {
             l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
-            l.last_429 = Some(now); // a escalada segue valendo depois de subir
+            // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
+            let ago = (unix_in(Duration::ZERO) - until).max(0) as u64;
+            l.last_429 = Some(now.checked_sub(Duration::from_secs(ago)).unwrap_or(now));
         }
         l.last_adjust = now;
         let left = until - unix_in(Duration::ZERO);
@@ -534,7 +537,7 @@ impl SteamClient {
         }
     }
 
-    /// Chamado (sob o lock do cliente) a cada 429, de qualquer endpoint, com o texto para `restore_pace` (o 4º
+    /// Chamado (sob o lock do cliente) a cada 429 e ao trocar de conta, de qualquer endpoint, com o texto para `restore_pace` (o 4º
     /// campo é o fim das leituras sem login).
     pub fn on_pace_change(&self, f: impl Fn(String) + Send + Sync + 'static) {
         self.inner.lock().unwrap().on_pace = Some(Arc::new(f));
@@ -1262,7 +1265,14 @@ mod tests {
         assert!(anon(&c));
         c.set_cookie(login("x"));
         assert!(anon(&c), "mesma conta mantém o prazo");
+        let saved = Arc::new(Mutex::new(String::new()));
+        let keep = saved.clone();
+        c.on_pace_change(move |v| *keep.lock().unwrap() = v);
         c.set_cookie(login("y"));
+        assert!(
+            saved.lock().unwrap().ends_with("|0"),
+            "o prazo zerado vai para o banco"
+        );
         assert!(!anon(&c), "outra conta lê logada de novo");
         // Pausa vencida: o 1º campo salvo é a hora do último 429, não zero.
         let mut g = c.inner.lock().unwrap();
