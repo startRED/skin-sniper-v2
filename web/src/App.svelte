@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { app, load, lostRows, start } from './lib/store.svelte';
+  import { app, load, lostRows, readingSaldo, start } from './lib/store.svelte';
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
   import OppTable from './lib/OppTable.svelte';
@@ -14,6 +14,7 @@
   const lostCount = $derived(lostRows().length);
   const noSaldo = $derived(app.state?.saldo_source === 'none');
   const noSteam = $derived(app.state != null && !app.state.keys.steam.set);
+  const reading = $derived(readingSaldo());
 </script>
 
 <TopBar />
@@ -51,7 +52,10 @@
 
       {#if count === 0}
         <div class="empty compact" role="status">
-          {#if noSaldo}
+          {#if reading}
+            <h3>Lendo seu saldo na Steam…</h3>
+            <p>Assim que a Steam responder eu escolho as skins que cabem. Se ela pediu calma, isso espera a pausa lá em cima acabar.</p>
+          {:else if noSaldo}
             <h3>Falta o seu saldo</h3>
             <p>Digite quanto você tem para gastar (lá em cima, em “Saldo”) ou conecte a Steam em Configurações. Com isso eu sei quais skins cabem.</p>
           {:else}

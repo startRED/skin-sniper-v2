@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, setSaldo } from './store.svelte';
+  import { app, readingSaldo, setSaldo } from './store.svelte';
   import { ago, centsToInput, money, parseBRL } from './format';
 
   let editing = $state(false);
@@ -10,7 +10,8 @@
   const st = $derived(app.state);
   const paused = $derived(st?.hunt.paused_until != null && st.hunt.paused_until > app.now);
   const sourceLabel = $derived(
-    st?.saldo_source === 'steam' ? 'lido da Steam' : st?.saldo_source === 'manual' ? 'digitado por você' : 'sem saldo'
+    st?.saldo_source === 'steam' ? 'lido da Steam' : st?.saldo_source === 'manual' ? 'digitado por você'
+    : readingSaldo() ? 'lendo da Steam…' : 'sem saldo'
   );
 
   function edit() {
@@ -87,7 +88,7 @@
         <span>Caçando <b>{st.hunt.watching}</b> skins · {st.hunt.queries_per_min} consultas/min ·
           {st.hunt.last_query_at ? ago(st.hunt.last_query_at, app.now) : 'ainda sem consulta'}</span>
       {/if}
-      {#if app.conn !== 'down' && st?.hunt.message && !(paused && st.hunt.message.includes('429'))}<span class="msg">{st.hunt.message}</span>{/if}
+      {#if app.conn !== 'down' && st?.hunt.message && !(paused && st.hunt.message.includes('429')) && !readingSaldo()}<span class="msg">{st.hunt.message}</span>{/if}
     </div>
   </div>
 
