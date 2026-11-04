@@ -5,8 +5,8 @@
   import Chart from './Chart.svelte';
   import type { Opportunity, Tier } from './types';
 
-  // lost: as que já sumiram da Steam, apagadas e sem compra; o cabeçalho só aparece se não houver a tabela de ativas acima
-  let { lost = false, head = true }: { lost?: boolean; head?: boolean } = $props();
+  // lost: as que já sumiram da lista, apagadas e sem compra; cabeçalho sem ordenação (no celular, nenhum)
+  let { lost = false }: { lost?: boolean } = $props();
 
   const LOST_SHOWN = 8;
   let showAll = $state(false);
@@ -54,7 +54,6 @@
   <p class="day-hint">Por dia: lucro estimado dividido pelo tempo até vender, incluindo os 7 dias de trava. Sem esse dado, a ordem usa o lucro médio dividido por 7, apenas para comparação.</p>
 {/if}
 <div class="table" role="table" aria-label={lost ? 'Oportunidades perdidas' : 'Skins com lucro'}>
-  {#if head}
   <div class="head grid" role="row" class:static={lost}>
     <div class="h hide" role="columnheader">Skin</div>
     <div class="h hide" role="columnheader">Preço</div>
@@ -73,7 +72,6 @@
     {@render th('new', lost ? 'Sumiu' : 'Mais novo', 'Ordenar pelas que apareceram agora')}
     <div class="h hide" role="columnheader"><span class="sr-only">Comprar</span></div>
   </div>
-  {/if}
 
   {#each list as o (o.id)}
     {@const open = app.expanded === o.id}

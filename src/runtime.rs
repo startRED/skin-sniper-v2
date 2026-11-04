@@ -509,6 +509,7 @@ impl Runtime {
             tracing::warn!("tirar {id} da lista: {e:#}");
         }
         self.hunt.recompute_combo();
+        self.hunt.publish_state();
     }
 
     async fn save_purchase(&self, p: &Purchase, created_at: i64) -> Result<()> {

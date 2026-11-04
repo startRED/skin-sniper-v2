@@ -172,7 +172,10 @@ export async function load(): Promise<boolean> {
   app.loadError = null;
   app.warnings = [opps, settings, purchases].filter((r) => r.status === 'rejected').map(reason);
   app.state = state.value;
-  if (opps.status === 'fulfilled') app.opps = Object.fromEntries(opps.value.map((o) => [o.id, o]));
+  if (opps.status === 'fulfilled') {
+    disarm(); // a linha armada pode ter sumido e voltado enquanto estava desconectado
+    app.opps = Object.fromEntries(opps.value.map((o) => [o.id, o]));
+  }
   if (settings.status === 'fulfilled') app.settings = settings.value;
   if (purchases.status === 'fulfilled') app.purchases = purchases.value;
   app.loaded = true;
