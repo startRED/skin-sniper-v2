@@ -478,10 +478,12 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
     detect::roll_cycle(&h); // abre o ciclo
     {
         let mut s = h.lock();
-        for (n, m) in [("A", -40), ("B", 12), ("C", -5), ("D", -300)] {
+        for (n, m) in [("A", -40), ("B", 12), ("B", 12), ("C", -5), ("D", -300)] {
             s.cycle.record(false, Some(near(n, m)));
         }
         s.cycle.record(false, None);
+        let names: Vec<_> = s.cycle.near.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["B", "C", "A"]); // o B repetido entra uma vez só
     }
     h.set_message(None);
     // parcial antes de fechar
@@ -490,14 +492,14 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .hunt
             .message
             .unwrap()
-            .starts_with("5 anúncios conferidos em 1 min")
+            .starts_with("6 anúncios conferidos em 1 min")
     );
     T.store(NOW + 600, Ordering::SeqCst);
     detect::roll_cycle(&h);
     assert_eq!(
         h.state().hunt.message.as_deref(),
         Some(
-            "5 anúncios conferidos em 10 min; nenhum deu lucro, o mais perto dava R$ 0,12 de lucro"
+            "6 anúncios conferidos em 10 min; nenhum deu lucro, o mais perto dava R$ 0,12 de lucro"
         )
     );
     // o ciclo novo começa zerado e o balanço antigo segue até o próximo fechar
@@ -506,7 +508,7 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .cycle
             .message(NOW + 601)
             .unwrap()
-            .starts_with("5 anúncios")
+            .starts_with("6 anúncios")
     );
     T.store(NOW + 1200, Ordering::SeqCst);
     detect::roll_cycle(&h);

@@ -40,7 +40,7 @@ pub(crate) struct Cycle {
     started: i64,
     evaluated: u32,
     passed: u32,
-    near: Vec<Near>,
+    pub(crate) near: Vec<Near>,
     last: Option<String>,
 }
 
@@ -56,7 +56,8 @@ impl Cycle {
     pub(crate) fn record(&mut self, passed: bool, near: Option<Near>) {
         self.evaluated += 1;
         self.passed += u32::from(passed);
-        if let Some(n) = near {
+        // O mesmo anúncio volta em consultas seguidas; conta uma vez só na lista dos mais perto.
+        if let Some(n) = near.filter(|n| !self.near.contains(n)) {
             self.near.push(n);
             self.near.sort_by_key(|n| std::cmp::Reverse(n.mid_cents));
             self.near.truncate(NEAR_KEEP);
