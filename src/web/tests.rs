@@ -59,6 +59,9 @@ async fn manual_sales_and_calibration_use_saved_predictions() {
     p["bought_at"] = json!(1);
     p["tradable_at"] = json!(2);
     p["message"] = Value::Null;
+    // Previsão já descontada 20 % pelas vendas: a calibração compara com os 120 originais.
+    p["sell"]["mid"]["price_cents"] = json!(96);
+    p["sell"]["correction"] = json!(0.8);
     let p = p.to_string();
     s.app
         .db

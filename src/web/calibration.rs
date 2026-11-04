@@ -120,7 +120,10 @@ fn load_sales(c: &rusqlite::Connection) -> rusqlite::Result<Vec<Sale>> {
                     .and_then(|j| serde_json::from_str::<Opportunity>(&j).ok())
                     .map(|o| o.kind)
             })?;
-            let predicted = p.sell.mid.price_cents;
+            // Compara com a previsão antes do fator: senão vender no preço já descontado anula o desconto.
+            let predicted = (p.sell.mid.price_cents as f64
+                / p.sell.correction.clamp(CORRECTION_FLOOR, 1.0))
+            .round() as i64;
             (predicted > 0 && sold > 0).then_some(Sale {
                 name: p.name,
                 kind,

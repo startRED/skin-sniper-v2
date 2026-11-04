@@ -196,10 +196,13 @@ impl Hunt {
     /// Relê as vendas registradas; chamado ao subir e a cada venda informada no painel.
     pub async fn refresh_correction(&self) -> anyhow::Result<()> {
         let c = crate::web::calibration::load_correction(&self.db).await?;
-        if c != self.lock().correction {
+        let mut s = self.lock();
+        if c != s.correction {
             tracing::info!(desconto = c[0], raro = c[1], "fator das vendas reais");
+            s.correction = c;
+            // Previsões mudaram: cada anúncio volta a ser avaliado na próxima consulta.
+            s.evaluated.clear();
         }
-        self.lock().correction = c;
         Ok(())
     }
 

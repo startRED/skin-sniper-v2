@@ -276,7 +276,7 @@ fn api_confidence(c: SellConfidence) -> Confidence {
     }
 }
 
-fn api_sell(s: &sell::Sell) -> Sell {
+fn api_sell(s: &sell::Sell, correction: f64) -> Sell {
     let t = |t: &sell::SellTier| Tier {
         price_cents: t.price_cents,
         net_cents: t.net_cents,
@@ -287,6 +287,7 @@ fn api_sell(s: &sell::Sell) -> Sell {
         high: t(&s.high),
         mid: t(&s.mid),
         quick: t(&s.quick),
+        correction,
     }
 }
 
@@ -360,7 +361,7 @@ async fn evaluate_one(
             Kind::Desconto
         },
         price_cents: l.price_cents,
-        sell: api_sell(&ev.sell),
+        sell: api_sell(&ev.sell, correction),
         margin_pct: ev.margin_pct,
         safe: ev.safe,
         confidence: api_confidence(est.confidence),
