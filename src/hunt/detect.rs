@@ -489,16 +489,6 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         if l.price_cents > saldo && active.is_none() {
             continue; // não cabe agora; se o saldo subir, ainda é novo
         }
-        // Já visto: só reavalia se o preço ou o histórico do item mudaram desde a última avaliação
-        // (ou se é oportunidade ativa e o histórico passou do prazo: a avaliação pode rebaixá-la).
-        let hist = history_at(h, &l.name).await?;
-        if was_known {
-            let last = h.lock().evaluated.get(&l.listing_id).copied();
-            let aged = active.is_some() && hist.is_none_or(|t| now - t >= HISTORY_TTL);
-            if last == Some((l.price_cents, hist.unwrap_or(0))) && !aged {
-                continue;
-            }
-        }
         // Concorrência = outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns): um comum
         // barato não segura a venda de um T1.
         let key =
@@ -510,6 +500,18 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .filter(|o| o.name == l.name && o.listing_id != l.listing_id && key(o) == mine)
             .map(|o| o.price_cents)
             .min();
+        // Já visto: só reavalia se o preço, o histórico ou o menor concorrente mudaram desde a última
+        // avaliação (ou se é oportunidade ativa e o histórico passou do prazo: a avaliação pode rebaixá-la).
+        // shortcut: a janela de 7 dias anda sem mudar a chave; um dia que sai dela só pesa quando o histórico
+        // vence (até 6 h). Se isso deixar oportunidade velha na tela, guardar o dia da janela na chave.
+        let hist = history_at(h, &l.name).await?;
+        if was_known {
+            let last = h.lock().evaluated.get(&l.listing_id).copied();
+            let aged = active.is_some() && hist.is_none_or(|t| now - t >= HISTORY_TTL);
+            if last == Some((l.price_cents, hist.unwrap_or(0), others_min)) && !aged {
+                continue;
+            }
+        }
         let judged = match evaluate_one(h, task, l, others_min, notify_min).await {
             Ok(j) => j,
             Err(e) => {
@@ -533,7 +535,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                 s.evaluated.clear();
             }
             s.evaluated
-                .insert(l.listing_id.clone(), (l.price_cents, hist_now));
+                .insert(l.listing_id.clone(), (l.price_cents, hist_now, others_min));
             s.cycle.record(judged.found.is_some(), judged.near);
         }
         if !was_known {

@@ -217,8 +217,12 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         cheap.evidence,
         "339 vendas/dia nos últimos 7 dias · preço em queda, descontado 2%"
     );
-    assert_eq!(tiers(t1), [(854, 743, 43), (887, 772, 72), (911, 793, 93)]);
-    assert!((t1.margin_pct - 10.2857).abs() < 1e-3 && t1.safe);
+    // a venda rápida não conta com o prêmio do CSFloat: sem ele o T1 a R$ 7,00 perde, então não é seguro
+    assert_eq!(
+        tiers(t1),
+        [(561, 489, -211), (887, 772, 72), (911, 793, 93)]
+    );
+    assert!((t1.margin_pct - 10.2857).abs() < 1e-3 && !t1.safe);
     assert_eq!(t1.confidence, Confidence::Media);
     for o in &found {
         assert_eq!(o.name, MOON);
@@ -246,10 +250,10 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     );
     assert!(task.starts_with("d:") || task.starts_with("r:"));
 
-    // combo com os dois anúncios (R$ 11,00 ≤ R$ 36,08)
+    // combo só com o seguro: o T1 depende do prêmio, fica na lista mas fora da compra sugerida
     let st = h.state();
-    assert_eq!(st.combo.cost_cents, 1100);
-    assert_eq!(st.combo.ids.len(), 2);
+    assert_eq!(st.combo.cost_cents, 400);
+    assert_eq!(st.combo.ids, vec![ID_CHEAP.to_string()]);
     assert!(st.hunt.watching >= 10, "watching {}", st.hunt.watching);
 
     // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 0,20 e 5 %) e ritmo
@@ -299,7 +303,7 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_CHEAP));
-    assert_eq!(h.state().combo.ids, vec![ID_T1.to_string()]);
+    assert!(h.state().combo.ids.is_empty());
     let gone_at: Option<i64> = db
         .call(|c| {
             c.query_row(
@@ -330,6 +334,35 @@ async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Ve
         }
     }
     found
+}
+
+#[tokio::test]
+async fn cheaper_competitor_reevaluates_known_opportunity() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    assert_eq!(run_until_two(&h, &mut rx).await.len(), 2);
+    // outro comum baixa para R$ 4,00: o barato (mesmo preço, mesmo histórico) só vende a R$ 3,99 e perde
+    {
+        let mut b = bodies.listings.lock().unwrap();
+        let other = &mut b["data"]["listings"][2];
+        other["unPrice"] = json!(348);
+        other["unFee"] = json!(52);
+    }
+    let mut gone = None;
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Gone { id } = ev {
+                gone = Some(id);
+            }
+        }
+        if gone.is_some() {
+            break;
+        }
+    }
+    assert_eq!(gone.as_deref(), Some(ID_CHEAP));
 }
 
 #[tokio::test]
