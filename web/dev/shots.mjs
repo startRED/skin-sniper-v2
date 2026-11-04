@@ -6,11 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const PORT = 5199;
-const BASE = `http://127.0.0.1:${PORT}`;
+const BASE = process.env.SHOTS_URL ?? `http://127.0.0.1:${PORT}`;
 const out = fileURLToPath(new URL('./shots/', import.meta.url));
 mkdirSync(out, { recursive: true });
 
-const vite = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--port', String(PORT), '--host', '127.0.0.1', '--strictPort'], { stdio: 'ignore' });
+const REAL = process.env.SHOTS_URL; // ex.: http://127.0.0.1:8790 (servidor real já rodando): só tira fotos da tela real
+const vite = REAL ? null : spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--port', String(PORT), '--host', '127.0.0.1', '--strictPort'], { stdio: 'ignore' });
 for (let i = 0; i < 60; i++) {
   try { await fetch(BASE); break; } catch { await new Promise((r) => setTimeout(r, 250)); }
 }
@@ -23,6 +24,18 @@ if (!browser) throw new Error('Nenhum navegador encontrado para as capturas.');
 
 const scenario = (name, freeze = true) =>
   fetch(`${BASE}/api/__dev/scenario`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, freeze }) });
+
+if (REAL) {
+  for (const [tag, width, height] of [['pc', 1920, 1080], ['celular', 390, 844]]) {
+    const page = await (await browser.newContext({ viewport: { width, height }, deviceScaleFactor: tag === 'pc' ? 1 : 2, locale: 'pt-BR' })).newPage();
+    await page.goto(BASE);
+    await page.waitForSelector('main, .empty');
+    await page.waitForTimeout(2500);
+    await page.screenshot({ path: `${out}real-${tag}.png` });
+  }
+  await browser.close();
+  process.exit(0);
+}
 
 try {
   for (const [tag, width, height] of [['pc', 1920, 1080], ['celular', 390, 844]]) {
@@ -71,5 +84,5 @@ try {
   }
 } finally {
   await browser.close();
-  vite.kill();
+  vite?.kill();
 }

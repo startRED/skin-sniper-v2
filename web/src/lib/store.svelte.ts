@@ -9,6 +9,7 @@ const DEFAULT_DIR: Record<SortKey, 'asc' | 'desc'> = { profit: 'desc', margin: '
 export const app = $state({
   loaded: false,
   loadError: null as string | null,
+  warnings: [] as string[], // partes que o servidor ainda não liga (503) ou que falharam, sem derrubar a tela
   conn: 'connecting' as 'connecting' | 'live' | 'down',
   state: null as State | null,
   opps: {} as Record<string, Opportunity>,
@@ -49,6 +50,9 @@ export function setSort(key: SortKey) {
     : { key, dir: DEFAULT_DIR[key] };
 }
 
+// A Steam não confirmou: pode ter comprado ou não. Nunca oferecer tentar de novo.
+export const isUncertain = (p?: Purchase) => p?.status === 'failed' && /invent[aá]rio/i.test(p.message ?? '');
+
 export const purchaseOf = (id: string) => app.purchases.find((p) => p.id === id);
 
 export function arm(id: string) {
@@ -81,7 +85,8 @@ function upsertPurchase(p: Purchase) {
   else app.purchases.unshift(p);
   if (before !== p.status) {
     if (p.status === 'bought') say(`Comprado: ${p.name}.`);
-    if (p.status === 'failed') say(`A compra de ${p.name} falhou.`);
+    if (isUncertain(p)) say(`Não deu para confirmar a compra de ${p.name}. Confira seu inventário da Steam.`);
+    else if (p.status === 'failed') say(`A compra de ${p.name} falhou.`);
     if (p.status === 'need_confirmation') say('Confirme a compra no app Steam do celular.');
   }
 }
@@ -130,35 +135,52 @@ export function notify(o: Opportunity) {
   say(`Nova oportunidade: ${o.name}, lucro ${signed(o.sell.mid.profit_cents)}.`);
 }
 
-export async function load() {
-  app.loadError = null;
-  try {
-    const [state, opps, settings, purchases] = await Promise.all([
-      api<State>('/api/state'),
-      api<Opportunity[]>('/api/opportunities'),
-      api<Settings>('/api/settings'),
-      api<Purchase[]>('/api/purchases')
-    ]);
-    app.state = state;
-    app.opps = Object.fromEntries(opps.map((o) => [o.id, o]));
-    app.settings = settings;
-    app.purchases = purchases;
-    app.loaded = true;
-  } catch (e) {
-    app.loadError = e instanceof ApiError ? e.message : 'Não consegui carregar os dados.';
+const reason = (r: PromiseRejectedResult) => (r.reason instanceof ApiError ? r.reason.message : 'Não consegui carregar uma parte dos dados.');
+
+// Devolve true se o essencial (estado) carregou. As outras rotas falhando só viram aviso.
+export async function load(): Promise<boolean> {
+  const [state, opps, settings, purchases] = await Promise.allSettled([
+    api<State>('/api/state'),
+    api<Opportunity[]>('/api/opportunities'),
+    api<Settings>('/api/settings'),
+    api<Purchase[]>('/api/purchases')
+  ]);
+  if (state.status === 'rejected') {
+    if (!app.loaded) app.loadError = reason(state);
+    return false;
   }
+  app.loadError = null;
+  app.warnings = [opps, settings, purchases].filter((r) => r.status === 'rejected').map(reason);
+  app.state = state.value;
+  if (opps.status === 'fulfilled') app.opps = Object.fromEntries(opps.value.map((o) => [o.id, o]));
+  if (settings.status === 'fulfilled') app.settings = settings.value;
+  if (purchases.status === 'fulfilled') app.purchases = purchases.value;
+  app.loaded = true;
+  return true;
 }
 
 let es: EventSource | undefined;
 let wasDown = false;
 
+// Depois de uma queda, eventos novos esperam a recarga terminar: senão a recarga atropelaria o que acabou de chegar.
+let queue: (() => void)[] | null = null;
+const apply = (fn: () => void) => (queue ? queue.push(fn) : fn());
+
+async function resync() {
+  queue = [];
+  while (!(await load())) await new Promise((r) => setTimeout(r, 3000));
+  const q = queue;
+  queue = null;
+  q.forEach((fn) => fn());
+  wasDown = false;
+}
+
 function connect() {
   es = new EventSource('/api/events');
   es.onopen = () => {
     app.conn = 'live';
-    if (wasDown) void load(); // perdeu eventos enquanto estava fora: recarrega tudo
-    wasDown = false;
     say('Conectado de novo.');
+    if (wasDown && !queue) void resync(); // o servidor encerra o stream de quem atrasa: perdemos eventos, recarrega tudo
   };
   es.onerror = () => {
     if (app.conn !== 'down') say('Sem conexão com o Skin Sniper. Tentando de novo.');
@@ -166,8 +188,12 @@ function connect() {
     wasDown = true;
     if (es?.readyState === EventSource.CLOSED) setTimeout(connect, 3000);
   };
-  es.addEventListener('opportunity', (e) => {
-    const o: Opportunity = JSON.parse((e as MessageEvent).data);
+  const on = (name: string, fn: (data: any) => void) =>
+    es!.addEventListener(name, (e) => {
+      const data = JSON.parse((e as MessageEvent).data);
+      apply(() => fn(data));
+    });
+  on('opportunity', (o: Opportunity) => {
     const isNew = !(o.id in app.opps);
     app.opps[o.id] = o;
     if (!isNew) return;
@@ -175,13 +201,12 @@ function connect() {
     setTimeout(() => delete app.fresh[o.id], 3500);
     if (app.loaded && qualifies(o)) notify(o);
   });
-  es.addEventListener('gone', (e) => {
-    const { id } = JSON.parse((e as MessageEvent).data);
+  on('gone', ({ id }) => {
     delete app.opps[id];
     if (app.expanded === id) app.expanded = null;
   });
-  es.addEventListener('state', (e) => (app.state = JSON.parse((e as MessageEvent).data)));
-  es.addEventListener('purchase', (e) => upsertPurchase(JSON.parse((e as MessageEvent).data)));
+  on('state', (s: State) => (app.state = s));
+  on('purchase', (p: Purchase) => upsertPurchase(p));
 }
 
 export function start() {
