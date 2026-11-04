@@ -20,6 +20,8 @@ use super::listings::Listing;
 /// Reenvio com o id da confirmação: a cada 2 s, por até 60 s (docs/projeto.md, "Compra").
 pub const CONFIRM_INTERVAL: Duration = Duration::from_secs(2);
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
+/// Entradas terminais (comprado/recusado) saem do mapa depois disso; `Uncertain` fica até `resolve`.
+pub const STATE_RETENTION: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuyOutcome {
@@ -57,7 +59,47 @@ struct Cfg {
     balance: Option<i64>,
     /// `tradefee_tax`; esperado 0 na conta BR (HIPÓTESE, pesquisa-web 3.1) até que se indique outro valor.
     tradefee_tax: i64,
-    states: HashMap<String, ListingState>,
+    /// Estado + quando mudou; entradas terminais (Bought/Failed) velhas são descartadas.
+    states: HashMap<String, (ListingState, std::time::Instant)>,
+}
+
+impl Cfg {
+    fn set(&mut self, id: &str, st: Option<ListingState>, retention: Duration) {
+        let now = std::time::Instant::now();
+        self.states.retain(|_, (s, at)| {
+            !(matches!(s, ListingState::Bought | ListingState::Failed) && now - *at >= retention)
+        });
+        match st {
+            Some(s) => self.states.insert(id.to_string(), (s, now)),
+            None => self.states.remove(id),
+        };
+    }
+}
+
+/// Se a operação sair sem resultado (future cancelada, pânico), não deixa o anúncio preso em `InFlight`:
+/// com o POST já enviado vira `Uncertain`; antes do envio volta ao estado anterior.
+struct InFlightGuard<'a> {
+    cfg: &'a Mutex<Cfg>,
+    id: String,
+    prev: Option<ListingState>,
+    retention: Duration,
+    sent: bool,
+    armed: bool,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut c = self.cfg.lock().unwrap_or_else(|e| e.into_inner());
+        let st = if self.sent {
+            Some(ListingState::Uncertain)
+        } else {
+            self.prev.take()
+        };
+        c.set(&self.id, st, self.retention);
+    }
 }
 
 /// Uma compra por vez: o lock é segurado durante todo o fluxo, inclusive as tentativas de confirmação.
@@ -66,6 +108,8 @@ pub struct Buyer {
     cfg: Mutex<Cfg>,
     /// Prazo absoluto de cada operação (espera do limitador + resposta + reenvios).
     timeout: Duration,
+    /// Quanto tempo ficam as entradas terminais no mapa.
+    retention: Duration,
 }
 
 impl Default for Buyer {
@@ -84,6 +128,7 @@ impl Buyer {
                 states: HashMap::new(),
             }),
             timeout: CONFIRM_TIMEOUT,
+            retention: STATE_RETENTION,
         }
     }
 
@@ -101,26 +146,38 @@ impl Buyer {
 
     /// Estado do anúncio (para o painel mostrar "confira na Steam").
     pub fn state_of(&self, listing_id: &str) -> Option<ListingState> {
-        self.cfg.lock().unwrap().states.get(listing_id).cloned()
+        self.cfg
+            .lock()
+            .unwrap()
+            .states
+            .get(listing_id)
+            .map(|(s, _)| s.clone())
     }
 
     /// Reconciliação explícita de um resultado incerto (ou de uma confirmação que estourou o prazo):
     /// depois de conferir inventário/saldo na Steam, diga se comprou. `false` libera nova tentativa.
-    /// Só vale em `Uncertain` e `Awaiting`; devolve se algo mudou.
+    /// Vale em `Uncertain` e `Awaiting` (e `InFlight` órfão, se nenhuma compra estiver rodando); devolve se algo mudou.
     pub fn resolve(&self, listing_id: &str, bought: bool) -> bool {
+        let idle = self.lock.try_lock().is_ok();
         let mut c = self.cfg.lock().unwrap();
-        match c.states.get(listing_id) {
-            Some(ListingState::Uncertain | ListingState::Awaiting { .. }) => {
-                if bought {
-                    c.states
-                        .insert(listing_id.to_string(), ListingState::Bought);
-                } else {
-                    c.states.remove(listing_id);
-                }
-                true
-            }
-            _ => false,
+        match c.states.get(listing_id).map(|(s, _)| s) {
+            Some(ListingState::Uncertain | ListingState::Awaiting { .. }) => {}
+            Some(ListingState::InFlight) if idle => {}
+            _ => return false,
         }
+        let st = bought.then_some(ListingState::Bought);
+        c.set(listing_id, st, self.retention);
+        true
+    }
+
+    /// Espera a vez até o prazo; `None` = estourou antes de enviar qualquer coisa.
+    async fn acquire(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        tokio::time::timeout_at(deadline, self.lock.lock())
+            .await
+            .ok()
     }
 
     /// Primeiro envio (`confirmation = "0"`). Recusa sem tocar na rede se o anúncio já foi tocado ou se
@@ -131,8 +188,10 @@ impl Buyer {
         listing: &Listing,
         wallet_currency: i32,
     ) -> BuyOutcome {
-        let _g = self.lock.lock().await;
         let deadline = tokio::time::Instant::now() + self.timeout;
+        let Some(_g) = self.acquire(deadline).await else {
+            return busy();
+        };
         self.send_locked(client, listing, wallet_currency, None, deadline)
             .await
     }
@@ -145,8 +204,10 @@ impl Buyer {
         wallet_currency: i32,
         id: &str,
     ) -> BuyOutcome {
-        let _g = self.lock.lock().await;
         let deadline = tokio::time::Instant::now() + self.timeout;
+        let Some(_g) = self.acquire(deadline).await else {
+            return busy();
+        };
         self.send_locked(client, listing, wallet_currency, Some(id), deadline)
             .await
     }
@@ -159,13 +220,16 @@ impl Buyer {
         listing: &Listing,
         wallet_currency: i32,
     ) -> BuyOutcome {
-        let _g = self.lock.lock().await;
         let deadline = tokio::time::Instant::now() + self.timeout;
+        let Some(_g) = self.acquire(deadline).await else {
+            return busy();
+        };
         let first = self
             .send_locked(client, listing, wallet_currency, None, deadline)
             .await;
         let clock = TokioClock::new();
-        buy_until_confirmed(&clock, self.timeout, first, |id| async move {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        buy_until_confirmed(&clock, remaining, first, |id| async move {
             self.send_locked(client, listing, wallet_currency, Some(&id), deadline)
                 .await
         })
@@ -186,7 +250,7 @@ impl Buyer {
             (
                 c.balance,
                 c.tradefee_tax,
-                c.states.get(&l.listing_id).cloned(),
+                c.states.get(&l.listing_id).map(|(s, _)| s.clone()),
             )
         };
         match (&state, confirmation) {
@@ -250,11 +314,19 @@ impl Buyer {
                 &sessionid,
                 confirmation.unwrap_or("0"),
             ));
+        let mut guard = InFlightGuard {
+            cfg: &self.cfg,
+            id: l.listing_id.clone(),
+            prev: state.clone(),
+            retention: self.retention,
+            sent: false,
+            armed: true,
+        };
         self.cfg
             .lock()
             .unwrap()
-            .states
-            .insert(l.listing_id.clone(), ListingState::InFlight);
+            .set(&l.listing_id, Some(ListingState::InFlight), self.retention);
+        guard.sent = true;
         // O prazo cobre a espera do limitador e a resposta. Se estourar, o POST pode ter saído: incerto.
         let sent = tokio::time::timeout_at(deadline, client.send(Endpoint::Buy, req, true)).await;
         let (out, new_state) = match sent {
@@ -294,12 +366,16 @@ impl Buyer {
                 None => c.balance.map(|b| (b - total).max(0)),
             };
         }
-        match new_state {
-            Some(s) => c.states.insert(l.listing_id.clone(), s),
-            None => c.states.remove(&l.listing_id),
-        };
+        c.set(&l.listing_id, new_state, self.retention);
+        guard.armed = false;
         out
     }
+}
+
+fn busy() -> BuyOutcome {
+    failed(
+        "Outra compra está em andamento e o prazo acabou antes de a vez chegar. Nada foi enviado; tente de novo.",
+    )
 }
 
 fn failed(m: impl Into<String>) -> BuyOutcome {
@@ -511,10 +587,15 @@ where
     };
     let start = clock.now();
     loop {
+        let left = timeout.saturating_sub(clock.now() - start);
+        if left.is_zero() {
+            return BuyOutcome::ConfirmTimeout { id };
+        }
+        // o sono nunca passa do prazo; ao acordar sem tempo, não reenvia
+        clock.sleep(CONFIRM_INTERVAL.min(left)).await;
         if clock.now() - start >= timeout {
             return BuyOutcome::ConfirmTimeout { id };
         }
-        clock.sleep(CONFIRM_INTERVAL).await;
         match retry(id.clone()).await {
             BuyOutcome::NeedConfirmation { id: new } => id = new,
             other => return other,
@@ -743,7 +824,9 @@ mod tests {
         )
         .await;
         assert_eq!(out, BuyOutcome::ConfirmTimeout { id: "7".into() });
-        assert_eq!(calls.get(), 30);
+        // nenhum reenvio no instante do prazo: 2 s, 4 s … 58 s
+        assert_eq!(calls.get(), 29);
+        assert_eq!(clock.now(), CONFIRM_TIMEOUT);
         // resultado que não é confirmação passa direto, sem esperar
         let out = buy_until_confirmed(
             &clock,
@@ -871,6 +954,116 @@ mod tests {
             BuyOutcome::Failed { .. }
         ));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirmation_sleep_never_passes_the_deadline() {
+        let clock = Fake(Cell::new(Duration::ZERO));
+        let calls = Cell::new(0);
+        // sobram 3 s: dorme 2 s, reenvia, dorme só 1 s e para sem reenviar
+        let out = buy_until_confirmed(
+            &clock,
+            Duration::from_secs(3),
+            BuyOutcome::NeedConfirmation { id: "7".into() },
+            |_| {
+                calls.set(calls.get() + 1);
+                async { BuyOutcome::NeedConfirmation { id: "7".into() } }
+            },
+        )
+        .await;
+        assert_eq!(out, BuyOutcome::ConfirmTimeout { id: "7".into() });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(clock.now(), Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn deadline_starts_at_the_call_and_covers_waiting_for_the_lock() {
+        let (hits, seen) = (Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(vec![])));
+        let base = serve("{}", 200, hits.clone(), seen).await;
+        let c = client(&base);
+        let mut b = Buyer::new();
+        b.timeout = Duration::from_millis(200);
+        let held = b.lock.lock().await; // outra compra segurando a vez
+        let t = std::time::Instant::now();
+        let out = b.buy_listing(&c, &listing(), 7).await;
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert!(
+            matches!(out, BuyOutcome::Failed { message } if message.contains("Nada foi enviado"))
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert_eq!(b.state_of("5276355668"), None);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn cancelled_future_after_send_leaves_uncertain_and_resolve_accepts_it() {
+        use axum::{Router, routing::post};
+        let app = Router::new().route(
+            "/market/buylisting/{id}",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                "{}"
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = client(&format!("http://{addr}"));
+        let b = Buyer::new();
+        let lst = listing();
+        // cancela a future no meio do POST
+        let r = tokio::time::timeout(Duration::from_millis(300), b.buy_listing(&c, &lst, 7)).await;
+        assert!(r.is_err());
+        assert_eq!(b.state_of("5276355668"), Some(ListingState::Uncertain));
+        assert!(b.resolve("5276355668", false));
+        assert_eq!(b.state_of("5276355668"), None);
+    }
+
+    #[test]
+    fn guard_before_send_restores_previous_state() {
+        let b = Buyer::new();
+        b.cfg
+            .lock()
+            .unwrap()
+            .set("1", Some(ListingState::InFlight), STATE_RETENTION);
+        let g = InFlightGuard {
+            cfg: &b.cfg,
+            id: "1".into(),
+            prev: None,
+            retention: STATE_RETENTION,
+            sent: false,
+            armed: true,
+        };
+        drop(g);
+        assert_eq!(b.state_of("1"), None);
+        // InFlight órfão (nenhuma compra rodando) também pode ser resolvido
+        b.cfg
+            .lock()
+            .unwrap()
+            .set("2", Some(ListingState::InFlight), STATE_RETENTION);
+        assert!(b.resolve("2", true));
+        assert_eq!(b.state_of("2"), Some(ListingState::Bought));
+    }
+
+    #[test]
+    fn old_terminal_entries_are_dropped_but_uncertain_stays() {
+        let mut b = Buyer::new();
+        b.retention = Duration::ZERO;
+        {
+            let mut c = b.cfg.lock().unwrap();
+            c.set("a", Some(ListingState::Bought), Duration::ZERO);
+            c.set("b", Some(ListingState::Failed), Duration::ZERO);
+            c.set("u", Some(ListingState::Uncertain), Duration::ZERO);
+            c.set("n", Some(ListingState::Failed), Duration::ZERO);
+        }
+        let c = b.cfg.lock().unwrap();
+        assert_eq!(
+            c.states.len(),
+            2,
+            "{:?}",
+            c.states.keys().collect::<Vec<_>>()
+        );
+        assert!(c.states.contains_key("u") && c.states.contains_key("n"));
     }
 
     #[tokio::test]
