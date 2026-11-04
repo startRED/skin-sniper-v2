@@ -24,23 +24,38 @@ const CREDIT_CAP: f64 = 4.0;
 /// Uma consulta recorrente: `QueryListingsForItem` do código, com desgaste e/ou faixa de seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Task {
-    /// `d:<market_hash_name>` (desconto) ou `r:<código>:<de>-<até>` (raro).
+    /// `d:<market_hash_name>` (desconto) ou `r:<código>:<desgaste>` (raro: uma tarefa por skin × desgaste).
     pub id: String,
-    /// Nome do item (desconto) ou da skin sem desgaste (raro): para log e para filtrar a resposta.
+    /// `market_hash_name` com o desgaste, para log e para filtrar a resposta.
     pub name: String,
     pub code: String,
     pub wear: Option<u8>,
-    pub seeds: Option<(u16, u16)>,
+    /// Raro: faixas de seed do tier 1/topo da tabela; cada consulta usa uma faixa, em rodízio
+    /// (`Queue::focus`). Vazio = desconto.
+    pub seeds: Vec<(u16, u16)>,
     /// Nota-base (sem acertos).
     pub score: f64,
 }
 
 impl Task {
+    pub fn rare(&self) -> bool {
+        !self.seeds.is_empty()
+    }
+
     pub fn filters(&self) -> Vec<PropFilter> {
         self.seeds
-            .map(|(lo, hi)| PropFilter::seed(lo, hi))
+            .first()
+            .map(|&(lo, hi)| PropFilter::seed(lo, hi))
             .into_iter()
             .collect()
+    }
+
+    /// Chave do piso observado em `Shared::floors`: raro guarda um piso por faixa (`<id>#<de>-<até>`).
+    pub fn floor_key(&self) -> String {
+        match self.seeds.first() {
+            Some((lo, hi)) if self.seeds.len() == 1 => format!("{}#{lo}-{hi}", self.id),
+            _ => self.id.clone(),
+        }
     }
 }
 
@@ -48,6 +63,8 @@ struct Entry {
     task: Task,
     due_ms: i64,
     hits: u32,
+    /// Próxima faixa de seed de uma tarefa rara.
+    cursor: usize,
 }
 
 #[derive(Default)]
@@ -101,6 +118,7 @@ impl Queue {
                             task: t,
                             due_ms: now_ms,
                             hits: h,
+                            cursor: 0,
                         },
                     );
                 }
@@ -122,6 +140,19 @@ impl Queue {
             .map(|e| e.task.clone())
     }
 
+    /// A tarefa estreitada à próxima faixa de seed (rodízio); desconto volta igual.
+    pub fn focus(&mut self, task: Task) -> Task {
+        let Some(e) = self.entries.get_mut(&task.id).filter(|_| task.rare()) else {
+            return task;
+        };
+        let range = task.seeds[e.cursor % task.seeds.len()];
+        e.cursor = e.cursor.wrapping_add(1);
+        Task {
+            seeds: vec![range],
+            ..task
+        }
+    }
+
     /// Marca a consulta como feita: reagenda pelo peso e rende crédito à descoberta.
     pub fn done(&mut self, id: &str, now_ms: i64) {
         let mean = if self.entries.is_empty() {
@@ -132,7 +163,9 @@ impl Queue {
         if let Some(e) = self.entries.get_mut(id) {
             let interval = (BASE_INTERVAL_MS as f64 * mean / Self::eff(e))
                 .clamp(BASE_INTERVAL_MS as f64 / 4.0, BASE_INTERVAL_MS as f64 * 8.0);
-            e.due_ms = now_ms + interval as i64;
+            // a partir do vencimento anterior, não só de agora: com o relógio parado (ou a fila atrasada) as
+            // tarefas ainda se revezam na proporção do peso, em vez de a mais pesada ficar com tudo
+            e.due_ms = e.due_ms.max(now_ms) + interval as i64;
         }
         self.credit = (self.credit + DISCOVERY_SHARE).min(CREDIT_CAP);
     }
@@ -216,6 +249,8 @@ fn set_idle_message(h: &Hunt) {
 }
 
 async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
+    let task = h.lock().queue.focus(task.clone());
+    let task = &task;
     let page =
         listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &task.filters()).await?;
     detect::process(h, task, &page).await?;
@@ -270,7 +305,7 @@ mod tests {
             name: id.into(),
             code: "G1234567".into(),
             wear: None,
-            seeds: None,
+            seeds: vec![],
             score,
         }
     }
@@ -297,6 +332,19 @@ mod tests {
         let (a, b, c) = (count["a"], count["b"], count["c"]);
         assert!(a > b * 2 && c > b * 2, "{a} {b} {c}");
         assert!(b >= 10, "quem tem nota menor ainda é consultado: {b}");
+    }
+
+    #[test]
+    fn stalled_clock_still_shares_by_weight() {
+        let mut q = Queue::default();
+        q.set_tasks(vec![task("a", 40.0), task("b", 10.0)], &HashMap::new(), 0);
+        let mut count: HashMap<String, u32> = HashMap::new();
+        for _ in 0..200 {
+            let t = q.pick().unwrap();
+            q.done(&t.id, 0); // relógio parado
+            *count.entry(t.id).or_default() += 1;
+        }
+        assert!(count["a"] > count["b"] && count["b"] >= 10, "{count:?}");
     }
 
     #[test]
@@ -348,7 +396,15 @@ mod tests {
     fn rare_task_filters_by_seed_range() {
         let mut t = task("r", 1.0);
         assert!(t.filters().is_empty());
-        t.seeds = Some((58, 59));
-        assert_eq!(t.filters(), vec![PropFilter::seed(58, 59)]);
+        t.seeds = vec![(58, 59), (66, 66)];
+        let mut q = Queue::default();
+        q.set_tasks(vec![t.clone()], &HashMap::new(), 0);
+        // rodízio: uma faixa por consulta, e o piso é guardado por faixa
+        let (a, b, c) = (q.focus(t.clone()), q.focus(t.clone()), q.focus(t.clone()));
+        assert_eq!(a.filters(), vec![PropFilter::seed(58, 59)]);
+        assert_eq!(b.filters(), vec![PropFilter::seed(66, 66)]);
+        assert_eq!(c.seeds, vec![(58, 59)]);
+        assert_eq!(b.floor_key(), "r#66-66");
+        assert_eq!(task("d", 1.0).floor_key(), "d");
     }
 }

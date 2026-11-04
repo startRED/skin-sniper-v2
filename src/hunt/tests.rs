@@ -82,7 +82,24 @@ async fn serve() -> (String, Arc<Bodies>) {
         Query(q): Query<HashMap<String, String>>,
     ) -> Json<Value> {
         match q.get("q").map(String::as_str) {
-            Some("QueryListingsForItem") => Json(b.listings.lock().unwrap().clone()),
+            Some("QueryListingsForItem") => {
+                let mut body = b.listings.lock().unwrap().clone();
+                // como a Valve: faixa de seed (propriedade 1) filtra os anúncios
+                let qp: Value = serde_json::from_str(q.get("qp").unwrap()).unwrap();
+                if let Some(f) = qp[0]["propertyFilters"].get("1") {
+                    let bound = |k: &str| f[k].as_str().unwrap().parse::<i64>().unwrap();
+                    let (lo, hi) = (bound("int_min"), bound("int_max"));
+                    body["data"]["listings"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|l| {
+                            let seed = l["asset"]["asset_properties"][0]["int_value"].as_str();
+                            seed.and_then(|v| v.parse::<i64>().ok())
+                                .is_some_and(|v| (lo..=hi).contains(&v))
+                        });
+                }
+                Json(body)
+            }
             Some("QueryPriceHistory") => Json(b.history.clone()),
             other => panic!("consulta inesperada: {other:?}"),
         }
@@ -215,24 +232,19 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     let st = h.state();
     assert_eq!(st.combo.cost_cents, 1100);
     assert_eq!(st.combo.ids.len(), 2);
-    assert!(st.hunt.watching >= 10);
+    assert!(st.hunt.watching >= 10, "watching {}", st.hunt.watching);
 
     // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 0,20 e 5 %) e ritmo
     let watch = watch::list(&h).await.unwrap();
     assert_eq!(watch.len(), st.hunt.watching as usize);
-    // o Moonrise (aqui raro por seed) aparece com o piso visto e sem teto de compra
+    // o Moonrise (aqui raro por seed) aparece com o piso visto e o teto do prêmio do grupo: 3 vendas do
+    // CSFloat → mid R$ 8,87 → líquido 7,72 → compraria até 7,35 (5 % de margem)
     let raro = watch
         .iter()
-        .find(|r| r.floor_cents == Some(400))
-        .unwrap_or_else(|| panic!("piso R$ 4,00 visto: {watch:#?}"));
-    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, None));
+        .find(|r| r.kind == Kind::Raro && r.floor_cents == Some(700))
+        .unwrap_or_else(|| panic!("piso R$ 7,00 visto na faixa 58-59: {watch:#?}"));
+    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(735)));
     assert_eq!(raro.last_checked_at, Some(NOW));
-    assert!(
-        watch
-            .iter()
-            .filter(|r| r.kind == Kind::Raro)
-            .all(|r| r.max_buy_cents.is_none())
-    );
     // mais perto de compensar primeiro
     let gaps: Vec<i64> = watch
         .iter()
@@ -376,7 +388,7 @@ async fn empty_pages_counter_saturates() {
         name: MOON.into(),
         code: "G1".into(),
         wear: None,
-        seeds: None,
+        seeds: vec![],
         score: 1.0,
     };
     let page = crate::steam::listings::ListingsPage {
@@ -475,7 +487,7 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
         name: MOON.into(),
         code: "G1".into(),
         wear: None,
-        seeds: None,
+        seeds: vec![],
         score: 1.0,
     };
     {

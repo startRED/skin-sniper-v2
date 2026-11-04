@@ -362,11 +362,11 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     let relevant: Vec<&Listing> = page
         .listings
         .iter()
-        .filter(|l| task.seeds.is_some() || l.name == task.name)
+        .filter(|l| task.rare() || l.name == task.name)
         .collect();
     let mut out = Outcome::default();
     let floor = relevant.iter().map(|l| l.price_cents).min();
-    h.lock().floors.insert(task.id.clone(), (floor, now));
+    h.lock().floors.insert(task.floor_key(), (floor, now));
 
     // --- sumiu? só com página confiável; fora da primeira página o anúncio pode só ter sido empurrado
     let trust = {
@@ -393,6 +393,14 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .active
             .values()
             .filter(|a| a.task == task.id && !present.contains(a.opp.id.as_str()))
+            // raro em rodízio: a página só cobre a faixa de seed consultada
+            .filter(|a| {
+                task.seeds.first().is_none_or(|&(lo, hi)| {
+                    a.opp
+                        .seed
+                        .is_some_and(|s| (i64::from(lo)..=i64::from(hi)).contains(&s))
+                })
+            })
             .filter(|a| !page.more || a.opp.price_cents <= page_max)
             .map(|a| a.opp.id.clone())
             .collect();

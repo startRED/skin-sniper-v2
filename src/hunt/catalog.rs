@@ -1,10 +1,12 @@
 //! Descoberta e seleção do que vigiar dado o saldo (docs/projeto.md, "Caça" 1–2).
 //!
 //! Um ciclo, um passo por vez (cada passo é uma consulta à Steam, no ritmo do limitador):
-//! 1. varredura de `search/render` por popularidade, uma página por categoria por rodada (cache de 24 h);
+//! 1. varredura de `search/render` por popularidade, uma página por categoria por rodada (cache de 24 h), e uma
+//!    busca por nome de cada skin com tabela de pattern (raras ficam longe do topo da popularidade);
 //! 2. razão BRL/USD medida entre um anúncio em BRL e o preço USD do mesmo item (nunca fixa no código);
 //! 3. `QueryPriceHistory` dos candidatos com piso ≤ saldo (cache de 6 h);
-//! 4. seleção por nota = vendas/dia × dispersão × (1 + acertos), mais as consultas de grupo raro.
+//! 4. seleção por nota = vendas/dia × lucro possível × (1 + acertos), mais uma consulta de grupo raro por
+//!    skin com tabela × desgaste; raros ficam com metade das consultas. Tudo precisa caber no saldo.
 //!
 //! shortcut: a varredura cobre `SCAN_ROUNDS` páginas (60 itens) por categoria, não o catálogo inteiro (cada
 //! página custa uma consulta e há milhares); subir se faltarem candidatos para o saldo.
@@ -12,14 +14,17 @@
 use super::scheduler::Task;
 use super::{Hunt, detect};
 use crate::db::Db;
-use crate::pricing::groups::seed_ranges;
-use crate::pricing::sell::{PricePoint, weighted_quantile};
-use crate::steam::client::Error as SteamError;
+use crate::pricing::fees::seller_gets;
+use crate::pricing::groups::{seed_ranges, table_skins};
+use crate::pricing::sell::{
+    MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
+};
+use crate::steam::client::{Endpoint, Error as SteamError};
 use crate::steam::listings::{self, paint_index_from_code};
 use crate::steam::search;
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 pub const SCAN_ROUNDS: u32 = 6;
 pub const HISTORY_TTL: i64 = 6 * 3600;
@@ -27,6 +32,20 @@ pub const CATALOG_TTL: i64 = 24 * 3600;
 pub const MIN_SALES_PER_DAY: f64 = 3.0;
 pub const WATCH_MAX: usize = 40;
 pub const RARE_MAX_TASKS: usize = 24;
+/// Rank das entradas vindas da busca por nome de skin com tabela (depois da popularidade); não rebaixa o rank
+/// que a varredura já deu ao item.
+const SKIN_RANK_BASE: i64 = 100_000;
+/// Piso visto numa consulta vale por tanto tempo (depois a tarefa é conferida de novo).
+pub const FLOOR_TTL: i64 = 6 * 3600;
+/// A seleção é refeita a cada tanto, para o piso visto tirar quem não cabe no saldo.
+pub const RESELECT_SECS: i64 = 900;
+/// Quanto o piso pode ficar abaixo da mediana de vendas e ainda ser plausível: a hipótese que dá o piso mínimo
+/// de desconto (`min_discount_floor`) antes de haver histórico. Com histórico vale a dispersão do item.
+const MAX_UPLIFT_PCT: i64 = 30;
+/// Peso (frente a 1,0) de um raro cujas faixas vistas até agora custam mais que o saldo.
+const OVER_BUDGET_WEIGHT: f64 = 0.25;
+/// Teto da dispersão usada no lucro possível: acima disso o histórico é ruído, não folga.
+const MAX_DISPERSION: f64 = 0.5;
 const RATIO_SAMPLES: usize = 3;
 const RATIO_MAX_TRIES: u32 = 6;
 /// Itens de US$ 1 a 20 servem para medir a razão: acima de US$ 1 o arredondamento do centavo some.
@@ -88,11 +107,6 @@ pub fn wear_label(name: &str) -> Option<&str> {
     name.rsplit_once(" (")?.1.strip_suffix(')')
 }
 
-/// Nome sem o desgaste.
-pub fn base_name(name: &str) -> &str {
-    name.rsplit_once(" (").map_or(name, |(b, _)| b)
-}
-
 /// Vendas/dia e dispersão relativa (P50−P10)/P50 dos últimos 7 dias, ponderadas por compras.
 pub fn window_stats(points: &[PricePoint], now: i64) -> Option<(f64, f64)> {
     let pairs: Vec<(f64, f64)> = points
@@ -109,9 +123,66 @@ pub fn window_stats(points: &[PricePoint], now: i64) -> Option<(f64, f64)> {
     Some((total / 7.0, ((p50 - p10) / p50).max(0.0)))
 }
 
-/// Nota de um item. Dispersão tem piso de 2 % para um item estável não zerar a nota.
-pub fn score(sales_per_day: f64, dispersion: f64, hits: u32) -> f64 {
-    sales_per_day * dispersion.max(0.02) * (1.0 + f64::from(hits))
+/// Lucro mínimo para entrar na lista a esse preço de compra: R$ 0,20 e 5 % (as mesmas regras de `sell::evaluate`).
+pub fn min_profit(price_cents: i64) -> i64 {
+    let by_margin = (price_cents as f64 * MIN_LIST_MARGIN_PCT / 100.0).ceil() as i64;
+    MIN_LIST_PROFIT_CENTS.max(by_margin)
+}
+
+/// Lucro possível de comprar no piso e vender na mediana: o piso fica `dispersão` abaixo do P50, então a venda
+/// é piso ÷ (1 − dispersão) e o vendedor recebe `seller_gets` disso (taxa mínima de 1 + 1 centavo incluída).
+pub fn possible_profit(floor_cents: i64, dispersion: f64) -> i64 {
+    let d = dispersion.clamp(0.0, MAX_DISPERSION);
+    let sell = (floor_cents as f64 / (1.0 - d)).round() as i64;
+    seller_gets(sell) - floor_cents
+}
+
+/// Menor piso (centavos) em que uma venda `MAX_UPLIFT_PCT` % acima do piso ainda dá o lucro mínimo.
+/// Abaixo disso a taxa come tudo; deriva da fórmula de taxa, não de um número solto.
+pub fn min_discount_floor() -> i64 {
+    (1..)
+        .find(|&p| seller_gets(p * (100 + MAX_UPLIFT_PCT) / 100) - p >= min_profit(p))
+        .unwrap_or(i64::MAX)
+}
+
+/// O que as consultas já viram de uma tarefa.
+#[derive(Debug, Default, PartialEq)]
+pub struct Observed {
+    /// Menor piso entre as consultas recentes que viram anúncio.
+    pub floor: Option<i64>,
+    /// Hora da consulta mais recente (qualquer idade).
+    pub at: Option<i64>,
+    /// Quantas chaves (faixas, para raro) têm consulta recente.
+    pub fresh: usize,
+    /// Dessas, quantas não viram anúncio nenhum.
+    pub empty: usize,
+}
+
+/// Junta os pisos guardados por `Task::floor_key` (`<id>` ou `<id>#<de>-<até>`).
+pub fn observed(floors: &HashMap<String, (Option<i64>, i64)>, id: &str, now: i64) -> Observed {
+    let prefix = format!("{id}#");
+    let mut o = Observed::default();
+    for (_, &(f, at)) in floors
+        .iter()
+        .filter(|(k, _)| k.as_str() == id || k.starts_with(&prefix))
+    {
+        o.at = o.at.max(Some(at));
+        if now - at < FLOOR_TTL {
+            o.fresh += 1;
+            o.empty += usize::from(f.is_none());
+            o.floor = match (o.floor, f) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+    }
+    o
+}
+
+/// Nota de um item: vendas/dia × lucro possível em reais (≈ lucro/dia se cada venda desse dinheiro). Sem lucro
+/// possível pelo histórico o item não sai, só fica no fim: um anúncio fora da curva ainda pode dar lucro.
+pub fn score(sales_per_day: f64, possible_profit_cents: i64) -> f64 {
+    sales_per_day * (possible_profit_cents.max(0) + 1) as f64 / 100.0
 }
 
 /// Mudou mais de 20 % (ou não havia saldo antes).
@@ -119,21 +190,36 @@ pub fn saldo_moved(old: i64, new: i64) -> bool {
     old <= 0 || (new - old).abs() * 100 > old * 20
 }
 
-/// Itens com piso ≤ saldo e ≥ 3 vendas/dia por nota (até `WATCH_MAX`), mais as consultas de grupo raro das
-/// skins com tabela e piso ≤ saldo (até `RARE_MAX_TASKS`).
-pub fn select(items: &[Item], ratio: f64, saldo: i64, hits: &HashMap<String, u32>) -> Vec<Task> {
-    let floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, ratio));
+/// Tudo de que a seleção depende além dos itens.
+pub struct Ctx<'a> {
+    pub ratio: f64,
+    pub saldo: i64,
+    pub now: i64,
+    pub hits: &'a HashMap<String, u32>,
+    /// `Shared::floors`: pisos vistos nas consultas.
+    pub floors: &'a HashMap<String, (Option<i64>, i64)>,
+}
+
+/// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 3 vendas/dia e lucro possível ≥ mínimo, por nota
+/// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela × desgaste cujo piso cabe no saldo (até
+/// `RARE_MAX_TASKS`), com metade do peso das consultas. O piso é o do anúncio visto numa consulta recente;
+/// sem consulta, USD × razão (que só serve de triagem).
+pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
+    let ratio_floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, c.ratio));
+    let min_floor = min_discount_floor();
     let mut common: Vec<(f64, Task)> = items
         .iter()
         .filter_map(|i| {
-            let (code, f) = (i.code.clone()?, floor(i)?);
+            let code = i.code.clone()?;
+            let id = format!("d:{}", i.name);
+            let f = observed(c.floors, &id, c.now).floor.or(ratio_floor(i))?;
             let spd = i.sales_per_day.filter(|s| *s >= MIN_SALES_PER_DAY)?;
-            if f > saldo {
+            let profit = possible_profit(f, i.dispersion.unwrap_or(0.0));
+            if f > c.saldo || f < min_floor {
                 return None;
             }
-            let id = format!("d:{}", i.name);
-            let base = score(spd, i.dispersion.unwrap_or(0.0), 0);
-            let with_hits = base * (1.0 + f64::from(hits.get(&id).copied().unwrap_or(0)));
+            let base = score(spd, profit);
+            let with_hits = base * (1.0 + f64::from(c.hits.get(&id).copied().unwrap_or(0)));
             Some((
                 with_hits,
                 Task {
@@ -141,7 +227,7 @@ pub fn select(items: &[Item], ratio: f64, saldo: i64, hits: &HashMap<String, u32
                     name: i.name.clone(),
                     code,
                     wear: wear_of(&i.name),
-                    seeds: None,
+                    seeds: vec![],
                     score: base,
                 },
             ))
@@ -149,45 +235,59 @@ pub fn select(items: &[Item], ratio: f64, saldo: i64, hits: &HashMap<String, u32
         .collect();
     common.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
     common.truncate(WATCH_MAX);
-    let mean = if common.is_empty() {
-        10.0
-    } else {
-        common.iter().map(|c| c.1.score).sum::<f64>() / common.len() as f64
-    };
+    let total: f64 = common.iter().map(|c| c.1.score).sum();
     let mut tasks: Vec<Task> = common.into_iter().map(|c| c.1).collect();
 
-    // Raros: um código por skin (cobre todos os desgastes), pelo menor piso entre os desgastes conhecidos.
-    let mut by_code: HashMap<&str, (i64, &str)> = HashMap::new();
+    // Raros: skin com tabela × desgaste, uma vez só (itens repetidos do catálogo não duplicam).
+    let mut by_wear: BTreeMap<(&str, u8), (i64, &str)> = BTreeMap::new();
     for i in items {
-        if let (Some(code), Some(f)) = (i.code.as_deref(), floor(i)) {
-            let e = by_code.entry(code).or_insert((f, i.name.as_str()));
-            if f < e.0 {
-                *e = (f, i.name.as_str());
-            }
+        let (Some(code), Some(wear)) = (i.code.as_deref(), wear_of(&i.name)) else {
+            continue;
+        };
+        let f = ratio_floor(i).unwrap_or(0);
+        let plain = !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir");
+        if plain && f <= c.saldo && !seed_ranges(&i.name).is_empty() {
+            by_wear.entry((code, wear)).or_insert((f, i.name.as_str()));
         }
     }
-    let mut rare: Vec<(&str, i64, &str)> = by_code
+    let mut rare: Vec<(i64, Task, f64)> = by_wear
         .into_iter()
-        .filter(|(_, (f, name))| *f <= saldo && !seed_ranges(name).is_empty())
-        .map(|(code, (f, name))| (code, f, name))
+        .filter_map(|((code, wear), (f, name))| {
+            let id = format!("r:{code}:{wear}");
+            let seeds = seed_ranges(name);
+            let seen = observed(c.floors, &id, c.now);
+            // todas as faixas conferidas, todas com anúncio e o menor não cabe: nada a caçar aqui agora
+            let out = seen.fresh >= seeds.len()
+                && seen.empty == 0
+                && seen.floor.is_some_and(|f| f > c.saldo);
+            (!out).then(|| {
+                let task = Task {
+                    id,
+                    name: name.to_string(),
+                    code: code.to_string(),
+                    wear: Some(wear),
+                    seeds,
+                    score: 0.0,
+                };
+                // faixa vista acima do saldo: ainda gira (outra faixa pode estar barata), mas com menos peso
+                let weight = if seen.floor.is_some_and(|f| f > c.saldo) {
+                    OVER_BUDGET_WEIGHT
+                } else {
+                    1.0
+                };
+                (seen.floor.unwrap_or(f), task, weight)
+            })
+        })
         .collect();
-    rare.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(b.0)));
-    'outer: for (code, _, name) in rare {
-        for (lo, hi) in seed_ranges(name) {
-            if tasks.iter().filter(|t| t.seeds.is_some()).count() >= RARE_MAX_TASKS {
-                break 'outer;
-            }
-            tasks.push(Task {
-                id: format!("r:{code}:{lo}-{hi}"),
-                name: base_name(name).to_string(),
-                code: code.to_string(),
-                wear: None,
-                seeds: Some((lo, hi)),
-                // Anúncio raro aparece pouco: metade do peso de uma tarefa média.
-                score: mean * 0.5,
-            });
-        }
-    }
+    rare.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+    rare.truncate(RARE_MAX_TASKS);
+    // Metade das consultas para raros: o peso somado deles iguala o dos comuns.
+    let per_weight =
+        if total > 0.0 { total } else { 10.0 } / rare.iter().map(|r| r.2).sum::<f64>().max(1e-9);
+    tasks.extend(rare.into_iter().map(|(_, t, w)| Task {
+        score: per_weight * w,
+        ..t
+    }));
     tasks
 }
 
@@ -203,6 +303,8 @@ pub struct Discovery {
     scanning: bool,
     round: u32,
     scan_left: VecDeque<search::Category>,
+    /// Skins com tabela ainda sem busca por nome neste ciclo.
+    skins_left: VecDeque<String>,
     history: VecDeque<String>,
     hist_ready: bool,
     want_samples: bool,
@@ -227,6 +329,11 @@ impl Discovery {
             } else {
                 VecDeque::new()
             },
+            skins_left: if scanning {
+                table_skins().into()
+            } else {
+                VecDeque::new()
+            },
             want_samples,
             ..Discovery::default()
         };
@@ -248,6 +355,7 @@ impl Discovery {
 
 enum Next {
     Scan(search::Category, u32),
+    Skin(String),
     Ratio(String, String, Option<u8>, i64),
     Candidates,
     History(String),
@@ -286,6 +394,14 @@ pub async fn step(h: &Hunt) -> Result<bool> {
             Next::Scan(cat, start) => {
                 let r = scan_page(h, cat, start).await;
                 finish_scan(h, cat, r).await?;
+                return Ok(true);
+            }
+            Next::Skin(name) => {
+                let r = scan_skin(h, &name).await;
+                if r.as_ref().err().is_some_and(retryable) {
+                    h.lock().disc.skins_left.push_front(name);
+                }
+                r?;
                 return Ok(true);
             }
             Next::Ratio(name, code, wear, usd) => {
@@ -346,6 +462,8 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
         if let Some(cat) = d.scan_left.front().copied() {
             d.scan_left.pop_front();
             Pre::Done(Next::Scan(cat, d.round * 10))
+        } else if let Some(name) = d.skins_left.pop_front() {
+            Pre::Done(Next::Skin(name))
         } else if d.want_samples && d.samples.len() < RATIO_SAMPLES && d.tries < RATIO_MAX_TRIES {
             Pre::NeedSample
         } else if !d.hist_ready {
@@ -417,9 +535,45 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
 
 async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
     let page = search::fetch_page(&h.steam, cat, start).await?;
+    store_entries(h, page.entries, i64::from(start)).await
+}
+
+/// Busca por nome de uma skin com tabela: traz todos os desgastes com o código G e o piso em USD. Falha
+/// de parse não trava o ciclo (a skin só fica sem tarefa); erro de rede sobe.
+async fn scan_skin(h: &Hunt, base: &str) -> Result<()> {
+    let q = [
+        // a Valve não acha o nome com o " | "; sem ele acha (todos os desgastes e StatTrak)
+        ("query", base.replace(" | ", " ")),
+        ("start", "0".into()),
+        ("count", "20".into()),
+        ("search_descriptions", "0".into()),
+        ("sort_column", "popular".into()),
+        ("sort_dir", "desc".into()),
+        ("appid", "730".into()),
+        ("norender", "1".into()),
+    ];
+    let v = h
+        .steam
+        .get_json(Endpoint::Search, "/market/search/render/", &q)
+        .await?;
+    let page = match search::parse_page(&v) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("busca de {base} sem resultado legível: {e}");
+            return Ok(());
+        }
+    };
+    let entries = page
+        .entries
+        .into_iter()
+        .filter(|e| e.name.contains(base))
+        .collect();
+    store_entries(h, entries, SKIN_RANK_BASE).await
+}
+
+async fn store_entries(h: &Hunt, entries: Vec<search::CatalogEntry>, rank_base: i64) -> Result<()> {
     let now = h.now();
     let ratio = h.lock().ratio.map(|r| r.0);
-    let entries = page.entries;
     h.db
         .call(move |c| {
             let tx = c.transaction()?;
@@ -435,7 +589,8 @@ async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(name) DO UPDATE SET g_code = excluded.g_code, paint_index = excluded.paint_index,
                         floor_cents = excluded.floor_cents, floor_usd_cents = excluded.floor_usd_cents,
-                        icon_url = excluded.icon_url, rank = excluded.rank, updated_at = excluded.updated_at",
+                        icon_url = excluded.icon_url, updated_at = excluded.updated_at,
+                        rank = CASE WHEN excluded.rank >= ?9 THEN COALESCE(items.rank, excluded.rank) ELSE excluded.rank END",
                     params![
                         e.name,
                         e.item_code,
@@ -443,8 +598,9 @@ async fn scan_page(h: &Hunt, cat: search::Category, start: u32) -> Result<()> {
                         floor_brl,
                         e.sell_price_usd_cents,
                         e.icon_url,
-                        i64::from(start) + i as i64,
-                        now
+                        rank_base + i as i64,
+                        now,
+                        SKIN_RANK_BASE
                     ],
                 )?;
             }
@@ -513,12 +669,13 @@ async fn history_candidates(
         return Ok(vec![]);
     };
     let items = load_items(&h.db).await?;
+    let min_floor = min_discount_floor();
     Ok(items
         .into_iter()
         .filter(|i| {
             i.code.is_some()
                 && i.floor_usd_cents
-                    .is_some_and(|u| usd_to_brl(u, ratio) <= saldo)
+                    .is_some_and(|u| (min_floor..=saldo).contains(&usd_to_brl(u, ratio)))
                 && i.history_at.is_none_or(|t| now - t >= HISTORY_TTL)
                 && !exclude.contains(&i.name)
         })
@@ -530,30 +687,37 @@ async fn history_candidates(
 // ---------------------------------------------------------------------------------------------
 // Seleção
 
-/// Reseleciona se o saldo mudou mais de 20 % ou passaram 24 h desde a última seleção.
+/// Reseleciona se o saldo mudou mais de 20 % ou passaram 15 min desde a última seleção.
 pub async fn maybe_reselect(h: &Hunt) -> Result<()> {
     let now = h.now();
     let due = {
         let s = h.lock();
         s.ratio.is_some()
             && s.selected
-                .is_none_or(|(sal, t)| saldo_moved(sal, s.saldo) || now - t >= CATALOG_TTL)
+                .is_none_or(|(sal, t)| saldo_moved(sal, s.saldo) || now - t >= RESELECT_SECS)
     };
     if due { reselect_now(h).await } else { Ok(()) }
 }
 
 pub async fn reselect_now(h: &Hunt) -> Result<()> {
     let now = h.now();
-    let (saldo, ratio) = {
+    let (saldo, ratio, floors) = {
         let s = h.lock();
-        (s.saldo, s.ratio)
+        (s.saldo, s.ratio, s.floors.clone())
     };
     let Some((ratio, _)) = ratio else {
         return Ok(());
     };
     let items = load_items(&h.db).await?;
     let hits = recent_hits(&h.db, now).await?;
-    let tasks = select(&items, ratio, saldo, &hits);
+    let ctx = Ctx {
+        ratio,
+        saldo,
+        now,
+        hits: &hits,
+        floors: &floors,
+    };
+    let tasks = select(&items, &ctx);
     let (n, removed) = {
         let mut s = h.lock();
         let removed = s.queue.set_tasks(tasks, &hits, now * 1000);
@@ -669,10 +833,6 @@ mod tests {
         assert_eq!(wear_of("Glock-18 | Moonrise (Field-Tested)"), Some(2));
         assert_eq!(wear_of("AK-47 | Redline (Battle-Scarred)"), Some(4));
         assert_eq!(wear_of("Sealed Terminal"), None);
-        assert_eq!(
-            base_name("Glock-18 | Moonrise (Field-Tested)"),
-            "Glock-18 | Moonrise"
-        );
         assert_eq!(wear_label("X (Weird)"), Some("Weird"));
         assert_eq!(wear_of("X (Weird)"), None);
     }
@@ -718,67 +878,218 @@ mod tests {
         assert_eq!(window_stats(&pts, 1_600_000_000), None);
     }
 
-    #[test]
-    fn selection_ranks_by_score_filters_by_balance_and_sales() {
-        let items = vec![
-            item("A (Field-Tested)", 400, 1, 20.0, 0.10), // 22,00 BRL, nota 2,0
-            item("B (Field-Tested)", 400, 2, 5.0, 0.50),  // nota 2,5 → à frente de A
-            item("C (Field-Tested)", 400, 3, 2.0, 0.90),  // poucas vendas
-            item("D (Field-Tested)", 900, 4, 50.0, 0.50), // 49,50 BRL > saldo
-            item("E (Field-Tested)", 400, 5, 10.0, 0.0),  // dispersão 0 → piso 2 %
-        ];
-        let tasks = select(&items, 5.5, 3608, &HashMap::new());
-        let ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "d:B (Field-Tested)",
-                "d:A (Field-Tested)",
-                "d:E (Field-Tested)"
-            ]
-        );
-        assert_eq!(tasks[0].wear, Some(2));
-        // acertos recentes sobem a posição
-        let hits = HashMap::from([("d:E (Field-Tested)".to_string(), 30)]);
-        let ids: Vec<String> = select(&items, 5.5, 3608, &hits)
-            .into_iter()
-            .map(|t| t.id)
+    const NO_HITS: fn() -> HashMap<String, u32> = HashMap::new;
+
+    fn ctx<'a>(
+        saldo: i64,
+        hits: &'a HashMap<String, u32>,
+        floors: &'a HashMap<String, (Option<i64>, i64)>,
+    ) -> Ctx<'a> {
+        Ctx {
+            ratio: 5.5,
+            saldo,
+            now: 1_793_770_000,
+            hits,
+            floors,
+        }
+    }
+
+    /// Catálogo do dia 04/11/2026 (ver `_source` no arquivo) e o saldo que o Erick tinha.
+    fn catalog_fixture() -> (Vec<Item>, i64) {
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/testdata/selection_catalog_2026-11-04.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let items = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| Item {
+                name: i["name"].as_str().unwrap().into(),
+                code: i["code"].as_str().map(Into::into),
+                floor_usd_cents: i["floor_usd_cents"].as_i64(),
+                rank: i["rank"].as_i64().unwrap(),
+                sales_per_day: i["sales_per_day"].as_f64(),
+                dispersion: i["dispersion"].as_f64(),
+                history_at: i["history_at"].as_i64(),
+            })
             .collect();
-        assert_eq!(ids[0], "d:E (Field-Tested)");
-        // saldo menor tira quem não cabe (22,00 > 20,00)
-        assert!(select(&items, 5.5, 2000, &HashMap::new()).is_empty());
+        (items, v["saldo_cents"].as_i64().unwrap())
     }
 
     #[test]
-    fn selection_caps_at_watch_max() {
+    fn minimum_floor_comes_from_the_fee_formula() {
+        // abaixo do mínimo nem a taxa de 1 + 1 centavo deixa R$ 0,20 de lucro; acima, deixa
+        let min = min_discount_floor();
+        assert!((140..=200).contains(&min), "{min}");
+        let ok = |p: i64| seller_gets(p * (100 + MAX_UPLIFT_PCT) / 100) - p >= min_profit(p);
+        assert!(ok(min) && !ok(min - 1));
+        // preço de R$ 0,19 com dispersão de 50 %: vende a R$ 0,38 e a taxa leva quase tudo
+        assert!(possible_profit(19, 0.5) < MIN_LIST_PROFIT_CENTS);
+        // R$ 10 com 20 % de dispersão (venda a R$ 12,50) sobra mais que o mínimo
+        assert_eq!(possible_profit(1000, 0.2), 1088 - 1000);
+        assert_eq!(min_profit(1000), 50);
+        assert_eq!(min_profit(100), 20);
+    }
+
+    #[test]
+    fn score_rewards_absolute_profit_not_just_sales() {
+        // mesma dispersão: o item de R$ 20 rende mais lucro por venda que o de R$ 2, mesmo vendendo menos
+        let (cheap, dear) = (possible_profit(200, 0.3), possible_profit(2000, 0.3));
+        assert!(score(100.0, cheap) < score(50.0, dear));
+        assert_eq!(score(10.0, -5), 0.1); // sem lucro possível: só o desempate de 1 centavo
+    }
+
+    #[test]
+    fn selection_with_36_reais_skips_junk_and_unaffordable() {
+        let (items, saldo) = catalog_fixture();
+        assert_eq!(saldo, 3608);
+        let floors = HashMap::new();
+        let hits = NO_HITS();
+        let tasks = select(&items, &ctx(saldo, &hits, &floors));
+        let (rare, common): (Vec<&Task>, Vec<&Task>) = tasks.iter().partition(|t| t.rare());
+        let min = min_discount_floor();
+        for t in &common {
+            let i = items.iter().find(|i| i.name == t.name).unwrap();
+            let f = usd_to_brl(i.floor_usd_cents.unwrap(), 5.5);
+            assert!((min..=saldo).contains(&f), "{} piso {f}", t.name);
+        }
+        let names: HashSet<&str> = common.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            !names.contains("M249 | Sage Camo (Factory New)"),
+            "piso de R$ 0,18"
+        );
+        assert!(
+            !names.contains("AK-47 | Fuel Injector (Field-Tested)"),
+            "acima do saldo"
+        );
+        assert!(names.contains("AWP | Duality (Field-Tested)"));
+        // raros: uma tarefa por skin × desgaste que cabe, sem repetir e sem os caros
+        let ids: Vec<&str> = rare.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            HashSet::<&&str>::from_iter(ids.iter()).len(),
+            "repetido: {ids:?}"
+        );
+        let rn: Vec<&str> = rare.iter().map(|t| t.name.as_str()).collect();
+        for want in [
+            "Glock-18 | Moonrise (Field-Tested)",
+            "Glock-18 | Moonrise (Well-Worn)",
+            "Glock-18 | Moonrise (Battle-Scarred)",
+            "Desert Eagle | Heat Treated (Field-Tested)",
+            "Five-SeveN | Case Hardened (Field-Tested)",
+        ] {
+            assert!(rn.contains(&want), "faltou {want}: {rn:?}");
+        }
+        for no in [
+            "Glock-18 | Fade (Factory New)",
+            "AK-47 | Case Hardened (Field-Tested)",
+        ] {
+            assert!(!rn.contains(&no), "não cabe no saldo: {no}");
+        }
+        assert!(rare.iter().all(|t| !t.name.contains("StatTrak")));
+        let moon = rare
+            .iter()
+            .find(|t| t.name == "Glock-18 | Moonrise (Field-Tested)")
+            .unwrap();
+        assert_eq!(
+            (moon.wear, moon.seeds.len()),
+            (Some(2), seed_ranges(&moon.name).len())
+        );
+    }
+
+    #[test]
+    fn rare_floor_seen_above_balance_drops_the_task_until_it_gets_stale() {
+        let (items, saldo) = catalog_fixture();
+        let hit = NO_HITS();
+        let heat = "Desert Eagle | Heat Treated (Field-Tested)";
+        let id_of = |tasks: &[Task]| {
+            tasks
+                .iter()
+                .find(|t| t.rare() && t.name == heat)
+                .map(|t| t.id.clone())
+        };
+        let id = id_of(&select(&items, &ctx(saldo, &hit, &HashMap::new()))).unwrap();
+        let n = seed_ranges(heat).len();
+        let mut floors: HashMap<String, (Option<i64>, i64)> = (0..n)
+            .map(|k| (format!("{id}#{k}-{k}"), (Some(28_000), 1_793_769_000)))
+            .collect();
+        // todas as faixas conferidas, todas caras: sai
+        assert_eq!(id_of(&select(&items, &ctx(saldo, &hit, &floors))), None);
+        // uma faixa ainda sem consulta (ou vazia): continua, mas com peso menor que um raro ainda não visto
+        floors.remove(&format!("{id}#0-0"));
+        let tasks = select(&items, &ctx(saldo, &hit, &floors));
+        let score = |name: &str| {
+            tasks
+                .iter()
+                .find(|t| t.rare() && t.name == name)
+                .unwrap()
+                .score
+        };
+        assert!(id_of(&tasks).is_some());
+        assert!(score(heat) < score("Glock-18 | Moonrise (Field-Tested)") / 2.0);
+        floors.insert(format!("{id}#0-0"), (None, 1_793_769_000));
+        assert!(id_of(&select(&items, &ctx(saldo, &hit, &floors))).is_some());
+        // uma faixa barata: continua
+        floors.insert(format!("{id}#0-0"), (Some(900), 1_793_769_000));
+        assert!(id_of(&select(&items, &ctx(saldo, &hit, &floors))).is_some());
+        // consulta velha não vale: volta a ser conferida
+        floors.insert(format!("{id}#0-0"), (Some(28_000), 1_793_769_000));
+        let mut late = ctx(saldo, &hit, &floors);
+        late.now += FLOOR_TTL;
+        assert!(id_of(&select(&items, &late)).is_some());
+    }
+
+    #[test]
+    fn common_floor_seen_above_balance_drops_the_task() {
+        let (items, saldo) = catalog_fixture();
+        let hit = NO_HITS();
+        let name = "AWP | Duality (Field-Tested)";
+        let has = |floors: &HashMap<_, _>| {
+            select(&items, &ctx(saldo, &hit, floors))
+                .iter()
+                .any(|t| t.name == name)
+        };
+        assert!(has(&HashMap::new()));
+        let seen = HashMap::from([(format!("d:{name}"), (Some(saldo + 1), 1_793_769_000))]);
+        assert!(!has(&seen), "o anúncio de verdade custa mais que o saldo");
+    }
+
+    #[test]
+    fn rare_tasks_take_half_of_the_queries() {
+        let (items, saldo) = catalog_fixture();
+        let floors = HashMap::new();
+        let hit = NO_HITS();
+        let tasks = select(&items, &ctx(saldo, &hit, &floors));
+        let mut q = super::super::scheduler::Queue::default();
+        q.set_tasks(tasks, &HashMap::new(), 0);
+        let (mut rare, mut now) = (0, 0);
+        for _ in 0..1200 {
+            let t = q.pick().unwrap();
+            q.done(&t.id, now);
+            rare += i32::from(t.rare());
+            now += 3_000;
+        }
+        let share = f64::from(rare) / 1200.0;
+        assert!((0.4..=0.6).contains(&share), "parcela de raros {share}");
+    }
+
+    #[test]
+    fn selection_caps_and_ranks_commons() {
         let items: Vec<Item> = (0..100)
-            .map(|i| item(&format!("S{i} (Field-Tested)"), 300, i, 5.0 + i as f64, 0.2))
+            .map(|i| item(&format!("S{i} (Field-Tested)"), 300, i, 5.0 + i as f64, 0.3))
             .collect();
-        assert_eq!(
-            select(&items, 5.0, 100_000, &HashMap::new()).len(),
-            WATCH_MAX
-        );
-    }
-
-    #[test]
-    fn rare_tasks_come_from_seed_tables_and_floor_within_balance() {
-        let moon = "Glock-18 | Moonrise (Field-Tested)";
-        let items = vec![
-            Item {
-                code: Some("G184020E2063004".into()),
-                ..item(moon, 120, 1, 0.0, 0.0) // sem vendas/dia: não vira desconto, mas vira raro
-            },
-            item("AK-47 | Redline (Field-Tested)", 300, 2, 0.0, 0.0),
-        ];
-        let tasks = select(&items, 5.0, 3608, &HashMap::new());
-        assert_eq!(tasks.len(), seed_ranges(moon).len());
-        let t = &tasks[0];
-        assert_eq!(t.id, "r:G184020E2063004:58-59");
-        assert_eq!(
-            (t.seeds, t.wear, t.name.as_str()),
-            (Some((58, 59)), None, "Glock-18 | Moonrise")
-        );
-        // piso 6,00 > saldo 5,00 → nenhuma consulta rara
-        assert!(select(&items, 5.0, 500, &HashMap::new()).is_empty());
+        let (floors, hits) = (HashMap::new(), NO_HITS());
+        let tasks = select(&items, &ctx(100_000, &hits, &floors));
+        assert_eq!(tasks.len(), WATCH_MAX);
+        // mais vendas, mais nota; acertos recentes sobem
+        assert_eq!(tasks[0].id, "d:S99 (Field-Tested)");
+        let hits = HashMap::from([("d:S0 (Field-Tested)".to_string(), 1000)]);
+        let tasks = select(&items, &ctx(100_000, &hits, &floors));
+        assert_eq!(tasks[0].id, "d:S0 (Field-Tested)");
     }
 }

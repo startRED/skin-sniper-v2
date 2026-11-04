@@ -1,0 +1,475 @@
+{
+ "_source": "nomes, pisos em BRL e vendas/dia de itens de desconto: GET /api/watch do app em 2026-11-04 (saldo R$ 36,08). USD = BRL ÷ 5,5 (razão do teste); dispersão, raros e itens caros: sintéticos, só para exercitar a seleção.",
+ "ratio": 5.5,
+ "saldo_cents": 3608,
+ "items": [
+  {
+   "name": "M249 | Sage Camo (Factory New)",
+   "code": "G18400073004",
+   "floor_usd_cents": 3,
+   "rank": 0,
+   "sales_per_day": 143,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "M249 | Sleet (Factory New)",
+   "code": "G184000E3004",
+   "floor_usd_cents": 3,
+   "rank": 1,
+   "sales_per_day": 168.9,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Negev | Sour Grapes (Field-Tested)",
+   "code": "G18400153004",
+   "floor_usd_cents": 3,
+   "rank": 2,
+   "sales_per_day": 314.6,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Negev | Drop Me (Well-Worn)",
+   "code": "G184001C3004",
+   "floor_usd_cents": 9,
+   "rank": 3,
+   "sales_per_day": 128,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "MAG-7 | Insomnia (Battle-Scarred)",
+   "code": "G18400233004",
+   "floor_usd_cents": 9,
+   "rank": 4,
+   "sales_per_day": 223.3,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "MP9 | Featherweight (Well-Worn)",
+   "code": "G184002A3004",
+   "floor_usd_cents": 8,
+   "rank": 5,
+   "sales_per_day": 251,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Negev | Bulkhead (Field-Tested)",
+   "code": "G18400313004",
+   "floor_usd_cents": 6,
+   "rank": 6,
+   "sales_per_day": 149.3,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Sawed-Off | Spirit Board (Field-Tested)",
+   "code": "G18400383004",
+   "floor_usd_cents": 9,
+   "rank": 7,
+   "sales_per_day": 389.1,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Negev | Bulkhead (Minimal Wear)",
+   "code": "G184003F3004",
+   "floor_usd_cents": 11,
+   "rank": 8,
+   "sales_per_day": 128.4,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "SSG 08 | Mainframe 001 (Battle-Scarred)",
+   "code": "G18400463004",
+   "floor_usd_cents": 12,
+   "rank": 9,
+   "sales_per_day": 98.3,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "XM1014 | Mockingbird (Well-Worn)",
+   "code": "G184004D3004",
+   "floor_usd_cents": 10,
+   "rank": 10,
+   "sales_per_day": 148.9,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AK-47 | Olive Polycam (Minimal Wear)",
+   "code": "G18400543004",
+   "floor_usd_cents": 15,
+   "rank": 11,
+   "sales_per_day": 466.3,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Negev | Sour Grapes (Minimal Wear)",
+   "code": "G184005B3004",
+   "floor_usd_cents": 10,
+   "rank": 12,
+   "sales_per_day": 253,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Nova | Dark Sigil (Minimal Wear)",
+   "code": "G18400623004",
+   "floor_usd_cents": 13,
+   "rank": 13,
+   "sales_per_day": 260.3,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "MP9 | Featherweight (Field-Tested)",
+   "code": "G18400693004",
+   "floor_usd_cents": 10,
+   "rank": 14,
+   "sales_per_day": 327,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "SCAR-20 | Poultrygeist (Factory New)",
+   "code": "G18400703004",
+   "floor_usd_cents": 26,
+   "rank": 15,
+   "sales_per_day": 322,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AWP | Arsenic Spill (Field-Tested)",
+   "code": "G18400773004",
+   "floor_usd_cents": 40,
+   "rank": 16,
+   "sales_per_day": 653.6,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AWP | Capillary (Field-Tested)",
+   "code": "G184007E3004",
+   "floor_usd_cents": 82,
+   "rank": 17,
+   "sales_per_day": 559,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Tec-9 | Red Quartz (Field-Tested)",
+   "code": "G18400853004",
+   "floor_usd_cents": 36,
+   "rank": 18,
+   "sales_per_day": 631.1,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "M4A1-S | Night Terror (Field-Tested)",
+   "code": "G184008C3004",
+   "floor_usd_cents": 68,
+   "rank": 19,
+   "sales_per_day": 1209.6,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "M249 | Downtown (Field-Tested)",
+   "code": "G18400933004",
+   "floor_usd_cents": 46,
+   "rank": 20,
+   "sales_per_day": 182.9,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Sawed-Off | Analog Input (Field-Tested)",
+   "code": "G184009A3004",
+   "floor_usd_cents": 45,
+   "rank": 21,
+   "sales_per_day": 439.3,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Glock-18 | Block-18 (Field-Tested)",
+   "code": "G18400A13004",
+   "floor_usd_cents": 52,
+   "rank": 22,
+   "sales_per_day": 622.9,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "USP-S | Ticket to Hell (Field-Tested)",
+   "code": "G18400A83004",
+   "floor_usd_cents": 66,
+   "rank": 23,
+   "sales_per_day": 764.9,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "P90 | Neoqueen (Field-Tested)",
+   "code": "G18400AF3004",
+   "floor_usd_cents": 46,
+   "rank": 24,
+   "sales_per_day": 423.1,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Sawed-Off | Analog Input (Minimal Wear)",
+   "code": "G18400B63004",
+   "floor_usd_cents": 63,
+   "rank": 25,
+   "sales_per_day": 161.3,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "USP-S | Silent Shot (Minimal Wear)",
+   "code": "G18400BD3004",
+   "floor_usd_cents": 81,
+   "rank": 26,
+   "sales_per_day": 806,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AWP | Pit Viper (Field-Tested)",
+   "code": "G18400C43004",
+   "floor_usd_cents": 115,
+   "rank": 27,
+   "sales_per_day": 432.6,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Desert Eagle | Heat Treated (Field-Tested)",
+   "code": "G18400CB3004",
+   "floor_usd_cents": 139,
+   "rank": 28,
+   "sales_per_day": 241,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AK-47 | Midnight Laminate (Field-Tested)",
+   "code": "G18400D23004",
+   "floor_usd_cents": 307,
+   "rank": 29,
+   "sales_per_day": 513.6,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AWP | Duality (Field-Tested)",
+   "code": "G18400D93004",
+   "floor_usd_cents": 345,
+   "rank": 30,
+   "sales_per_day": 297.6,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AWP | Exothermic (Field-Tested)",
+   "code": "G18400E03004",
+   "floor_usd_cents": 320,
+   "rank": 31,
+   "sales_per_day": 349.1,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "M4A1-S | Black Lotus (Field-Tested)",
+   "code": "G18400E73004",
+   "floor_usd_cents": 451,
+   "rank": 32,
+   "sales_per_day": 595.3,
+   "dispersion": 0.12,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AK-47 | Slate (Field-Tested)",
+   "code": "G18400EE3004",
+   "floor_usd_cents": 501,
+   "rank": 33,
+   "sales_per_day": 458.6,
+   "dispersion": 0.2,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AK-47 | Ice Coaled (Field-Tested)",
+   "code": "G18400F53004",
+   "floor_usd_cents": 511,
+   "rank": 34,
+   "sales_per_day": 546.3,
+   "dispersion": 0.3,
+   "history_at": 1793760000
+  },
+  {
+   "name": "USP-S | Jawbreaker (Field-Tested)",
+   "code": "G18400FC3004",
+   "floor_usd_cents": 446,
+   "rank": 35,
+   "sales_per_day": 313.4,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "AK-47 | Fuel Injector (Field-Tested)",
+   "code": "G18401033004",
+   "floor_usd_cents": 750,
+   "rank": 100,
+   "sales_per_day": 90,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "M4A4 | Neo-Noir (Field-Tested)",
+   "code": "G184010A3004",
+   "floor_usd_cents": 900,
+   "rank": 101,
+   "sales_per_day": 120,
+   "dispersion": 0.25,
+   "history_at": 1793760000
+  },
+  {
+   "name": "Glock-18 | Moonrise (Factory New)",
+   "code": "G18401113004",
+   "floor_usd_cents": 380,
+   "rank": 200,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Glock-18 | Moonrise (Minimal Wear)",
+   "code": "G18401183004",
+   "floor_usd_cents": 190,
+   "rank": 201,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Glock-18 | Moonrise (Field-Tested)",
+   "code": "G184011F3004",
+   "floor_usd_cents": 120,
+   "rank": 202,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Glock-18 | Moonrise (Well-Worn)",
+   "code": "G18401263004",
+   "floor_usd_cents": 105,
+   "rank": 203,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Glock-18 | Moonrise (Battle-Scarred)",
+   "code": "G184012D3004",
+   "floor_usd_cents": 100,
+   "rank": 204,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Desert Eagle | Heat Treated (Factory New)",
+   "code": "G18401343004",
+   "floor_usd_cents": 900,
+   "rank": 205,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Desert Eagle | Heat Treated (Minimal Wear)",
+   "code": "G184013B3004",
+   "floor_usd_cents": 220,
+   "rank": 206,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Five-SeveN | Case Hardened (Field-Tested)",
+   "code": "G18401423004",
+   "floor_usd_cents": 150,
+   "rank": 207,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Five-SeveN | Case Hardened (Battle-Scarred)",
+   "code": "G18401493004",
+   "floor_usd_cents": 130,
+   "rank": 208,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Glock-18 | High Beam (Factory New)",
+   "code": "G18401503004",
+   "floor_usd_cents": 1100,
+   "rank": 209,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Glock-18 | Fade (Factory New)",
+   "code": "G18401573004",
+   "floor_usd_cents": 9000,
+   "rank": 210,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "Glock-18 | Fade (Minimal Wear)",
+   "code": "G184015E3004",
+   "floor_usd_cents": 8700,
+   "rank": 211,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "AK-47 | Case Hardened (Field-Tested)",
+   "code": "G18401653004",
+   "floor_usd_cents": 4500,
+   "rank": 212,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  },
+  {
+   "name": "StatTrak™ Glock-18 | Moonrise (Field-Tested)",
+   "code": "G184011F3004",
+   "floor_usd_cents": 300,
+   "rank": 300,
+   "sales_per_day": null,
+   "dispersion": null,
+   "history_at": null
+  }
+ ]
+}
