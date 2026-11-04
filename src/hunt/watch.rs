@@ -1,10 +1,12 @@
 //! O que a caça está vigiando agora (`GET /api/watch`): menor anúncio visto, o preço máximo que ainda daria
 //! lucro e o ritmo de vendas. Serve para o usuário ver que a caça presta mesmo com a lista vazia.
 
-use super::Hunt;
+use super::{Hunt, catalog};
 use crate::pricing::fees::seller_gets;
 use crate::pricing::groups::group_of;
-use crate::pricing::sell::{self, MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint};
+use crate::pricing::sell::{
+    self, MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, RARE_MIN_SALES, RareEvidence,
+};
 use crate::web::api::{Kind, WatchRow};
 use anyhow::Result;
 use rusqlite::OptionalExtension;
@@ -66,24 +68,32 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
         .iter()
         .zip(facts)
         .map(|(t, f)| {
-            let (floor, at) = match floors.get(&t.id) {
-                Some((fl, at)) => (*fl, Some(*at)),
-                None => (None, None),
-            };
-            let rare = t.seeds.is_some();
+            let seen = catalog::observed(&floors, &t.id, now);
+            let (floor, at) = (seen.floor, seen.at);
+            let rare = t.rare();
             let group = t
                 .seeds
-                .and_then(|(lo, _)| group_of(&t.name, Some(u32::from(lo)), None))
-                .map(|g| g.label);
+                .first()
+                .and_then(|&(lo, _)| group_of(&t.name, Some(u32::from(lo)), None));
             let (icon, spd, pts) = match f {
                 Some((_, i, s, p)) => (i, s, p),
                 None => (String::new(), 0.0, vec![]),
             };
-            // Raro: o preço depende do grupo e da evidência do CSFloat; sem isso não há teto honesto.
-            let max = (!rare)
-                .then(|| sell::estimate(&pts, now, floor, None).ok())
+            // Raro: o teto vem do prêmio do grupo (vendas do CSFloat já em cache); com menos de
+            // `RARE_MIN_SALES` vendas não há teto honesto.
+            let evidence = if rare {
+                let multiples = group
+                    .as_ref()
+                    .map_or(vec![], |g| rare_multiples(h, &t.name, &g.key));
+                (multiples.len() >= RARE_MIN_SALES).then_some(RareEvidence { multiples })
+            } else {
+                None
+            };
+            let max = (!rare || evidence.is_some())
+                .then(|| sell::estimate(&pts, now, floor.filter(|_| !rare), evidence).ok())
                 .flatten()
-                .map(|e| max_buy(seller_gets(e.mid.price_cents)));
+                .map(|e| max_buy(seller_gets(e.mid.price_cents)))
+                .filter(|m| *m > 0); // sem preço de compra que dê lucro: sem teto
             WatchRow {
                 name: t.name.clone(),
                 icon_url: icon,
@@ -91,7 +101,7 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
                 max_buy_cents: max,
                 sales_per_day: spd,
                 kind: if rare { Kind::Raro } else { Kind::Desconto },
-                group,
+                group: group.map(|g| g.label),
                 last_checked_at: at,
             }
         })
@@ -105,4 +115,20 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(rows)
+}
+
+/// Múltiplos (preço ÷ base) das vendas do CSFloat do grupo que já estão em cache; não consulta a rede.
+fn rare_multiples(h: &Hunt, name: &str, group_key: &str) -> Vec<f64> {
+    let s = h.lock();
+    s.csfloat_cache.get(name).map_or(vec![], |(_, sales)| {
+        sales
+            .iter()
+            .filter(|x| !x.has_stickers)
+            .filter(|x| {
+                group_of(name, x.seed.map(u32::from), x.paint_index)
+                    .is_some_and(|g| g.key == group_key)
+            })
+            .map(|x| x.multiple)
+            .collect()
+    })
 }

@@ -119,9 +119,19 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 1. **Descoberta (1×/dia e quando o saldo muda muito):** `search/render` ordenado por popularidade nas
    categorias de arma, sem faca/luva, até cobrir os itens com piso ≤ saldo. Para cada candidato,
    `QueryPriceHistory` (cache 6 h) dá vendas/dia e dispersão.
-2. **Seleção:** vigia itens com piso ≤ saldo e ≥ 3 vendas/dia. Nota = vendas/dia × dispersão relativa
-   (P50−P10)/P50, multiplicada por (1 + acertos recentes). Mais as consultas de grupo raro
-   (`propertyFilters` por faixas de seed dos tiers) das skins com tabela e piso ≤ saldo.
+2. **Seleção:** vigia itens com piso entre o mínimo viável e o saldo e ≥ 3 vendas/dia. Nota = vendas/dia ×
+   lucro possível em reais × (1 + acertos recentes). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
+   com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
+   no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
+   por (skin com tabela × desgaste) cujo piso cabe no saldo (`propertyFilters` por faixa de seed dos tiers; a
+   tarefa percorre as faixas em rodízio, uma por consulta). Os raros ficam com ~50 % das consultas quando existem.
+   - **Piso:** o do anúncio visto na última consulta da tarefa (vale 6 h); sem consulta ainda, USD × razão medida,
+     que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
+     o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
+     foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece).
+     A seleção é refeita a cada 15 min para isso valer.
+   - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 0,20 e 5 % depois da taxa
+     (hoje ≈ R$ 1,45). Abaixo disso a taxa mínima de 1 + 1 centavo come o lucro. Os 30 % são hipótese, não medida.
 3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 3 s. Cada 30 min sem 429 encurta 5 %
    (piso 1,5 s); um 429 pausa 60 s (dobrando até 10 min) e alonga o intervalo 50 %. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar.
@@ -181,8 +191,15 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   é uma consulta e o catálogo tem milhares. Os candidatos vêm só do que a varredura viu.
 - A razão BRL/USD é a mediana de até 3 amostras (menor anúncio em BRL ÷ menor ask em USD do mesmo item, de US$ 1 a
   US$ 20), guardada em `settings` (`usd_brl_ratio`) e remedida a cada 24 h.
-- Consulta de desconto leva o filtro de desgaste do nome (`Exterior`); o código cobre todos os desgastes e
-  qualidades. Consulta rara não filtra desgaste, só seed.
+- Consulta de desconto e de raro levam o filtro de desgaste do nome (`Exterior`); o código cobre todos os
+  desgastes e qualidades, então StatTrak/Souvenir do mesmo código aparecem na consulta rara e são avaliados.
+- Raro cobre as tabelas de `assets/patterns` só para itens que a varredura de catálogo já viu (60 por categoria);
+  skin com tabela fora da varredura não vira tarefa. Fase Doppler não tem filtro de seed: é reconhecida na
+  avaliação (`group_of` por paint index) quando o item cai numa tarefa de desconto.
+- Fila: o vencimento seguinte parte do vencimento anterior (`max(vencimento, agora) + intervalo`), para os pesos
+  valerem mesmo com a fila atrasada.
+- `/api/watch`: teto de compra ≤ 0 vira nulo e linhas sem teto vão para o fim. Raro mostra teto só quando o
+  CSFloat já em cache tem ≥ 3 vendas do grupo (sem rede na rota); senão nulo.
 - Concorrência do `quick`: só conta outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns); um
   comum barato não limita a venda de um T1.
 - Anúncio acima do saldo não entra em `listings_seen`: se o saldo subir, ainda é novo. Tarefa que sai da seleção
