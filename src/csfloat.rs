@@ -100,22 +100,27 @@ impl CsfloatClient {
     /// Vendas recentes (até 40) da skin pelo `market_hash_name`. Recusa sem chamar a rede enquanto a
     /// janela estiver esgotada (`remaining == 0` antes do `reset`) ou depois de um 429.
     pub async fn sales(&self, market_hash_name: &str) -> Result<Vec<CsfloatSale>> {
-        let wait = {
-            let mut s = self.state.lock().unwrap();
-            let now = now_unix();
-            if let Some(until) = s.blocked_until.filter(|u| *u > now) {
-                return Err(Error::RateLimited { until });
-            }
-            if s.rl.remaining == Some(0)
-                && let Some(reset) = s.rl.reset.filter(|r| *r > now)
-            {
-                return Err(Error::RateLimited { until: reset });
-            }
-            let at = s.next_at.max(Instant::now());
-            s.next_at = at + MIN_GAP;
-            at.saturating_duration_since(Instant::now())
-        };
-        if !wait.is_zero() {
+        // Bloqueio e cota são reconferidos a cada volta, inclusive ao acordar: outra chamada pode ter
+        // tomado 429 enquanto esta dormia.
+        loop {
+            let wait = {
+                let mut s = self.state.lock().unwrap();
+                let now = now_unix();
+                if let Some(until) = s.blocked_until.filter(|u| *u > now) {
+                    return Err(Error::RateLimited { until });
+                }
+                if s.rl.remaining == Some(0)
+                    && let Some(reset) = s.rl.reset.filter(|r| *r > now)
+                {
+                    return Err(Error::RateLimited { until: reset });
+                }
+                let t = Instant::now();
+                if t >= s.next_at {
+                    s.next_at = t + MIN_GAP;
+                    break;
+                }
+                s.next_at - t
+            };
             tokio::time::sleep(wait).await;
         }
 
@@ -389,6 +394,37 @@ mod tests {
         let c = CsfloatClient::with_base(&serve(app).await).unwrap();
         assert!(matches!(c.sales("x").await, Err(Error::RateLimited { until }) if until == reset));
         assert!(matches!(c.sales("x").await, Err(Error::RateLimited { until }) if until == reset));
+    }
+
+    #[tokio::test]
+    async fn concurrent_call_rechecks_block_after_waking() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        let reset = now_unix() + 120;
+        let app = Router::new().route(
+            "/history/{name}/sales",
+            get(move || {
+                let h = h2.clone();
+                async move {
+                    h.fetch_add(1, Ordering::SeqCst);
+                    (
+                        Ax::TOO_MANY_REQUESTS,
+                        [("x-ratelimit-reset", reset.to_string())],
+                        "",
+                    )
+                }
+            }),
+        );
+        let c = CsfloatClient::with_base(&serve(app).await).unwrap();
+        // A toma 429 enquanto B dorme no intervalo mínimo; B não pode enviar durante a pausa.
+        let (a, b) = tokio::join!(c.sales("x"), c.sales("y"));
+        assert!(matches!(a, Err(Error::RateLimited { .. })));
+        assert!(matches!(b, Err(Error::RateLimited { until }) if until == reset));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

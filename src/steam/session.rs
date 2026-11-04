@@ -8,8 +8,12 @@
 #![allow(dead_code)]
 
 use serde_json::Value;
+#[cfg(test)]
+use std::sync::Arc;
 
-use super::client::{CURRENCY_BRL, Cookie, Endpoint, Error, Result, SteamClient};
+#[cfg(test)]
+use super::client::Cookie;
+use super::client::{CURRENCY_BRL, Endpoint, Error, Result, SteamClient};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionInfo {
@@ -39,10 +43,7 @@ pub async fn validate(c: &SteamClient) -> Result<SessionInfo> {
     }
     let info = parse_market_page(&html)?;
     if cookie.sessionid.as_deref() != Some(info.sessionid.as_str()) {
-        c.set_cookie(Some(Cookie {
-            sessionid: Some(info.sessionid.clone()),
-            ..cookie
-        }));
+        c.adopt_sessionid(&cookie, &info.sessionid);
     }
     Ok(info)
 }
@@ -252,6 +253,52 @@ g_rgWalletInfo = {{"wallet_fee":1,"wallet_balance":"3608","wallet_currency":{cur
             sessionid: None,
         }));
         assert!(matches!(validate(&c).await, Err(Error::SessionExpired)));
+    }
+
+    async fn serve_logged(app_cookie_swap: bool) -> (Arc<SteamClient>, Cookie) {
+        use axum::{Router, response::Html, routing::get};
+        let cell: Arc<std::sync::OnceLock<Arc<SteamClient>>> = Arc::new(std::sync::OnceLock::new());
+        let cell2 = cell.clone();
+        let app = Router::new().route(
+            "/market/",
+            get(move || {
+                let cell = cell2.clone();
+                async move {
+                    if app_cookie_swap {
+                        cell.get().unwrap().set_cookie(None); // o usuário apaga a sessão no meio da consulta
+                    }
+                    Html(logged_page(7))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = Arc::new(SteamClient::with_base(&format!("http://{addr}")).unwrap());
+        cell.set(c.clone()).ok();
+        let ck = Cookie {
+            steam_login_secure: "x".into(),
+            sessionid: None,
+        };
+        c.set_cookie(Some(ck.clone()));
+        (c, ck)
+    }
+
+    #[tokio::test]
+    async fn validate_adopts_sessionid_when_session_unchanged() {
+        let (c, _) = serve_logged(false).await;
+        validate(&c).await.unwrap();
+        assert_eq!(
+            c.cookie().unwrap().sessionid.as_deref(),
+            Some("0123456789abcdef01234567")
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_does_not_resurrect_a_cleared_session() {
+        let (c, _) = serve_logged(true).await;
+        validate(&c).await.unwrap();
+        assert!(c.cookie().is_none());
     }
 
     #[tokio::test]

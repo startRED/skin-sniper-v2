@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use super::client::{Endpoint, Error, Result, SteamClient, path_escape};
+use super::client::{CURRENCY_BRL, Endpoint, Error, Result, SteamClient, path_escape};
 
 const ICON_BASE: &str = "https://community.fastly.steamstatic.com/economy/image/";
 
@@ -297,6 +297,9 @@ pub fn parse_page(data: &Value, expected_start: u32) -> Result<ListingsPage> {
         if !seen.insert(l.listing_id.clone()) {
             return Err(bad(format!("listingid repetido: {}", l.listing_id)));
         }
+        if l.currency != CURRENCY_BRL {
+            return Err(Error::WrongCurrency { got: l.currency });
+        }
         match currency {
             None => currency = Some(l.currency),
             Some(cur) if cur != l.currency => return Err(bad("moedas misturadas na página")),
@@ -352,7 +355,11 @@ fn parse_listing(r: &Value) -> Result<Listing> {
         return Err(bad(format!("{listing_id}: sem assetid")));
     }
     let seller = r.get("unPrice").and_then(Value::as_i64).unwrap_or(0);
-    let fee = r.get("unFee").and_then(Value::as_i64).unwrap_or(0);
+    // Taxa ausente, nula ou não inteira invalida o anúncio: assumir 0 inventaria um total menor.
+    let fee = r
+        .get("unFee")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| bad(format!("{listing_id}: unFee ausente ou inválido")))?;
     let currency = r.get("eCurrency").and_then(Value::as_i64).unwrap_or(0);
     if seller <= 0 || fee < 0 || currency <= 0 {
         return Err(bad(format!(
@@ -738,6 +745,36 @@ mod tests {
             inspect_url(&desc, &props).as_deref(),
             Some("steam://run/730//+csgo_econ_action_preview%20ABCD")
         );
+    }
+
+    #[test]
+    fn missing_or_invalid_fee_discards_listing() {
+        for bad_fee in [json!(null), json!("15"), json!(1.5)] {
+            let mut r = raw("1", json!([]));
+            r["unFee"] = bad_fee.clone();
+            assert!(parse_page(&page(json!([r])), 0).is_err(), "{bad_fee}");
+        }
+        let mut no_fee = raw("1", json!([]));
+        no_fee.as_object_mut().unwrap().remove("unFee");
+        assert!(parse_page(&page(json!([no_fee])), 0).is_err());
+        let mut zero = raw("1", json!([]));
+        zero["unFee"] = json!(0);
+        assert_eq!(
+            parse_page(&page(json!([zero])), 0).unwrap().listings[0].price_cents,
+            100
+        );
+    }
+
+    #[test]
+    fn non_brl_page_is_wrong_currency() {
+        let mut a = raw("1", json!([]));
+        let mut b = raw("2", json!([]));
+        a["eCurrency"] = json!(1);
+        b["eCurrency"] = json!(1);
+        assert!(matches!(
+            parse_page(&page(json!([a, b])), 0),
+            Err(Error::WrongCurrency { got: 1 })
+        ));
     }
 
     #[test]

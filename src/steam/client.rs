@@ -106,7 +106,7 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Cookie de login. Nunca aparece em log nem em `Debug`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Cookie {
     pub steam_login_secure: String,
     pub sessionid: Option<String>,
@@ -344,6 +344,19 @@ impl SteamClient {
     /// Troca (ou remove) o cookie em tempo de execução. Vale para as próximas requisições `auth`.
     pub fn set_cookie(&self, cookie: Option<Cookie>) {
         self.inner.lock().unwrap().cookie = cookie;
+    }
+
+    /// Grava o `sessionid` só se a sessão atual ainda for a `queried` (mesmo cookie), sob o mesmo lock:
+    /// quem trocou ou apagou a sessão durante a consulta não é desfeito.
+    pub(crate) fn adopt_sessionid(&self, queried: &Cookie, sessionid: &str) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        match g.cookie.as_mut() {
+            Some(c) if c == queried => {
+                c.sessionid = Some(sessionid.to_string());
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn cookie(&self) -> Option<Cookie> {
