@@ -173,7 +173,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 - Base (item comum): pontos horários dos últimos 7 dias de `QueryPriceHistory`, quantis ponderados
   por compras: Q25, Q50, Q75. Tendência: mediana dos últimos 3 dias contra a dos dias 4–14; se cair,
   multiplica tudo pelo fator projetado em 7 dias (piso 0,85); se subir, não credita (fator 1).
-- `quick = min(Q25·f, menor outro anúncio − 1 centavo)`, `mid = Q50·f`, `high = Q75·f`.
+- `quick = min(Q25·f, menor outro anúncio − 1 centavo)`, `mid = min(Q50·f, menor outro anúncio − 1 centavo)`, `high = Q75·f`
+  (quem compra leva o mais barato: vender acima do concorrente já à venda não é o mais provável).
 - Raro: o grupo do anúncio (tier, fase, faixa de fade) busca vendas do CSFloat do mesmo grupo
   (`price / reference.base_price`). Com n ≥ 3: os três preços da base × Q25/Q50/Q75 do múltiplo. Com n < 3:
   usa a base comum e escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço.
@@ -256,7 +257,7 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   valerem mesmo com a fila atrasada.
 - `/api/watch`: teto de compra ≤ 0 vira nulo e linhas sem teto vão para o fim. Raro mostra teto só quando o
   CSFloat já em cache tem ≥ 3 vendas do grupo (sem rede na rota); senão nulo.
-- Concorrência do `quick`: só conta outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns); um
+- Concorrência do `quick` e do `mid`: só conta outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns); um
   comum barato não limita a venda de um T1.
 - Anúncio acima do saldo não entra em `listings_seen`: se o saldo subir, ainda é novo. Tarefa que sai da seleção
   encerra (`gone`) as oportunidades dela, porque ninguém mais as confere.

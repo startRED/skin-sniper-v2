@@ -260,7 +260,7 @@ fn sales_word(n: usize) -> String {
 /// Estima os três preços de venda (para daqui a 7 dias).
 ///
 /// - `points`: histórico (pode ter mais de 7 dias; a tendência usa até 14).
-/// - `lowest_other_ask_cents`: menor anúncio OUTRO que o do item avaliado (limita só o `quick`).
+/// - `lowest_other_ask_cents`: menor anúncio OUTRO que o do item avaliado (limita o `quick` e o `mid`).
 /// - `rare`: vendas do grupo raro; `None` = item comum. Com `n < 3` o prêmio não vira preço.
 ///
 /// Vendas por dia = compras da janela ÷ 7 (conservador: dia sem venda conta). Em item raro com prêmio
@@ -350,7 +350,7 @@ pub fn estimate(
         return Err(NoEstimate::Implausible);
     }
     let price = |x: f64| (x.floor() as i64).max(MIN_PRICE_CENTS);
-    let (mut quick, mid, high) = (price(p25), price(p50), price(p75));
+    let (mut quick, mut mid, high) = (price(p25), price(p50), price(p75));
     if let Some(ask) = lowest_other_ask_cents {
         let cap = ask.saturating_sub(1);
         if cap < MIN_PRICE_CENTS {
@@ -359,6 +359,12 @@ pub fn estimate(
         if cap < quick {
             quick = cap;
             evidence += " · venda rápida limitada pelo menor anúncio";
+        }
+        // O preço provável também: quem compra leva o anúncio mais barato, então vender acima do concorrente
+        // que já está à venda é aposta, não o mais provável. O alto continua otimista.
+        if cap < mid {
+            mid = cap;
+            evidence += " · preço médio limitado pelo menor anúncio";
         }
     }
     let tier = |p: i64| EstTier {
@@ -708,14 +714,15 @@ mod tests {
     }
 
     #[test]
-    fn lowest_other_ask_caps_only_quick() {
+    fn lowest_other_ask_caps_quick_and_mid() {
         let e = estimate(&flat(1000, 5), NOW, Some(900), None).unwrap();
         assert_eq!(e.quick.price_cents, 899);
-        assert_eq!((e.mid.price_cents, e.high.price_cents), (1000, 1000));
+        assert_eq!((e.mid.price_cents, e.high.price_cents), (899, 1000)); // o alto segue otimista
+        assert!(e.evidence.contains("preço médio limitado"));
         assert!(e.evidence.contains("limitada pelo menor anúncio"));
-        // anúncio acima do Q25: não mexe
+        // anúncio acima do Q50: não mexe
         let e = estimate(&flat(1000, 5), NOW, Some(1200), None).unwrap();
-        assert_eq!(e.quick.price_cents, 1000);
+        assert_eq!((e.quick.price_cents, e.mid.price_cents), (1000, 1000));
         // anúncio de 1 centavo: ver tiny_competitor_ask_gives_no_quick_price
     }
 

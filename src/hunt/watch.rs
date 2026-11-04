@@ -95,6 +95,9 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
             } else {
                 None
             };
+            // O piso entra como concorrente de propósito: o teto vale para um anúncio NOVO abaixo dele, que
+            // disputa a venda com o piso. O próprio anúncio do piso já foi julgado pelo `detect` contra o
+            // segundo mais barato da página.
             let max = (!rare || evidence.is_some())
                 .then(|| sell::estimate(&pts, now, floor.filter(|_| !rare), evidence).ok())
                 .flatten()
