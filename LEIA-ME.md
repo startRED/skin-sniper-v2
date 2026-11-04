@@ -32,11 +32,23 @@ Para desligar: Gerenciador de Tarefas → `skin-sniper.exe` → Finalizar tarefa
   comprada. Rápida vende logo; média é a mais provável; alta pode demorar.
 - **Lucro:** o que sobra vendendo pelo preço médio, já tirando os 15 % da Steam.
 - **Seguro:** ainda dá lucro vendendo pelo preço rápido.
-- **Confiança:** quanto de venda real existe por trás dos números.
-- **Vigiando:** as skins que o Skin Sniper está olhando agora e até quanto compraria cada uma.
+- **Por dia:** o lucro dividido pelos dias em que o dinheiro fica preso (7 de trava + o tempo para vender).
+  É a ordem padrão: o que faz o saldo crescer mais rápido vem primeiro.
+- **Confiança · risco:** quanto de venda real existe por trás dos números e quanto o preço costuma
+  oscilar em 7 dias.
+- **Melhor combinação:** as skins que cabem juntas no seu saldo e rendem mais, já contando o risco.
+  O aviso no celular e no PC só sai para skin que ainda dá lucro contando o risco.
+- **Vigiando:** as skins que o Skin Sniper está olhando agora e até quanto compraria cada uma. As
+  etiquetas dizem o que ele procura nela: **Barato** (anúncio abaixo do normal), **Seed** (pattern raro)
+  e **Float** (desgaste raro). Ele vigia mais o que mais rendeu.
+- **"A Steam pediu calma":** a Steam limitou as consultas; a caça para sozinha e volta depois.
 
 Os preços de venda são estimativas a partir das vendas reais, não promessa. O mercado pode cair
 nos 7 dias de trava.
+
+Quando vender uma skin comprada pelo painel, digite o valor em **Compras → Vendi por R$**. Depois de
+5 vendas, se você costuma vender abaixo do previsto, o Skin Sniper passa a prever mais baixo do mesmo
+jeito (até 20 %). Ele nunca prevê mais alto por causa disso.
 
 ## Para quem mexe no código
 
