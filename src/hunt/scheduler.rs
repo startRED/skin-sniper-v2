@@ -601,9 +601,16 @@ pub async fn load_pace(h: &Hunt) -> anyhow::Result<()> {
         h.steam.restore_pace(&v);
     }
     let db = h.db.clone();
+    // Gravações em fila, cada uma com o ritmo mais novo: uma gravação antiga que termina por último não
+    // apaga a mais nova.
+    let latest = Arc::new(std::sync::Mutex::new(String::new()));
+    let turn = Arc::new(tokio::sync::Mutex::new(()));
     h.steam.on_pace_change(move |v| {
-        let db = db.clone();
+        *latest.lock().unwrap() = v;
+        let (db, latest, turn) = (db.clone(), latest.clone(), turn.clone());
         tokio::spawn(async move {
+            let _turn = turn.lock().await;
+            let v = latest.lock().unwrap().clone();
             if let Err(e) = catalog::set_setting(&db, PACE_KEY, v).await {
                 tracing::warn!("ritmo da Steam não salvou: {e:#}");
             }
