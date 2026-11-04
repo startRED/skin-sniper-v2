@@ -4,9 +4,10 @@
 /// Taxa da Steam (5 %) e do publisher (10 %), cada uma arredondada para baixo, mínimo 1 centavo.
 /// `seller_cents` é o líquido do vendedor.
 pub fn fees(seller_cents: i64) -> (i64, i64) {
+    // saturating: valor absurdo não pode dar overflow (o chamador já limita preços a um teto sensato)
     (
-        (seller_cents * 5 / 100).max(1),
-        (seller_cents * 10 / 100).max(1),
+        (seller_cents.saturating_mul(5) / 100).max(1),
+        (seller_cents.saturating_mul(10) / 100).max(1),
     )
 }
 
@@ -16,7 +17,7 @@ pub fn buyer_pays(seller_cents: i64) -> i64 {
         return 0;
     }
     let (steam, publisher) = fees(seller_cents);
-    seller_cents + steam + publisher
+    seller_cents.saturating_add(steam).saturating_add(publisher)
 }
 
 /// Maior líquido `s` tal que `buyer_pays(s) <= buyer_cents` (busca binária; a função é crescente).
@@ -24,7 +25,7 @@ pub fn buyer_pays(seller_cents: i64) -> i64 {
 pub fn seller_gets(buyer_cents: i64) -> i64 {
     let (mut lo, mut hi) = (0, buyer_cents.max(0));
     while lo < hi {
-        let mid = lo + (hi - lo + 1) / 2;
+        let mid = lo + (hi - lo) / 2 + (hi - lo) % 2; // teto sem overflow
         if buyer_pays(mid) <= buyer_cents {
             lo = mid;
         } else {
@@ -53,6 +54,14 @@ mod tests {
         assert_eq!(seller_gets(1252), 1089);
         assert_eq!(buyer_pays(1089), 1251);
         assert_eq!(buyer_pays(1090), 1253);
+    }
+
+    #[test]
+    fn huge_values_do_not_overflow() {
+        assert_eq!(buyer_pays(i64::MAX), i64::MAX);
+        assert_eq!(fees(i64::MAX).0, i64::MAX / 100);
+        let s = seller_gets(i64::MAX);
+        assert!(s > 0 && buyer_pays(s) == i64::MAX);
     }
 
     #[test]

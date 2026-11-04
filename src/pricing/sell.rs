@@ -24,6 +24,13 @@ const TREND_MIN_PURCHASES: u32 = 5;
 /// Menos que isto em 7 dias não sustenta preço nenhum.
 const MIN_PURCHASES: u32 = 3;
 
+/// Menor preço que rende algo ao vendedor: `buyer_pays(1)` = 1 + 1 + 1 centavos.
+pub const MIN_PRICE_CENTS: i64 = 3;
+/// Teto sensato para um preço de skin (R$ 100.000); acima disso o dado é lixo.
+pub const MAX_PRICE_CENTS: i64 = 10_000_000;
+/// Múltiplo raro acima disto é dado ruim (venda com adesivo/erro), não prêmio de pattern.
+pub const MAX_RARE_MULTIPLE: f64 = 100.0;
+
 pub const MIN_LIST_PROFIT_CENTS: i64 = 20;
 pub const MIN_LIST_MARGIN_PCT: f64 = 5.0;
 
@@ -86,12 +93,23 @@ pub enum NoEstimate {
     NoData,
     /// Há pontos, mas poucas compras para confiar.
     TooFewSales { purchases: u32 },
+    /// Preço fora de uma faixa plausível (dado ruim no histórico ou no prêmio).
+    Implausible,
+    /// O menor outro anúncio é tão barato que nenhum preço rápido o bate e ainda rende algo.
+    NoQuickPrice,
 }
 
 impl fmt::Display for NoEstimate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NoEstimate::NoData => write!(f, "sem vendas nos últimos 7 dias"),
+            NoEstimate::Implausible => write!(f, "preço fora do plausível, dado ruim"),
+            NoEstimate::NoQuickPrice => {
+                write!(
+                    f,
+                    "o menor anúncio é barato demais para bater numa venda rápida"
+                )
+            }
             NoEstimate::TooFewSales { purchases } => {
                 write!(
                     f,
@@ -249,7 +267,7 @@ pub fn estimate(
         let m: Vec<(f64, f64)> = r
             .multiples
             .iter()
-            .filter(|x| x.is_finite() && **x > 0.0)
+            .filter(|x| x.is_finite() && **x > 0.0 && **x <= MAX_RARE_MULTIPLE)
             .map(|&x| (x, 1.0))
             .collect();
         if m.len() >= RARE_MIN_SALES {
@@ -278,10 +296,19 @@ pub fn estimate(
         }
     }
 
-    let price = |x: f64| (x.floor() as i64).max(1);
+    if ![p25, p50, p75]
+        .iter()
+        .all(|x| x.is_finite() && *x <= MAX_PRICE_CENTS as f64)
+    {
+        return Err(NoEstimate::Implausible);
+    }
+    let price = |x: f64| (x.floor() as i64).max(MIN_PRICE_CENTS);
     let (mut quick, mid, high) = (price(p25), price(p50), price(p75));
     if let Some(ask) = lowest_other_ask_cents {
-        let cap = (ask - 1).max(1);
+        let cap = ask.saturating_sub(1);
+        if cap < MIN_PRICE_CENTS {
+            return Err(NoEstimate::NoQuickPrice);
+        }
         if cap < quick {
             quick = cap;
             evidence += " · venda rápida limitada pelo menor anúncio";
@@ -348,7 +375,7 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         SellTier {
             price_cents: t.price_cents,
             net_cents: net,
-            profit_cents: net - price_cents,
+            profit_cents: net.saturating_sub(price_cents),
             eta_hours: t.eta_hours,
         }
     };
@@ -362,8 +389,10 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
     } else {
         0.0
     };
-    let safe = sell.quick.profit_cents > 0;
-    let listable = price_cents > 0
+    // preço de compra ≤ 0 é entrada inválida: nada é seguro nem listável
+    let valid = price_cents > 0;
+    let safe = valid && sell.quick.profit_cents > 0;
+    let listable = valid
         && sell.mid.profit_cents >= MIN_LIST_PROFIT_CENTS
         && margin_pct >= MIN_LIST_MARGIN_PCT;
     let notify = listable && safe && sell.mid.profit_cents >= notify_min_cents;
@@ -581,9 +610,7 @@ mod tests {
         // anúncio acima do Q25: não mexe
         let e = estimate(&flat(1000, 5), NOW, Some(1200), None).unwrap();
         assert_eq!(e.quick.price_cents, 1000);
-        // anúncio de 1 centavo: piso de 1 centavo, não zero
-        let e = estimate(&flat(1000, 5), NOW, Some(1), None).unwrap();
-        assert_eq!(e.quick.price_cents, 1);
+        // anúncio de 1 centavo: ver tiny_competitor_ask_gives_no_quick_price
     }
 
     #[test]
@@ -643,6 +670,88 @@ mod tests {
         )
         .unwrap();
         assert!(e.evidence.contains("prêmio sem prova (1 venda)"));
+    }
+
+    #[test]
+    fn absurd_prices_are_rejected_not_overflowed() {
+        // múltiplo 1e308 é descartado como dado ruim: vira "prêmio sem prova", preço da base
+        let e = estimate(
+            &flat(1000, 5),
+            NOW,
+            None,
+            Some(rare(&[1e308, 1e308, 1e308])),
+        )
+        .unwrap();
+        assert_eq!(e.mid.price_cents, 1000);
+        assert!(
+            e.evidence.contains("prêmio sem prova (0 vendas)"),
+            "{}",
+            e.evidence
+        );
+        // múltiplo plausível mas base gigante: produto acima do teto → erro, nunca i64::MAX
+        let huge = estimate(
+            &flat(MAX_PRICE_CENTS, 5),
+            NOW,
+            None,
+            Some(rare(&[2.0, 2.0, 2.0])),
+        );
+        assert_eq!(huge, Err(NoEstimate::Implausible));
+        let huge = estimate(&flat(i64::MAX, 5), NOW, None, None);
+        assert_eq!(huge, Err(NoEstimate::Implausible));
+        // 100× é o limite; 101× é descartado
+        let e = estimate(
+            &flat(1000, 5),
+            NOW,
+            None,
+            Some(rare(&[100.0, 100.0, 100.0])),
+        )
+        .unwrap();
+        assert_eq!(e.mid.price_cents, 100_000);
+        let e = estimate(&flat(1000, 5), NOW, None, Some(rare(&[101.0; 3]))).unwrap();
+        assert_eq!(e.mid.price_cents, 1000);
+        // a avaliação aguenta valores extremos sem estourar
+        let ev = evaluate(
+            i64::MIN,
+            &est(MAX_PRICE_CENTS, MAX_PRICE_CENTS, MAX_PRICE_CENTS),
+            0,
+        );
+        assert!(!ev.safe && !ev.listable && !ev.notify);
+        let ev = evaluate(
+            i64::MAX,
+            &est(MAX_PRICE_CENTS, MAX_PRICE_CENTS, MAX_PRICE_CENTS),
+            0,
+        );
+        assert!(!ev.safe && !ev.listable);
+    }
+
+    #[test]
+    fn tiny_competitor_ask_gives_no_quick_price() {
+        for ask in [-5, 0, 1, 3] {
+            // cap = ask − 1 < 3 centavos: nenhum preço rápido bate o concorrente e ainda rende algo
+            let r = estimate(&flat(1000, 5), NOW, Some(ask), None);
+            assert_eq!(r, Err(NoEstimate::NoQuickPrice), "ask {ask}");
+        }
+        // ask 4: cap 3, quick 3 → líquido 1 centavo (> 0)
+        let e = estimate(&flat(1000, 5), NOW, Some(4), None).unwrap();
+        assert_eq!(e.quick.price_cents, 3);
+        assert!(seller_gets(e.quick.price_cents) > 0);
+        // mediana baixíssima também respeita o piso de 3 centavos
+        let e = estimate(&flat(1, 5), NOW, None, None).unwrap();
+        assert_eq!(e.quick.price_cents, MIN_PRICE_CENTS);
+        assert!(
+            NoEstimate::NoQuickPrice
+                .to_string()
+                .contains("barato demais")
+        );
+    }
+
+    #[test]
+    fn nonpositive_purchase_price_is_never_safe() {
+        for p in [-1, 0, i64::MIN] {
+            let ev = evaluate(p, &est(900, 1107, 1400), 0);
+            assert!(!ev.safe && !ev.listable && !ev.notify, "price {p}");
+            assert_eq!(ev.margin_pct, 0.0);
+        }
     }
 
     #[test]
