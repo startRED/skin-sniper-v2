@@ -53,7 +53,7 @@
   <div class="state">
     {#if !status || !status.set}<span class="pill mute">Não configurado</span>
     {:else if status.ok === true}<span class="pill ok">Funcionando</span>
-    {:else if status.ok === false}<span class="pill bad">Precisa entrar de novo</span>
+    {:else if status.ok === false}<span class="pill bad">Com problema</span>
     {:else}<span class="pill mute">Salvo, ainda não testado</span>{/if}
     {#if status?.detail}<span class="detail {status.ok === false ? 'down' : 'muted'}">{status.detail}</span>{/if}
   </div>

@@ -80,6 +80,8 @@ pub enum Error {
     Parse(String),
     /// Cookie ausente, expirado ou recusado.
     SessionExpired,
+    /// A Steam mandou o /market/ para fora da verificação de elegibilidade (conta sem acesso ao Mercado).
+    MarketBlocked,
     /// A conta/resposta está em outra moeda que não BRL.
     WrongCurrency {
         got: i32,
@@ -96,6 +98,7 @@ impl fmt::Display for Error {
             Self::Transport(e) => write!(f, "falha de rede: {e}"),
             Self::Parse(e) => write!(f, "resposta inesperada: {e}"),
             Self::SessionExpired => write!(f, "sessão da Steam ausente ou expirada"),
+            Self::MarketBlocked => write!(f, "a Steam não liberou o Mercado para esta conta"),
             Self::WrongCurrency { got } => write!(f, "moeda {got} em vez de BRL (7)"),
         }
     }
@@ -282,6 +285,9 @@ struct Inner {
     limiter: Limiter,
     breakers: [Breaker; 5],
     cookie: Option<Cookie>,
+    /// Cookies que a Steam setou nas respostas autenticadas (`webTradeEligibility` etc.); valem enquanto
+    /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
+    extra: Vec<(String, String)>,
 }
 
 pub struct SteamClient {
@@ -337,13 +343,16 @@ impl SteamClient {
                 limiter: Limiter::new(Instant::now()),
                 breakers: [Breaker::new(); 5],
                 cookie: None,
+                extra: Vec::new(),
             }),
         })
     }
 
     /// Troca (ou remove) o cookie em tempo de execução. Vale para as próximas requisições `auth`.
     pub fn set_cookie(&self, cookie: Option<Cookie>) {
-        self.inner.lock().unwrap().cookie = cookie;
+        let mut g = self.inner.lock().unwrap();
+        g.cookie = cookie;
+        g.extra.clear();
     }
 
     /// Grava o `sessionid` só se a sessão atual ainda for a `queried` (mesmo cookie), sob o mesmo lock:
@@ -357,6 +366,47 @@ impl SteamClient {
             }
             _ => false,
         }
+    }
+
+    /// Guarda os `Set-Cookie` de uma resposta autenticada, menos o login e o `sessionid` (esses mandam
+    /// em outro lugar). Cookie apagado (`Max-Age=0` ou valor vazio) sai do jar. Teto de 16 nomes.
+    fn keep_cookies(&self, set_cookie: &[String]) {
+        let mut g = self.inner.lock().unwrap();
+        if g.cookie.is_none() {
+            return;
+        }
+        for line in set_cookie {
+            let mut parts = line.split(';');
+            let Some((name, value)) = parts.next().and_then(|p| p.split_once('=')) else {
+                continue;
+            };
+            let (name, value) = (name.trim(), value.trim());
+            if name.is_empty()
+                || name.eq_ignore_ascii_case("steamLoginSecure")
+                || name == "sessionid"
+            {
+                continue;
+            }
+            let deleted =
+                value.is_empty() || parts.any(|a| a.trim().eq_ignore_ascii_case("max-age=0"));
+            g.extra.retain(|(k, _)| k != name);
+            if !deleted && g.extra.len() < 16 {
+                g.extra.push((name.to_string(), value.to_string()));
+            }
+        }
+    }
+
+    /// Caminho (com query) de um `Location` que aponta para a própria Steam Community; `None` se for
+    /// de outro host.
+    pub(crate) fn local_path(&self, location: &str) -> Option<String> {
+        if location.starts_with('/') {
+            return Some(location.to_string());
+        }
+        [self.base.as_str(), BASE]
+            .iter()
+            .find_map(|b| location.strip_prefix(*b))
+            .filter(|p| p.starts_with('/'))
+            .map(str::to_string)
     }
 
     pub fn cookie(&self) -> Option<Cookie> {
@@ -494,8 +544,15 @@ impl SteamClient {
                 Some(w) => tokio::time::sleep(w).await,
             }
         }
-        if auth && let Some(c) = self.cookie() {
-            req = req.header(COOKIE, c.header());
+        if auth {
+            let g = self.inner.lock().unwrap();
+            if let Some(c) = &g.cookie {
+                let mut h = c.header();
+                for (k, v) in &g.extra {
+                    h.push_str(&format!("; {k}={v}"));
+                }
+                req = req.header(COOKIE, h);
+            }
         }
         let result = req.send().await;
         let now = Instant::now();
@@ -512,6 +569,15 @@ impl SteamClient {
             .get("location")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        if auth {
+            let set: Vec<String> = resp
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok().map(str::to_string))
+                .collect();
+            self.keep_cookies(&set);
+        }
         if status == StatusCode::TOO_MANY_REQUESTS {
             let retry = resp
                 .headers()
