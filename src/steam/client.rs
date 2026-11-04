@@ -735,8 +735,10 @@ impl SteamClient {
                 let current = g.cookie.as_ref().map(|c| c.steam_login_secure.as_str());
                 if current == sent_by.as_deref() {
                     // O intervalo longo veio dos 429 da conta; sem login a cota é outra e começa da base. Se o IP
-                    // também estiver segurando, o 1º 429 sem login volta a alongar.
-                    if g.anon_reads_until.is_none_or(|t| now >= t) {
+                    // também estiver segurando, o 1º 429 sem login volta a alongar. Com pausa ativa (429 de outro
+                    // endpoint agora há pouco) o intervalo fica.
+                    let paused = g.limiter.paused_until.is_some_and(|p| now < p);
+                    if !paused && g.anon_reads_until.is_none_or(|t| now >= t) {
                         g.limiter.gap = g.limiter.gap.min(BASE_GAP);
                     }
                     g.anon_reads_until = Some(now + ANON_AFTER_429);
