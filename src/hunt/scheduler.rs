@@ -57,6 +57,10 @@ pub struct Queue {
 }
 
 impl Queue {
+    pub fn tasks(&self) -> Vec<Task> {
+        self.entries.values().map(|e| e.task.clone()).collect()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

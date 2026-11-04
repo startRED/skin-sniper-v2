@@ -136,6 +136,22 @@ pub struct History {
     pub sell: Sell,
 }
 
+/// Uma linha de `GET /api/watch`: o que a caça está vigiando.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchRow {
+    pub name: String,
+    pub icon_url: String,
+    /// Menor anúncio visto na última consulta; `null` se ainda não consultou ou a página veio vazia.
+    pub floor_cents: Option<i64>,
+    /// Maior preço de compra que ainda daria lucro ≥ R$ 0,20 e ≥ 5 % no preço médio; `null` sem estimativa
+    /// (histórico curto) e sempre `null` em item raro.
+    pub max_buy_cents: Option<i64>,
+    pub sales_per_day: f64,
+    pub kind: Kind,
+    pub group: Option<String>,
+    pub last_checked_at: Option<i64>,
+}
+
 /// Leitura de `Settings`: segredos já mascarados (`••••gLO9`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
@@ -208,7 +224,7 @@ pub enum Event {
     Purchase(Purchase),
 }
 
-pub struct ApiError(pub(crate) StatusCode, String);
+pub struct ApiError(pub(crate) StatusCode, pub(crate) String);
 
 impl ApiError {
     pub fn new(code: StatusCode, msg: impl Into<String>) -> Self {
@@ -305,6 +321,13 @@ pub async fn opportunity_history(
 #[derive(Deserialize)]
 pub struct BuyInput {
     pub id: String,
+}
+
+pub async fn watch(AxState(app): AxState<AppState>) -> ApiResult<Vec<WatchRow>> {
+    let Some(rt) = &app.rt else {
+        return Err(ApiError::not_wired("vigilância"));
+    };
+    Ok(Json(crate::hunt::watch::list(&rt.hunt).await?))
 }
 
 pub async fn buy(

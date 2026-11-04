@@ -259,6 +259,10 @@ async fn buy_needs_confirmation_then_completes_in_background() {
     let p = rt.buy(ID).await.ok().unwrap();
     assert_eq!(p.status, PurchaseStatus::NeedConfirmation);
     assert!(p.message.unwrap().contains("app da Steam"));
+    // esperando no celular, outra compra não passa nem usa o mesmo saldo
+    let busy = rt.buy(ID).await.err().unwrap();
+    assert_eq!(busy.0, StatusCode::CONFLICT);
+    assert!(busy.1.contains("termine a compra em andamento primeiro"));
     // o reenvio acontece 2 s depois, sem segurar a requisição
     let done = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -273,6 +277,16 @@ async fn buy_needs_confirmation_then_completes_in_background() {
     .expect("compra confirmada");
     assert!(done.bought_at.is_some());
     assert_eq!(purchase_row(&rt).await.status, PurchaseStatus::Bought);
+    // terminado, a trava solta: a próxima tentativa chega à checagem normal (anúncio já saiu da lista)
+    let mut next = None;
+    for _ in 0..50 {
+        next = rt.buy(ID).await.err();
+        if next.as_ref().is_some_and(|e| e.0 != StatusCode::CONFLICT) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(next.unwrap().0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

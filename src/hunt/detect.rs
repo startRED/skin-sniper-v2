@@ -171,7 +171,7 @@ async fn history_at(h: &Hunt, name: &str) -> Result<Option<i64>> {
 }
 
 /// Pontos dos últimos 15 dias do nome (a tendência usa até 14); baixa o histórico se passou de 6 h.
-async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<PricePoint>> {
+pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<PricePoint>> {
     let n = name.to_string();
     let last: Option<i64> =
         h.db.call(move |c| {
@@ -365,6 +365,8 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         .filter(|l| task.seeds.is_some() || l.name == task.name)
         .collect();
     let mut out = Outcome::default();
+    let floor = relevant.iter().map(|l| l.price_cents).min();
+    h.lock().floors.insert(task.id.clone(), (floor, now));
 
     // --- sumiu? só com página confiável; fora da primeira página o anúncio pode só ter sido empurrado
     let trust = {

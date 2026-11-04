@@ -6,9 +6,11 @@
 //! recebe seed 59 (tier 1 do Moonrise) e custa R$ 7,00, e a primeira entrada da busca vira o Moonrise FT
 //! a US$ 1,00. No CSFloat, três vendas sem adesivo ganham seeds do tier 1 e preço ×1,5.
 
+use super::detect::points_for;
 use super::scheduler::{Task, Tick, tick};
 use super::*;
 use crate::db::temp_db;
+use crate::pricing::sell;
 use crate::steam::listings::Listing;
 use crate::web::api::{Confidence, Kind};
 use axum::extract::{Path, Query, State as AxState};
@@ -215,6 +217,29 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     assert_eq!(st.combo.ids.len(), 2);
     assert!(st.hunt.watching >= 10);
 
+    // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 0,20 e 5 %) e ritmo
+    let watch = watch::list(&h).await.unwrap();
+    assert_eq!(watch.len(), st.hunt.watching as usize);
+    // o Moonrise (aqui raro por seed) aparece com o piso visto e sem teto de compra
+    let raro = watch
+        .iter()
+        .find(|r| r.floor_cents == Some(400))
+        .unwrap_or_else(|| panic!("piso R$ 4,00 visto: {watch:#?}"));
+    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, None));
+    assert_eq!(raro.last_checked_at, Some(NOW));
+    assert!(
+        watch
+            .iter()
+            .filter(|r| r.kind == Kind::Raro)
+            .all(|r| r.max_buy_cents.is_none())
+    );
+    // mais perto de compensar primeiro
+    let gaps: Vec<i64> = watch
+        .iter()
+        .filter_map(|r| r.floor_cents.zip(r.max_buy_cents).map(|(f, m)| f - m))
+        .collect();
+    assert!(gaps.windows(2).all(|w| w[0] <= w[1]), "{gaps:?}");
+
     // anúncio já visto não vira evento de novo, por mais voltas que a caça dê
     for _ in 0..60 {
         tick(&h).await;
@@ -384,6 +409,7 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             steam,
             csfloat: Arc::new(CsfloatClient::with_base(&base).unwrap()),
             events,
+            telegram: None,
         },
         clock2,
     );
@@ -435,4 +461,52 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .unwrap()
             .starts_with("0 anúncios conferidos em 10 min")
     );
+}
+
+#[tokio::test]
+async fn watch_row_for_common_item_has_exact_max_buy() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    run_until_two(&h, &mut rx).await; // deixa o histórico do Moonrise FT no banco
+    let task = Task {
+        id: format!("d:{MOON}"),
+        name: MOON.into(),
+        code: "G1".into(),
+        wear: None,
+        seeds: None,
+        score: 1.0,
+    };
+    {
+        let mut s = h.lock();
+        s.queue.set_tasks(vec![task.clone()], &HashMap::new(), 0);
+        s.floors.clear();
+    }
+    // antes da primeira consulta: sem piso nem horário, mas com teto e ritmo
+    let w = watch::list(&h).await.unwrap();
+    let r = &w[0];
+    assert_eq!(
+        (r.floor_cents, r.last_checked_at, r.kind),
+        (None, None, Kind::Desconto)
+    );
+    assert!(r.sales_per_day > 100.0 && !r.icon_url.is_empty());
+    assert!(r.max_buy_cents.is_some());
+
+    let page = crate::steam::listings::ListingsPage {
+        start: 0,
+        total_count: 2,
+        more: false,
+        listings: serde_json::from_value::<Vec<Listing>>(json!([])).unwrap(),
+    };
+    detect::process(&h, &task, &page).await.unwrap(); // página vazia: consultou, nada visto
+    let w = watch::list(&h).await.unwrap();
+    assert_eq!((w[0].floor_cents, w[0].last_checked_at), (None, Some(NOW)));
+
+    // o teto é exato: nele ainda entra na lista, um centavo acima não
+    let max = w[0].max_buy_cents.unwrap();
+    let pts = points_for(&h, MOON, NOW).await.unwrap();
+    let est = sell::estimate(&pts, NOW, None, None).unwrap();
+    assert!(sell::evaluate(max, &est, 0).listable);
+    assert!(!sell::evaluate(max + 1, &est, 0).listable);
 }

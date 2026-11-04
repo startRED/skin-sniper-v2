@@ -59,6 +59,8 @@ pub struct Runtime {
     pub buyer: Arc<Buyer>,
     applied: Mutex<Applied>,
     wallet: Mutex<Option<Wallet>>,
+    /// Uma compra por vez, do pedido até o fim (inclusive a espera no celular e o ajuste do saldo).
+    buy_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Cola do navegador costuma trazer o nome do cookie junto.
@@ -91,6 +93,7 @@ impl Runtime {
             buyer: Arc::new(Buyer::new()),
             applied: Mutex::new(Applied::default()),
             wallet: Mutex::new(None),
+            buy_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -313,6 +316,12 @@ impl Runtime {
     /// `POST /api/buy`: refaz o pedido com os dados guardados do anúncio. Devolve o estado logo depois do
     /// primeiro envio; confirmação no app da Steam termina em segundo plano e chega por evento `purchase`.
     pub async fn buy(self: &Arc<Self>, id: &str) -> Result<Purchase, ApiError> {
+        let Ok(gate) = self.buy_gate.clone().try_lock_owned() else {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "termine a compra em andamento primeiro",
+            ));
+        };
         let key = id.to_string();
         let row: Option<(String, Option<String>)> = self
             .db
@@ -384,6 +393,7 @@ impl Runtime {
             // reenvia com o id a cada 2 s por até 60 s, sem segurar a requisição do painel
             let (rt, mut bg) = (self.clone(), p.clone());
             tokio::spawn(async move {
+                let _gate = gate; // solta só depois de confirmar/terminar e atualizar o saldo
                 let out = crate::steam::buy::buy_until_confirmed(
                     &TokioClock::new(),
                     CONFIRM_TIMEOUT,

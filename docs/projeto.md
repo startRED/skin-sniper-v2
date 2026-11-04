@@ -59,6 +59,7 @@ GET  /api/opportunities    -> Opportunity[]         (ativas, ordem livre; o fron
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
 POST /api/buy              {id: string}            -> Purchase
 GET  /api/purchases        -> Purchase[]
+GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
 GET  /api/settings         -> Settings              (chaves mascaradas)
 PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga)
 GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id} | "state" State | "purchase" Purchase
@@ -87,6 +88,14 @@ Opportunity = {
   confidence: "alta" | "media" | "baixa",
   evidence: string,              // frase curta: "392 vendas/dia nos últimos 7 dias"
   seen_at: number
+}
+WatchRow = {
+  name: string, icon_url: string,
+  floor_cents: number | null,      // menor anúncio visto na última consulta; null se ainda não consultou / página vazia
+  max_buy_cents: number | null,    // maior preço que ainda dá lucro >= R$ 0,20 e >= 5 % no preço médio;
+                                   // null sem estimativa e sempre null em item raro (o teto depende do grupo)
+  sales_per_day: number, kind: "desconto" | "raro", group: string | null,
+  last_checked_at: number | null   // ordem: (floor - max_buy) crescente; sem os dois, por último
 }
 Sell = { high: Tier, mid: Tier, quick: Tier }
 Tier = { price_cents: number, net_cents: number, profit_cents: number, eta_hours: number | null }
@@ -180,3 +189,13 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   encerra (`gone`) as oportunidades dela, porque ninguém mais as confere.
 - `gone` só vale com a página confiável: página vazia precisa se repetir 2 vezes, e anúncio fora da primeira
   página (`more`) só some se o preço dele estava dentro da faixa vista.
+- Reavaliação (revisão do Codex): anúncio já visto é avaliado de novo quando o preço ou o histórico do item mudam
+  (e, se é oportunidade ativa com histórico velho, a cada passagem). A oportunidade atualizada mantém a posição
+  (`seen_at`) e só republica o evento se algo mudou; se deixou de compensar, vira `gone`. O aviso do Telegram sai
+  só para oportunidade nova. O mapa de avaliados vive em memória (reavalia tudo uma vez após reiniciar).
+- Balanço de 10 min: `State.hunt.message` diz quantos anúncios foram conferidos e o quanto o mais perto dava de
+  lucro (ou prejuízo); o log INFO traz os 3 mais perto, com o lucro no preço médio e no rápido.
+- `QueryListingsForItem` com 200 sem `data` conta como falha do endpoint (breaker) e loga status, tamanho, nomes
+  das chaves do topo e `success`; nunca o conteúdo.
+- Compra: uma por vez, do pedido até confirmar/terminar e ajustar o saldo; a segunda recebe 409 "termine a compra
+  em andamento primeiro".

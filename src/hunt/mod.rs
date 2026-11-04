@@ -7,6 +7,7 @@
 pub mod catalog;
 pub mod detect;
 pub mod scheduler;
+pub mod watch;
 
 use crate::csfloat::{CsfloatClient, CsfloatSale};
 use crate::db::{Db, now_unix};
@@ -60,6 +61,8 @@ pub(crate) struct Shared {
     pub evaluated: HashMap<String, (i64, i64)>,
     /// Balanço do ciclo de 10 min (o que foi conferido e o que chegou perto).
     pub cycle: detect::Cycle,
+    /// Por tarefa: menor anúncio visto na última consulta (se havia algum) e quando foi.
+    pub floors: HashMap<String, (Option<i64>, i64)>,
 }
 
 pub struct Hunt {
@@ -123,6 +126,7 @@ impl Hunt {
                 last_state_pub: 0,
                 evaluated: HashMap::new(),
                 cycle: detect::Cycle::default(),
+                floors: HashMap::new(),
             }),
         })
     }
