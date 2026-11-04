@@ -2,7 +2,7 @@
   import { app } from './store.svelte';
   import { money, signed } from './format';
 
-  const items = $derived((app.state?.combo.ids ?? []).map((id) => app.opps[id]).filter(Boolean));
+  const items = $derived((app.state?.combo.ids ?? []).map((id) => app.opps[id]).filter((o) => o && !o.gone_at));
   const combo = $derived(app.state?.combo);
 </script>
 

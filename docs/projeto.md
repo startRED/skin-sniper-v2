@@ -55,7 +55,7 @@ Valores de dinheiro sempre em **centavos BRL inteiros**. Datas em segundos Unix.
 ```
 GET  /api/state            -> State
 PUT  /api/saldo            {cents: int}            -> State      (saldo manual; null volta a ler da Steam)
-GET  /api/opportunities    -> Opportunity[]         (ativas, ordem livre; o frontend ordena)
+GET  /api/opportunities    -> Opportunity[]         (ativas e as perdidas do último dia, até 50, com gone_at; o frontend ordena)
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
 POST /api/buy              {id: string}            -> Purchase
 GET  /api/purchases        -> Purchase[]

@@ -37,6 +37,7 @@ export type Opportunity = {
   risk: 'baixo' | 'medio' | 'alto' | null;
   evidence: string;
   seen_at: number;
+  gone_at?: number | null; // sumiu da Steam: fica na lista de perdidas por um dia
 };
 export type Purchase = {
   id: string;

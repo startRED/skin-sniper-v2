@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { app, load, start } from './lib/store.svelte';
+  import { app, load, lostRows, start } from './lib/store.svelte';
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
   import OppTable from './lib/OppTable.svelte';
@@ -10,7 +10,8 @@
 
   onMount(start);
 
-  const count = $derived(Object.keys(app.opps).length);
+  const count = $derived(Object.values(app.opps).filter((o) => !o.gone_at).length);
+  const lostCount = $derived(lostRows().length);
   const noSaldo = $derived(app.state?.saldo_source === 'none');
   const noSteam = $derived(app.state != null && !app.state.keys.steam.set);
 </script>
@@ -61,11 +62,14 @@
             <button class="btn" onclick={() => (app.settingsOpen = true)}>Abrir configurações</button>
           {/if}
         </div>
-        <Watch />
       {:else}
         <OppTable />
-        <Watch collapsed />
       {/if}
+      {#if lostCount > 0}
+        <h3 class="lost">Perdidas nas últimas 24 h <span class="muted">· {lostCount} · saíram da lista; ficam aqui só para você ver o que escapou</span></h3>
+        <OppTable lost />
+      {/if}
+      <Watch collapsed={count > 0} />
     </section>
 
     <Purchases />
@@ -81,6 +85,8 @@
   .warn { background: var(--amber-bg); color: var(--amber); padding: 8px 24px; border-bottom: 1px solid var(--amber); }
   .title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
   h2 { font-size: 15px; }
+  .lost { font-size: 14px; margin: 20px 0 8px; }
+  .lost .muted { font-weight: 400; font-size: 13px; }
   .empty { background: var(--panel); border-radius: var(--radius); padding: 40px 24px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
   .empty p, .empty h3, .empty h2 { max-width: 62ch; }
   .empty h3, .empty h2 { font-size: 17px; }

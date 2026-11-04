@@ -1,12 +1,20 @@
 <script lang="ts">
-  import { app, loadHistory, rows, setSort, toggleExpanded, type SortKey } from './store.svelte';
+  import { app, loadHistory, lostRows, purchaseOf, rows, setSort, toggleExpanded, type SortKey } from './store.svelte';
   import { ago, eta, floatTxt, money, pct, signed } from './format';
   import BuyButton from './BuyButton.svelte';
   import Chart from './Chart.svelte';
   import type { Opportunity, Tier } from './types';
 
+  // lost: as que já sumiram da lista, apagadas e sem compra; cabeçalho sem ordenação (no celular, nenhum)
+  let { lost = false }: { lost?: boolean } = $props();
+
+  const LOST_SHOWN = 8;
+  let showAll = $state(false);
+  const lostAll = $derived(lost ? lostRows() : []);
+
   let daySort = $state<'asc' | 'desc' | null>('desc');
   const list = $derived.by(() => {
+    if (lost) return showAll ? lostAll : lostAll.slice(0, LOST_SHOWN);
     const current = rows();
     if (!daySort) return current;
     return current.sort((a, b) => {
@@ -28,11 +36,13 @@
 </script>
 
 {#snippet th(key: SortKey, label: string, hint: string)}
+  {#if lost}<div class="h" role="columnheader">{label}</div>{:else}
   <div class="h sortable" role="columnheader" aria-sort={sortAttr(key)}>
     <button onclick={() => { if (daySort && app.sort.key === key) app.sort = { key, dir: key === 'eta' ? 'asc' : 'desc' }; else setSort(key); daySort = null; }} title={hint} class:active={!daySort && app.sort.key === key}>
       {label}<span class="arrow" aria-hidden="true">{!daySort && app.sort.key === key ? (app.sort.dir === 'asc' ? '▲' : '▼') : ''}</span>
     </button>
   </div>
+  {/if}
 {/snippet}
 
 {#snippet tier(t: Tier, showProfit: boolean)}
@@ -40,14 +50,18 @@
   {#if showProfit}<small class={t.profit_cents > 0 ? 'up' : 'down'}>{signed(t.profit_cents)}</small>{/if}
 {/snippet}
 
-<p class="day-hint">Por dia: lucro estimado dividido pelo tempo até vender, incluindo os 7 dias de trava. Sem esse dado, a ordem usa o lucro médio dividido por 7, apenas para comparação.</p>
-<div class="table" role="table" aria-label="Skins com lucro">
-  <div class="head grid" role="row">
+{#if !lost}
+  <p class="day-hint">Por dia: lucro estimado dividido pelo tempo até vender, incluindo os 7 dias de trava. Sem esse dado, a ordem usa o lucro médio dividido por 7, apenas para comparação.</p>
+{/if}
+<div class="table" role="table" aria-label={lost ? 'Oportunidades perdidas' : 'Skins com lucro'}>
+  <div class="head grid" role="row" class:static={lost}>
     <div class="h hide" role="columnheader">Skin</div>
     <div class="h hide" role="columnheader">Preço</div>
+    {#if lost}<div class="h" role="columnheader">Por dia</div>{:else}
     <div class="h sortable" role="columnheader" aria-sort={daySort ? (daySort === 'asc' ? 'ascending' : 'descending') : 'none'}>
       <button onclick={() => { daySort = daySort === 'desc' ? 'asc' : 'desc'; }} class:active={daySort !== null} title="Lucro estimado dividido pelos dias até vender, incluindo os 7 dias de trava. É uma estimativa, não uma garantia.">Por dia<span class="arrow" aria-hidden="true">{daySort ? (daySort === 'asc' ? '▲' : '▼') : ''}</span></button>
     </div>
+    {/if}
     {@render th('profit', 'Lucro', 'Ordenar pelo lucro no preço médio')}
     {@render th('margin', 'Margem', 'Ordenar pela margem: lucro dividido pelo preço')}
     {@render th('safe', 'Venda rápida', 'Ordenar pelo lucro seguro: o que sobra vendendo pelo preço rápido')}
@@ -55,13 +69,13 @@
     <div class="h hide" role="columnheader">Venda alta</div>
     {@render th('eta', 'Prazo', 'Ordenar pelo tempo estimado para vender (menor primeiro)')}
     <div class="h hide" role="columnheader">Confiança</div>
-    {@render th('new', 'Mais novo', 'Ordenar pelas que apareceram agora')}
+    {@render th('new', lost ? 'Sumiu' : 'Mais novo', 'Ordenar pelas que apareceram agora')}
     <div class="h hide" role="columnheader"><span class="sr-only">Comprar</span></div>
   </div>
 
   {#each list as o (o.id)}
     {@const open = app.expanded === o.id}
-    <div class="item" class:fresh={app.fresh[o.id]} class:combo={inCombo.has(o.id)} class:open class:risky={!o.safe}>
+    <div class="item" class:fresh={app.fresh[o.id]} class:combo={inCombo.has(o.id)} class:open class:risky={!o.safe} class:gone={lost}>
       <div class="row grid" role="row">
         <div class="c skin" role="cell">
           <button class="skinbtn" aria-expanded={open} aria-controls="d-{o.id}" onclick={() => toggleExpanded(o.id)}
@@ -97,8 +111,19 @@
         <div class="c conf" role="cell" data-l="Confiança">
           <button type="button" class="cf {o.risk === 'alto' ? 'baixa' : o.risk === 'medio' ? 'media' : o.confidence}" data-tip={o.evidence} aria-label="Confiança {CONF[o.confidence]}{o.risk ? `, risco ${RISK[o.risk]}` : ''}: {o.evidence}">{CONF[o.confidence]}{o.risk ? ` · risco ${RISK[o.risk]}` : ''}</button>
         </div>
-        <div class="c seen muted" role="cell" data-l="Apareceu">{ago(o.seen_at, app.now)}</div>
-        <div class="c act" role="cell"><BuyButton {o} /></div>
+        {#if lost}
+          <div class="c seen muted" role="cell" data-l="Sumiu">{ago(o.gone_at!, app.now)}</div>
+          <div class="c act" role="cell">
+            {#if purchaseOf(o.id)?.status === 'bought'}
+              <span class="pill ok">Você comprou</span>
+            {:else}
+              <span class="pill mute" title="Saiu da lista: alguém comprou antes, o vendedor tirou o anúncio, deixou de dar lucro ou a skin deixou de ser vigiada">Perdida</span>
+            {/if}
+          </div>
+        {:else}
+          <div class="c seen muted" role="cell" data-l="Apareceu">{ago(o.seen_at, app.now)}</div>
+          <div class="c act" role="cell"><BuyButton {o} /></div>
+        {/if}
       </div>
 
       {#if open}
@@ -143,6 +168,9 @@
     </div>
   {/each}
 </div>
+{#if lostAll.length > LOST_SHOWN}
+  <button class="btn more" onclick={() => (showAll = !showAll)}>{showAll ? 'Mostrar só as mais recentes' : `Mostrar todas as ${lostAll.length}`}</button>
+{/if}
 
 <style>
   .day-hint { color: var(--muted); font-size: 12px; margin: 0 16px 6px; }
@@ -162,6 +190,9 @@
   .item { border-bottom: 1px solid var(--line); position: relative; }
   .item::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--green); }
   .item.risky::before { background: var(--amber); opacity: 0.7; }
+  .item.gone { opacity: 0.55; filter: grayscale(0.8); }
+  .item.gone::before { background: var(--faint); }
+  .item.gone:hover, .item.gone.open { opacity: 0.85; }
   .item:hover { background: #12171c; }
   .item.open { background: var(--panel); }
   .item.combo { background: var(--green-bg); box-shadow: inset 0 0 0 1px rgba(62, 207, 142, 0.45); }
@@ -209,11 +240,14 @@
   .tr em { font-style: normal; color: var(--muted); margin-right: 4px; }
   .small { font-size: 12px; }
   .links { display: flex; gap: 8px; flex-wrap: wrap; }
+  .act .pill { width: fit-content; }
+  .more { margin: 10px 16px 0; }
 
   @media (max-width: 1239px) {
     .head { top: 0; position: static; border: 0; padding: 0 0 8px; display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 6px; min-height: 0; }
     .h button { white-space: nowrap; }
     .head .hide { display: none; }
+    .head.static { display: none; }
     .h { padding: 0; }
     .h button { border: 1px solid var(--line); border-radius: 99px; padding: 6px 12px; font-size: 13px; background: var(--panel); }
     .h button.active { border-color: var(--green); color: var(--green); }
