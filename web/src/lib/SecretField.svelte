@@ -2,7 +2,7 @@
   import type { KeyStatus } from './types';
 
   let { label, hint, masked, status, onsave, onclear, plain = false }: {
-    label: string; hint?: string; masked: string | null; status?: KeyStatus;
+    label: string; hint?: string; masked: string | null; status?: KeyStatus | null;
     onsave: (v: string) => Promise<void>; onclear: () => Promise<void>; plain?: boolean;
   } = $props();
 
@@ -29,14 +29,14 @@
   <label for={id}>{label}</label>
   {#if hint}<p class="hint">{hint}</p>{/if}
   <div class="state">
-    {#if masked}<code class="mask">{masked}</code>{:else}<span class="muted">Nada salvo</span>{/if}
     {#if status}
-      {#if !status.set}<span class="pill mute">Não configurada</span>
-      {:else if status.ok === true}<span class="pill ok">Funcionando</span>
-      {:else if status.ok === false}<span class="pill bad">Recusada</span>
-      {:else}<span class="pill mute">Salva, ainda não testada</span>{/if}
-      {#if status.detail}<span class="detail {status.ok === false ? 'down' : 'muted'}">{status.detail}</span>{/if}
-    {/if}
+      {#if status.ok === true}<span class="pill ok">{status.detail || 'Funcionando'}</span>
+      {:else if status.ok === false}<span class="pill bad">{label.includes('Telegram') ? 'Token recusado. Confira e salve novamente.' : 'Chave recusada. Confira e salve novamente.'}</span>
+      {:else if status.set}<span class="pill mute">{status.detail?.startsWith('não consegui') ? 'Não consegui verificar. Confira sua conexão.' : label.includes('CSFloat') ? 'Salva; será testada na primeira consulta.' : 'Verificando…'}</span>
+      {:else}<span class="pill mute">Não configurada</span>{/if}
+    {:else if status === null}<span class="pill mute">Verificando…</span>
+    {:else if masked}<code class="mask">{masked}</code>
+    {:else}<span class="muted">Nada salvo</span>{/if}
   </div>
   <form onsubmit={(e) => { e.preventDefault(); if (draft.trim()) void run(() => onsave(draft.trim()), () => (draft = '')); }}>
     <input {id} type={plain ? 'text' : 'password'} bind:value={draft} placeholder="Cole aqui para trocar" autocomplete="off" spellcheck="false" />
@@ -51,8 +51,8 @@
   label { font-weight: 600; }
   .hint { color: var(--muted); font-size: 13px; }
   .state { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .state .pill { white-space: normal; }
   .mask { font-family: inherit; letter-spacing: 0.04em; color: var(--muted); }
-  .detail { font-size: 12px; }
   form { display: flex; gap: 8px; }
   input { flex: 1; min-width: 0; min-height: 36px; padding: 0 10px; border-radius: var(--radius); background: var(--bg); border: 1px solid var(--line); font-size: 14px; }
 </style>

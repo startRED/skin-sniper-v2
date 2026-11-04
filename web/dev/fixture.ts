@@ -71,6 +71,8 @@ let settings: Settings = {
   panel_url: 'http://192.168.0.10:8788', sound: true, notify_min_profit_cents: 100
 };
 let lastQuery = nowS();
+let keyExamples: State['keys'] | null = null;
+let qrExample: { state: 'waiting' | 'done' | 'expired' | 'error'; account?: string; detail?: string } = { state: 'waiting' };
 
 function reset(scenario: string) {
   seq = 0;
@@ -100,7 +102,7 @@ function state(): State {
     saldo_cents: saldoSource === 'none' ? 0 : saldoCents, saldo_source: saldoSource,
     hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, message: '20 anúncios conferidos em 1 min; nenhum deu lucro, o mais perto dava R$ 0,78 de prejuízo (exemplo do modo dev)' },
     combo: combo(),
-    keys: {
+    keys: keyExamples ?? {
       steam: { set: !!settings.steam_login_secure, ok: !!settings.steam_login_secure, detail: settings.steam_login_secure ? 'Conta exemplo_erick' : null },
       csfloat: { set: !!settings.csfloat_key, ok: null, detail: null },
       telegram: { set: !!settings.telegram_token, ok: settings.telegram_token ? false : null, detail: settings.telegram_token ? 'O Telegram recusou o token (exemplo de erro).' : null }
@@ -172,6 +174,15 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     return;
   }
   if (p === '/api/state') return send(res, 200, state());
+  if (p === '/api/steam/login/qr' && m === 'POST') return send(res, 200, { qr_svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100"/><text x="10" y="50" fill="white">EXEMPLO</text></svg>' });
+  if (p === '/api/steam/login/status') return send(res, 200, qrExample);
+  if (p === '/api/__dev/settings-state' && m === 'POST') {
+    const example = await readJson(req);
+    if ('keys' in example) keyExamples = example.keys;
+    if ('qr' in example) qrExample = example.qr;
+    emit('state', state());
+    return send(res, 200, { ok: true });
+  }
   if (p === '/api/opportunities') return send(res, 200, opps);
   if (p === '/api/watch') return send(res, 200, watchRows());
   if (p === '/api/purchases') return send(res, 200, purchases);
