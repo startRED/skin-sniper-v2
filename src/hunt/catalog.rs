@@ -62,7 +62,7 @@ const HISTORY_PER_ROUND: usize = 25;
 const RESELECT_EVERY: u32 = 5;
 const RATIO_KEY: &str = "usd_brl_ratio";
 /// O sufixo muda quando a varredura muda de forma: uma leitura feita pela forma antiga não vale e é refeita.
-const SCAN_KEY: &str = "catalog_scan_at_cauda";
+pub(super) const SCAN_KEY: &str = "catalog_scan_completa";
 const DAY: i64 = 86_400;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -421,7 +421,7 @@ pub async fn step(h: &Hunt) -> Result<bool> {
                 if let Ok(total) = r {
                     h.lock().disc.totals.insert(cat, total);
                 }
-                finish_scan(h, cat, r.map(|_| ())).await?;
+                finish_scan(h, cat, r.map(|_| ()))?;
                 return Ok(true);
             }
             Next::Skin(name) => {
@@ -482,6 +482,7 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
         NeedSample,
         Advance,
         Again,
+        ScanDone,
     }
     let pre = {
         let mut s = h.lock();
@@ -507,6 +508,8 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
             Pre::Again
         } else if d.scanning && d.round + 1 < SCAN_ROUNDS + TAIL_ROUNDS {
             Pre::Advance
+        } else if d.scanning {
+            Pre::ScanDone
         } else {
             d.finished = true;
             if !ratio_known {
@@ -518,6 +521,13 @@ async fn next_step(h: &Hunt, now: i64) -> Result<Next> {
     match pre {
         Pre::Done(n) => Ok(n),
         Pre::Again => Box::pin(next_step(h, now)).await,
+        // Só o fim de todas as rodadas marca a varredura: marcar no fim da 1ª fazia um reinício no meio
+        // pular o resto (topo fundo e cauda) por 24 h. Se a gravação falhar, o próximo passo tenta de novo.
+        Pre::ScanDone => {
+            set_setting(&h.db, SCAN_KEY, h.now().to_string()).await?;
+            h.lock().disc.scanning = false;
+            Box::pin(next_step(h, now)).await
+        }
         Pre::Advance => {
             {
                 let mut s = h.lock();
@@ -643,17 +653,13 @@ async fn store_entries(h: &Hunt, entries: Vec<search::CatalogEntry>, rank_base: 
     Ok(())
 }
 
-/// Depois de uma página: erro não retentável não trava a rodada; fim de rodada marca a varredura como feita.
-async fn finish_scan(h: &Hunt, cat: search::Category, r: Result<()>) -> Result<()> {
+/// Depois de uma página: erro não retentável não trava a rodada.
+fn finish_scan(h: &Hunt, cat: search::Category, r: Result<()>) -> Result<()> {
     if let Err(e) = r {
         if retryable(&e) {
             h.lock().disc.scan_left.push_front(cat); // a página volta à frente da fila
         }
         return Err(e);
-    }
-    let round_done = h.lock().disc.scan_left.is_empty();
-    if round_done {
-        set_setting(&h.db, SCAN_KEY, h.now().to_string()).await?;
     }
     Ok(())
 }
