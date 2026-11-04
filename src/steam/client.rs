@@ -213,6 +213,13 @@ impl Limiter {
         if self.paused_until.is_some_and(|p| now < p) {
             return;
         }
+        // 30 min sem 429 (mesmo sem nenhuma resposta no meio): a escalada recomeça.
+        if self
+            .last_429
+            .is_some_and(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
+        {
+            self.pause_len = PAUSE_START;
+        }
         let pause = self.pause_len.max(retry_after.unwrap_or_default());
         self.paused_until = Some(now + pause);
         self.pause_len = (self.pause_len * 2).min(PAUSE_MAX);
@@ -474,7 +481,8 @@ impl SteamClient {
         let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
         let l = &mut self.inner.lock().unwrap().limiter;
         l.gap = ms(gap).clamp(MIN_GAP, MAX_GAP);
-        if let Some(Ok(p)) = pause {
+        let quiet = unix_in(Duration::ZERO) - until >= PAUSE_RESET_AFTER.as_secs() as i64;
+        if let Some(Ok(p)) = pause.filter(|_| !quiet) {
             l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
             l.last_429 = Some(now); // a escalada segue valendo depois de subir
         }
@@ -975,6 +983,17 @@ mod tests {
         fresh.restore_pace("lixo");
         let s = fresh.stats();
         assert_eq!((s.gap_ms, s.paused_until), (4000, None));
+        // 429 de mais de 30 min atrás: a escalada não volta
+        let old = SteamClient::new().unwrap();
+        old.restore_pace(&format!("{}|6000|600000", unix_in(Duration::ZERO) - 3600));
+        assert_eq!(pause(&old), PAUSE_START);
+        // e um 429 depois de 30 min quietos recomeça em 60 s, sem precisar de resposta boa no meio
+        let mut l = Limiter::new(t0());
+        l.on_429(t0(), None);
+        l.on_429(t0() + Duration::from_secs(120), None);
+        let later = t0() + Duration::from_secs(120) + PAUSE_RESET_AFTER;
+        l.on_429(later, None);
+        assert_eq!(l.paused_until.unwrap().duration_since(later).as_secs(), 60);
     }
 
     #[test]
