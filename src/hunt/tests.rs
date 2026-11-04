@@ -851,3 +851,20 @@ async fn no_saldo_message_clears_when_saldo_arrives() {
     }
     assert!(sent);
 }
+
+#[tokio::test]
+async fn catalog_scan_is_marked_only_after_every_round() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    let marked = || catalog::get_setting(&db, catalog::SCAN_KEY);
+    let mut steps = 0;
+    while catalog::step(&h).await.unwrap() {
+        // marcar no meio faria um reinício pular o resto da varredura por 24 h
+        assert_eq!(marked().await.unwrap(), None, "marcada no passo {steps}");
+        steps += 1;
+        assert!(steps < 2000);
+    }
+    assert!(marked().await.unwrap().is_some());
+}
