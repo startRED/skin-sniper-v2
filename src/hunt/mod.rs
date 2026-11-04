@@ -39,6 +39,9 @@ pub(crate) struct Active {
     pub task: String,
 }
 
+/// Menor anúncio por (nome, grupo raro ou nenhum).
+pub(crate) type Rivals = HashMap<(String, Option<String>), i64>;
+
 pub(crate) struct Shared {
     pub saldo: i64,
     pub source: SaldoSource,
@@ -63,6 +66,9 @@ pub(crate) struct Shared {
     pub cycle: detect::Cycle,
     /// Por tarefa: menor anúncio visto na última consulta (se havia algum) e quando foi.
     pub floors: HashMap<String, (Option<i64>, i64)>,
+    /// Raro, por faixa (`Task::floor_key`): quando foi vista e o menor anúncio por (nome, grupo). Concorrente de
+    /// outra faixa do mesmo grupo não aparece na página consultada.
+    pub rivals: HashMap<String, (i64, Rivals)>,
     /// Desconto do histórico pelas vendas reais, `[desconto, raro]` (`web::calibration::correction`).
     pub correction: [f64; 2],
 }
@@ -129,6 +135,7 @@ impl Hunt {
                 evaluated: HashMap::new(),
                 cycle: detect::Cycle::default(),
                 floors: HashMap::new(),
+                rivals: HashMap::new(),
                 correction: [1.0; 2],
             }),
         })

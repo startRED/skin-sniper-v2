@@ -174,6 +174,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   Sem estimativa com menos de 3 compras nos 7 dias ou com compras em menos de 3 dias distintos (pico ou lote velho).
 - `quick = min(Q25·f, menor outro anúncio − 1 centavo)`, `mid = min(Q50·f, menor outro anúncio − 1 centavo)`, `high = Q75·f`
   (quem compra leva o mais barato: vender acima do concorrente já à venda não é o mais provável).
+  Concorrente = mesmo nome e mesmo grupo raro (ou ambos comuns); no raro conta também o menor anúncio do grupo
+  visto nas outras faixas de seed da mesma skin nas últimas 6 h, porque a página de uma faixa não mostra as outras.
 - Raro: o grupo do anúncio (tier, fase, faixa de fade) busca vendas do CSFloat do mesmo grupo
   (`price / reference.base_price`). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
   prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
