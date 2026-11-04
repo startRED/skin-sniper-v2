@@ -217,6 +217,10 @@ impl Runtime {
                         Some(false),
                         "login expirado — escaneie o QR de novo".to_string(),
                     ),
+                    SteamError::MarketBlocked => (
+                        Some(false),
+                        "o login funcionou, mas a Steam não liberou o Mercado para esta conta (confira se ela pode vender e comprar no Mercado, com Steam Guard ativo)".to_string(),
+                    ),
                     SteamError::WrongCurrency { .. } => (
                         Some(false),
                         "a carteira dessa conta não está em reais".to_string(),

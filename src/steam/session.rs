@@ -39,12 +39,39 @@ pub async fn validate(c: &SteamClient) -> Result<SessionInfo> {
             cookie.sessionid = Some(id);
         }
     }
-    let (status, location, html) = c.get_page_auth(Endpoint::Session, "/market/").await?;
-    if (300..400).contains(&status) || status == 401 {
+    // Com login válido, a Steam manda /market/ por /market/eligibilitycheck/ (que grava o cookie
+    // `webTradeEligibility`, guardado pelo cliente) e de volta. Segue no máximo 2 saltos.
+    let mut path = "/market/".to_string();
+    let mut hops = 0;
+    let (status, html) = loop {
+        let (status, location, html) = c.get_page_auth(Endpoint::Session, &path).await?;
+        if !((300..400).contains(&status) || status == 401) {
+            break (status, html);
+        }
         // sem segredo: só o status e o destino (host + caminho) do redirecionamento
-        tracing::warn!(status, redirect = %redirect_target(location.as_deref()), shape = %cookie_shape(&cookie.steam_login_secure), "sessão recusada pela Steam");
-        return Err(Error::SessionExpired);
-    }
+        let shape = cookie_shape(&cookie.steam_login_secure);
+        tracing::warn!(status, hops, redirect = %redirect_target(location.as_deref()), %shape, "sessão: redirecionamento da Steam");
+        let next = location.as_deref().and_then(|l| c.local_path(l));
+        let Some(next) = next else {
+            // outro host: login aceito, mas o Mercado foi para fora (ou o destino é um login)
+            let login = location.as_deref().is_none_or(|l| l.contains("/login"));
+            return Err(if login || status == 401 {
+                Error::SessionExpired
+            } else {
+                Error::MarketBlocked
+            });
+        };
+        let only_path = next.split(['?', '#']).next().unwrap_or_default();
+        if only_path.contains("/login") {
+            return Err(Error::SessionExpired);
+        }
+        if hops >= 2 || !matches!(only_path, "/market/eligibilitycheck/" | "/market/") {
+            // login aceito, mas o Mercado não abre para esta conta
+            return Err(Error::MarketBlocked);
+        }
+        hops += 1;
+        path = next;
+    };
     if status != 200 {
         return Err(Error::Http {
             endpoint: Endpoint::Session,
@@ -368,6 +395,149 @@ g_rgWalletInfo = {{"wallet_fee":1,"wallet_balance":"3608","wallet_currency":{cur
             steam_login_secure: "x".into(),
             sessionid: None,
         }));
+        assert!(matches!(validate(&c).await, Err(Error::SessionExpired)));
+    }
+
+    async fn serve(app: axum::Router) -> SteamClient {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let c = SteamClient::with_base(&format!("http://{addr}")).unwrap();
+        c.set_gap_for_test(std::time::Duration::ZERO);
+        c.set_cookie(Some(Cookie {
+            steam_login_secure: "76561198000000001%7C%7Cfake".into(),
+            sessionid: None,
+        }));
+        c
+    }
+
+    /// Cadeia reproduzida do log real (status 302 → /market/eligibilitycheck/): o servidor local imita a
+    /// forma descrita por ProfitGraph #112 e steam-bee #61; o nome do cookie vem dessas fontes, não de captura.
+    #[tokio::test]
+    async fn follows_eligibilitycheck_keeps_cookie_for_later_requests() {
+        use axum::{Router, http::HeaderMap, http::StatusCode, response::Html, routing::get};
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (s1, s2, all) = (seen.clone(), seen.clone(), seen.clone());
+        let app = Router::new()
+            .route(
+                "/market/",
+                get(move |h: HeaderMap| {
+                    let seen = s1.clone();
+                    async move {
+                        let ck = h["cookie"].to_str().unwrap().to_string();
+                        seen.lock().unwrap().push(format!("market {ck}"));
+                        if ck.contains("webTradeEligibility=%7B%22allowed%22%3A1%7D") {
+                            (StatusCode::OK, Html(logged_page(7))).into_response()
+                        } else {
+                            (StatusCode::FOUND, [("location", "https://steamcommunity.com/market/eligibilitycheck/?goto=%2Fmarket%2F")])
+                                .into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/market/eligibilitycheck/",
+                get(move |h: HeaderMap| {
+                    let seen = s2.clone();
+                    async move {
+                        seen.lock().unwrap().push(format!("elig {}", h["cookie"].to_str().unwrap()));
+                        (
+                            StatusCode::FOUND,
+                            axum::response::AppendHeaders([
+                                ("set-cookie", "webTradeEligibility=%7B%22allowed%22%3A1%7D; Path=/; Secure"),
+                                ("set-cookie", "steamLoginSecure=NAO-DEVE-SUBSTITUIR; Path=/"),
+                                ("location", "/market/"),
+                            ]),
+                        )
+                    }
+                }),
+            );
+        use axum::response::IntoResponse;
+        let c = serve(app).await;
+        let info = validate(&c).await.unwrap();
+        assert_eq!(info.wallet_balance_cents, 3608);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(!seen[0].contains("webTradeEligibility"));
+        assert!(!seen[1].contains("webTradeEligibility"));
+        assert!(seen[2].contains("webTradeEligibility=%7B%22allowed%22%3A1%7D"));
+        assert!(
+            !seen.iter().any(|s| s.contains("NAO-DEVE")),
+            "login não é substituído"
+        );
+        // qualquer requisição autenticada seguinte (a compra, por exemplo) leva o cookie
+        c.get_page_auth(Endpoint::Session, "/market/")
+            .await
+            .unwrap();
+        assert!(all.lock().unwrap()[3].contains("webTradeEligibility="));
+        // trocar de login zera o jar: volta a passar pela elegibilidade (mais 3 pedidos)
+        c.set_cookie(c.cookie());
+        validate(&c).await.unwrap();
+        assert_eq!(all.lock().unwrap().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn eligibility_sending_elsewhere_means_market_blocked() {
+        use axum::{Router, http::StatusCode, routing::get};
+        let app = Router::new()
+            .route(
+                "/market/",
+                get(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [("location", "/market/eligibilitycheck/")],
+                    )
+                }),
+            )
+            .route(
+                "/market/eligibilitycheck/",
+                get(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [(
+                            "location",
+                            "https://help.steampowered.com/pt-br/faqs/view/71D3-35C2-AD96-AA3A",
+                        )],
+                    )
+                }),
+            );
+        let c = serve(app).await;
+        assert!(matches!(validate(&c).await, Err(Error::MarketBlocked)));
+    }
+
+    #[tokio::test]
+    async fn redirect_loop_stops_after_two_hops() {
+        use axum::{Router, http::StatusCode, routing::get};
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let h2 = hits.clone();
+        let app = Router::new().route(
+            "/market/",
+            get(move || {
+                h2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { (StatusCode::FOUND, [("location", "/market/")]) }
+            }),
+        );
+        let c = serve(app).await;
+        assert!(matches!(validate(&c).await, Err(Error::MarketBlocked)));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn redirect_to_login_stays_expired() {
+        use axum::{Router, http::StatusCode, routing::get};
+        let app = Router::new().route(
+            "/market/",
+            get(|| async {
+                (
+                    StatusCode::FOUND,
+                    [(
+                        "location",
+                        "https://steamcommunity.com/login/home/?goto=%2Fmarket%2F",
+                    )],
+                )
+            }),
+        );
+        let c = serve(app).await;
         assert!(matches!(validate(&c).await, Err(Error::SessionExpired)));
     }
 
