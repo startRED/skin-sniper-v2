@@ -1,0 +1,1 @@
+https://steamcommunity.com/market/search/render/?query=&start=1900&count=10&search_descriptions=0&sort_column=price&sort_dir=desc&appid=730&category_730_Type%5B%5D=tag_CSGO_Type_Pistol&norender=1

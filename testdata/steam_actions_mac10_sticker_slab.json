@@ -1,0 +1,310 @@
+{
+ "data": {
+  "more": false,
+  "start": 0,
+  "total_count": 1,
+  "listings": [
+   {
+    "listingid": "532141350456746817",
+    "unPrice": 14613,
+    "unFee": 2191,
+    "publisherFeeApp": 730,
+    "publisherFeePct": 0.10000000149011612,
+    "eCurrency": 7,
+    "strSubtotal": "R$168.04",
+    "enhanced_appearances": [
+     {
+      "mime_type": "image/avif",
+      "url": "https://shared.fastly.steamstatic.com/market_listings/ea/730/532141350456746817/0_300424486606239552.avif"
+     },
+     {
+      "mime_type": "image/avif",
+      "url": "https://shared.fastly.steamstatic.com/market_listings/ea/730/532141350456746817/1_5431135449960585255.avif"
+     },
+     {
+      "mime_type": "image/avif",
+      "url": "https://shared.fastly.steamstatic.com/market_listings/ea/730/532141350456746817/2_1302345473916750024.avif"
+     }
+    ],
+    "description": {
+     "appid": 730,
+     "classid": "7993041142",
+     "instanceid": "8453497976",
+     "currency": false,
+     "background_color": "342c42",
+     "icon_url": "i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL8n5WxrR1a_s2hYahoJM-eC2OZ1OM45bU8GSyyxEV3smrdn9v_cC3Daw90WMN3EeBYsxXukoK2ZeLnsgaLjZUFk3shgl9eMg",
+     "icon_url_large": "",
+     "descriptions": [
+      {
+       "type": "html",
+       "value": "Exterior: Field-Tested",
+       "name": "exterior_wear"
+      },
+      {
+       "type": "html",
+       "value": " ",
+       "name": "blank"
+      },
+      {
+       "type": "html",
+       "value": "This item commemorates the Perfect World Shanghai 2024 CS2 Major Championship.",
+       "color": "ffd700",
+       "name": "attribute"
+      },
+      {
+       "type": "html",
+       "value": " ",
+       "name": "blank"
+      },
+      {
+       "type": "html",
+       "value": "It was dropped during the Grand Final match between Team Spirit and FaZe Clan.",
+       "color": "ffd700",
+       "name": "attribute"
+      },
+      {
+       "type": "html",
+       "value": " ",
+       "name": "blank"
+      },
+      {
+       "type": "html",
+       "value": "Essentially a box that bullets come out of, the MAC-10 SMG boasts a high rate of fire, with poor spread accuracy and high recoil as trade-offs. It has been color case-hardened through the application of wood charcoal at high temperatures.\n\n<i>A little color never hurt anyone</i>",
+       "name": "description"
+      },
+      {
+       "type": "html",
+       "value": " ",
+       "name": "blank"
+      },
+      {
+       "type": "html",
+       "value": "The 2021 Dust 2 Collection",
+       "color": "9da1a9",
+       "name": "itemset_name"
+      },
+      {
+       "type": "html",
+       "value": " ",
+       "name": "blank"
+      },
+      {
+       "type": "html",
+       "value": "<br><div id=\"sticker_info\" class=\"sticker_info\" style=\"border: 2px solid rgb(102, 102, 102); border-radius: 6px; width=100; margin:4px; padding:8px;\"><center><img width=64 height=48 src=\"https://cdn.steamstatic.com/apps/730/icons/econ/stickers/tournament_assets/de_dust2_gold.30c34e3f11c40cf4f44c0577e01f2a9446feb88f.png\" title=\"Sticker: Dust II (Gold)\"><br>Sticker: Dust II (Gold)</center></div>",
+       "name": "sticker_info"
+      },
+      {
+       "type": "html",
+       "value": "<br><div id=\"keychain_info\" class=\"keychain_info\" style=\"border: 2px solid rgb(102, 102, 102); border-radius: 6px; width=100; margin:4px; padding:8px;\"><center><img width=64 height=48 src=\"https://cdn.steamstatic.com/apps/730/icons/econ/stickers/halo/noble_holo_1355_37.1a0c5a26c6c229ce5e2951b5477826968fa3df6c.png\" title=\"Sticker Slab: Noble (Holo)\"><br>Sticker Slab: Noble (Holo)</center></div>",
+       "name": "keychain_info"
+      }
+     ],
+     "tradable": true,
+     "actions": [
+      {
+       "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+       "name": "Inspect in Game..."
+      }
+     ],
+     "owner_descriptions": [],
+     "owner_actions": [],
+     "fraudwarnings": [],
+     "name": "Souvenir MAC-10 | Case Hardened",
+     "name_color": "8847ff",
+     "type": "Souvenir Restricted SMG",
+     "market_name": "Souvenir MAC-10 | Case Hardened (Field-Tested)",
+     "market_hash_name": "Souvenir MAC-10 | Case Hardened (Field-Tested)",
+     "market_actions": [
+      {
+       "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+       "name": "Inspect in Game..."
+      }
+     ],
+     "commodity": false,
+     "market_tradable_restriction": 7,
+     "market_marketable_restriction": 7,
+     "marketable": true,
+     "tags": [],
+     "sealed": false,
+     "market_bucket_group_name": "MAC-10 | Case Hardened",
+     "market_bucket_group_id": "G1811202C3004",
+     "sealed_type": 0,
+     "market_name_inside_group": "Souvenir Field-Tested",
+     "market_bucket_id": "1811202C300C38A4E1F5F503"
+    },
+    "bMine": false,
+    "unSteamFee": 730,
+    "unPublisherFee": 1461,
+    "unPricePerUnit": 14613,
+    "unFeePerUnit": 2191,
+    "unSteamFeePerUnit": 730,
+    "unPublisherFeePerUnit": 1461,
+    "asset": {
+     "id": "51347193540",
+     "assetid": "51347193540",
+     "instanceid": "8453497976",
+     "classid": "7993041142",
+     "amount": 1,
+     "appid": 730,
+     "contextid": "2",
+     "asset_properties": [
+      {
+       "propertyid": 1,
+       "int_value": "822"
+      },
+      {
+       "propertyid": 2,
+       "float_value": 0.3289331793785095
+      },
+      {
+       "propertyid": 6,
+       "string_value": "EEFE2A13714A51EFF6FFCEC2C6EADEE2D6003D4F1BEDAE58E88CEBE6EFFE74E386E89EE64CEFF8E6EEFECBD343D4C9AEABB0E7B0D1A30CDDCAAE8E2DCD9858567E"
+      }
+     ],
+     "asset_accessories": [
+      {
+       "classid": "7729073314",
+       "standalone_properties": [],
+       "parent_relationship_properties": [
+        {
+         "propertyid": 4,
+         "float_value": 0
+        }
+       ],
+       "nested_accessories": [],
+       "description": {
+        "appid": 730,
+        "classid": "7729073314",
+        "instanceid": "0",
+        "currency": false,
+        "background_color": "3d293f",
+        "icon_url": "i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjN6uIGmZ5Ftw-pPL60r0RAni0ZLlwiZO_Ob8V6NiLPTdXTeTkrpz4-c4HirnxR4h5zvRzoypdHyQOwYhXJAhTOMOtEbtwNzvYfSiuVKbrTFqgg",
+        "icon_url_large": "",
+        "descriptions": [
+         {
+          "type": "html",
+          "value": "This sticker can be applied to any weapon you own and can be scraped to look more worn. You can scrape the same sticker multiple times, making it a bit more worn each time, until it is removed from the weapon.",
+          "name": "description"
+         },
+         {
+          "type": "html",
+          "value": " ",
+          "name": "blank"
+         }
+        ],
+        "tradable": true,
+        "actions": [
+         {
+          "link": "steam://run/730//+csgo_econ_action_preview%20A3B3A3BB1AAA83A38BA693A7C1A6ABA3B339AECBA3D3A33451E53D",
+          "name": "Inspect in Game..."
+         }
+        ],
+        "owner_descriptions": [],
+        "owner_actions": [],
+        "fraudwarnings": [],
+        "name": "Sticker | Dust II (Gold)",
+        "name_color": "d32ce6",
+        "type": "Exotic Sticker",
+        "market_name": "Sticker | Dust II (Gold)",
+        "market_hash_name": "Sticker | Dust II (Gold)",
+        "market_actions": [
+         {
+          "link": "steam://run/730//+csgo_econ_action_preview%20A3B3A3BB1AAA83A38BA693A7C1A6ABA3B339AECBA3D3A33451E53D",
+          "name": "Inspect in Game..."
+         }
+        ],
+        "commodity": true,
+        "market_tradable_restriction": 7,
+        "market_marketable_restriction": 7,
+        "marketable": true,
+        "tags": [],
+        "sealed": false,
+        "market_bucket_group_name": "Sticker | Dust II (Gold)",
+        "market_bucket_group_id": "G18B909300462050800109A0D",
+        "sealed_type": 0,
+        "market_name_inside_group": "Sticker",
+        "market_bucket_id": "18B909300462050800109A0D"
+       }
+      },
+      {
+       "classid": "7731263422",
+       "standalone_properties": [],
+       "parent_relationship_properties": [],
+       "nested_accessories": [
+        {
+         "classid": "3616878753",
+         "standalone_properties": [],
+         "parent_relationship_properties": [],
+         "nested_accessories": []
+        }
+       ],
+       "description": {
+        "appid": 730,
+        "classid": "7731263422",
+        "instanceid": "0",
+        "currency": false,
+        "background_color": "393b3e",
+        "icon_url": "i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjMKgOXTY61l3-ILL4lbrTiKgzcO1wnEMoaOvOKc4IaLFDTGTk7wvs-Q8SnvqwEwl5mnSzderd3KRZlBxCcYmQ7QU8k7vd5bk_Gs",
+        "icon_url_large": "",
+        "descriptions": [
+         {
+          "type": "html",
+          "value": "The sticker is safely sealed in this slab. You can return the sticker to your inventory at any time by cracking open and discarding this slab.",
+          "name": "description"
+         },
+         {
+          "type": "html",
+          "value": " ",
+          "name": "blank"
+         },
+         {
+          "type": "html",
+          "value": "This charm can be attached to any weapon you own. Each attached charm can be detached by using a Charm Detachment. Detached charms will be returned to your inventory.",
+          "name": "description"
+         },
+         {
+          "type": "html",
+          "value": " ",
+          "name": "blank"
+         }
+        ],
+        "tradable": true,
+        "actions": [
+         {
+          "link": "steam://run/730//+csgo_econ_action_preview%20A3B3A3BB68A983A38BA293ABCBA3D3A301A2A4ABA3B386C3608011A171A3",
+          "name": "Inspect in Game..."
+         }
+        ],
+        "owner_descriptions": [],
+        "owner_actions": [],
+        "fraudwarnings": [],
+        "name": "Sticker Slab | Noble (Holo)",
+        "name_color": "b0c3d9",
+        "type": "Customized Base Grade Charm",
+        "market_name": "Sticker Slab | Noble (Holo)",
+        "market_hash_name": "Sticker Slab | Noble (Holo)",
+        "market_actions": [
+         {
+          "link": "steam://run/730//+csgo_econ_action_preview%20A3B3A3BB68A983A38BA293ABCBA3D3A301A2A4ABA3B386C3608011A171A3",
+          "name": "Inspect in Game..."
+         }
+        ],
+        "commodity": true,
+        "market_tradable_restriction": 7,
+        "market_marketable_restriction": 7,
+        "marketable": true,
+        "tags": [],
+        "sealed": false,
+        "market_bucket_group_name": "Sticker | Noble (Holo)",
+        "market_bucket_group_id": "G18B90930046205080010C323",
+        "sealed_type": 0,
+        "market_name_inside_group": "Sticker Slab",
+        "market_bucket_id": "18CB0A3008A201070800102560C323"
+       }
+      }
+     ]
+    }
+   }
+  ]
+ }
+}

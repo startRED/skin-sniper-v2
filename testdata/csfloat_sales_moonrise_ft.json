@@ -1,0 +1,636 @@
+[
+ {
+  "id": "x",
+  "created_at": "2026-11-03T19:38:15.673404Z",
+  "type": "buy_now",
+  "price": 74,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T19:37:40.584295Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 529,
+   "float_value": 0.1846812665462494,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010D5E0F185C401180420B605280430043896BAF4F103409104F1D540E8"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T19:38:15.684938Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-03T07:29:10.084271Z",
+  "type": "buy_now",
+  "price": 83,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T13:26:48.719083Z",
+   "sticker_overpay": {
+    "total_price": 33
+   }
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 99,
+   "float_value": 0.1546105593442917,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "stickers": [
+    {
+     "stickerId": 4509,
+     "slot": 3,
+     "icon_url": "https://steamcdn-a.akamaihd.net/apps/730/icons/econ/stickers/shattered_web/web_stuck.b38877d5848b0126c2bf8f022a2dfe17fa0fd4ba.png",
+     "name": "Sticker | Web Stuck",
+     "reference": {
+      "price": 33,
+      "quantity": 289,
+      "updated_at": "2026-11-03T01:13:35.586196Z"
+     }
+    }
+   ],
+   "tradable": 0,
+   "cs2_screenshot_id": "1938434675666400913",
+   "cs2_screenshot_at": "2026-11-03T07:29:52.086642Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010BCC5E4ABCA01180420B6052804300438BBA4F9F0034063620A0803109D231D00000000D8061C58"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T19:12:16.879174Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-01T12:07:35.577898Z",
+  "type": "buy_now",
+  "price": 72,
+  "state": "sold",
+  "reference": {
+   "base_price": 70,
+   "float_factor": 1,
+   "predicted_price": 70,
+   "quantity": 1320,
+   "last_updated": "2026-11-01T12:04:22.236394Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 329,
+   "float_value": 0.2355644702911377,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "cs2_screenshot_id": "8612294145704887980",
+   "cs2_screenshot_at": "2026-11-01T12:08:00.073345Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%20001092F49398C501180420B6052804300438D0EFC4F30340C9022D0CE168"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T18:55:06.292894Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-03T12:17:56.871638Z",
+  "type": "buy_now",
+  "price": 75,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T18:16:21.424663Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 29,
+   "float_value": 0.17789356410503387,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "cs2_screenshot_id": "8678300437872651761",
+   "cs2_screenshot_at": "2026-11-03T12:18:47.860437Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%20001094C88ECC7F180420B6052804300438BBD3D8F103401DAA1B3126"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T18:31:12.865619Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-03T13:48:26.140671Z",
+  "type": "buy_now",
+  "price": 75,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T13:46:19.901472Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 391,
+   "float_value": 0.16282621026039124,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "cs2_screenshot_id": "440658350401705117",
+   "cs2_screenshot_at": "2026-11-03T13:49:06.636891Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010D7F0F1ADCA01180420B6052804300438EAF79AF103408703B6FD2EF8"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T18:29:03.435388Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-10-06T18:03:34.829571Z",
+  "type": "buy_now",
+  "price": 437,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T12:27:07.714699Z",
+   "sticker_overpay": {
+    "total_price": 529,
+    "predicted_price": 53,
+    "lower_sigma": 0.0044473,
+    "lower_half_sigma": 0.041734,
+    "upper_half_sigma": 0.157651,
+    "upper_sigma": 0.248738
+   }
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 924,
+   "float_value": 0.21890802681446075,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "stickers": [
+    {
+     "stickerId": 11725,
+     "slot": 3,
+     "offset_x": 0.08135337,
+     "offset_y": -0.27212754,
+     "rotation": -18,
+     "icon_url": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjMmuOXSQ61MnpNWipUruRiL2n5Dv8S1k_fOgY61jJ8-bAWufj-p14bNqTn_hlk0h6mTVzNehcXLGZlQiX5J1TOdctBewkoHkNLi271HAy9US_jnAijA",
+     "name": "Sticker | gafolo (Holo, Ranked) | Cologne 2026",
+     "reference": {
+      "price": 102,
+      "quantity": 10,
+      "updated_at": "2026-11-03T11:16:03.87766Z"
+     }
+    },
+    {
+     "stickerId": 11404,
+     "slot": 2,
+     "offset_x": 0.31078443,
+     "offset_y": -0.06253597,
+     "icon_url": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjMmuOXSQ61MnpNWipUruRiLzm5rj9S1V4PmlV7ZsLvuaAGCvyeF6v687GH_hxk5y5DiGn4n4c36WOwJyDZpwTOUI5xK5xtDlN-zk5FbciIhM02yg2TVDoInm",
+     "name": "Sticker | BELCHONOKK (Holo, Ranked) | Cologne 2026",
+     "reference": {
+      "price": 110,
+      "quantity": 2,
+      "updated_at": "2026-11-03T12:16:21.23586Z"
+     }
+    },
+    {
+     "stickerId": 11806,
+     "slot": 2,
+     "offset_x": 0.15797067,
+     "offset_y": -0.06231439,
+     "icon_url": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjMmuOXSQ61MnpNWipUruRiLnm47p6Sdk_fOgY61jJ8-bAWufj7sv57kwF3rnkRx14W7Syon4I36SbVclDZUjTOIP5ka-l4LlN7mxslPAy9UStcD9jhk",
+     "name": "Sticker | vexite (Holo, Ranked) | Cologne 2026",
+     "reference": {
+      "price": 103,
+      "quantity": 38,
+      "updated_at": "2026-11-03T02:13:48.636069Z"
+     }
+    },
+    {
+     "stickerId": 11404,
+     "slot": 3,
+     "offset_x": -0.3762142,
+     "offset_y": -0.2714085,
+     "rotation": -18,
+     "icon_url": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjMmuOXSQ61MnpNWipUruRiLzm5rj9S1V4PmlV7ZsLvuaAGCvyeF6v687GH_hxk5y5DiGn4n4c36WOwJyDZpwTOUI5xK5xtDlN-zk5FbciIhM02yg2TVDoInm",
+     "name": "Sticker | BELCHONOKK (Holo, Ranked) | Cologne 2026",
+     "reference": {
+      "price": 110,
+      "quantity": 2,
+      "updated_at": "2026-11-03T12:16:21.23586Z"
+     }
+    },
+    {
+     "stickerId": 11725,
+     "slot": 1,
+     "offset_x": -0.33307773,
+     "offset_y": -0.071738735,
+     "icon_url": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjMmuOXSQ61MnpNWipUruRiL2n5Dv8S1k_fOgY61jJ8-bAWufj-p14bNqTn_hlk0h6mTVzNehcXLGZlQiX5J1TOdctBewkoHkNLi271HAy9US_jnAijA",
+     "name": "Sticker | gafolo (Holo, Ranked) | Cologne 2026",
+     "reference": {
+      "price": 102,
+      "quantity": 10,
+      "updated_at": "2026-11-03T11:16:03.87766Z"
+     }
+    }
+   ],
+   "tradable": 0,
+   "cs2_screenshot_id": "4648868046040426734",
+   "cs2_screenshot_at": "2026-10-06T18:04:07.423267Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%20001091C5E887C901180420B6052804300438EDD280F303409C076219080310CD5B1D000000002D000090C13D989CA63D454D548BBE62140802108C591D000000003D231F9F3E45DC1280BD62140802109E5C1D000000003D10C3213E45603D7FBD62190803108C591D000000002D000090C13D269FC0BE450EF68ABE6214080110CD5B1D000000003D2A89AABE45C2EB92BDDAC88070"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 4,
+  "sold_at": "2026-11-03T18:18:15.322639Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-03T09:57:16.245722Z",
+  "type": "buy_now",
+  "price": 73,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T15:52:24.831837Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 755,
+   "float_value": 0.3398679792881012,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "cs2_screenshot_id": "4251224812504127877",
+   "cs2_screenshot_at": "2026-11-03T09:57:32.945392Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010888FA0B3B001180420B6052804300438AD86B8F50340F3056112BDB8"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T17:10:42.282378Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-03T15:41:26.394765Z",
+  "type": "buy_now",
+  "price": 73,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T15:41:26.391601Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 95,
+   "float_value": 0.32180649042129517,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010EE8DA3B0CA01180420B6052804300438D28793F503405FACE25227"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T15:41:26.404285Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-03T14:12:04.231501Z",
+  "type": "buy_now",
+  "price": 73,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T14:10:36.960952Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 322,
+   "float_value": 0.17276771366596222,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "cs2_screenshot_id": "5737700018673935967",
+   "cs2_screenshot_at": "2026-11-03T14:13:25.045626Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010DBE9DBEBC901180420B605280430043885D4C3F10340C2022E5038B8"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T14:33:58.882478Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-04-23T17:43:33.529827Z",
+  "type": "buy_now",
+  "price": 111,
+  "description": "Back star pattern ",
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T09:12:40.415552Z",
+   "sticker_overpay": {}
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 281,
+   "float_value": 0.2850208282470703,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "tradable": 0,
+   "cs2_screenshot_id": "6288569222452409020",
+   "cs2_screenshot_at": "2026-04-23T17:48:21.681441Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%2000108DFCB6AEBE01180420B6052804300438C0DCC7F40340990206C063A0"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 3,
+  "sold_at": "2026-11-03T14:22:30.184293Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-10-31T12:42:48.375096Z",
+  "type": "auction",
+  "price": 74,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T06:43:19.030955Z",
+   "sticker_overpay": {
+    "total_price": 1
+   }
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 994,
+   "float_value": 0.16759862005710602,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "stickers": [
+    {
+     "stickerId": 7205,
+     "slot": 3,
+     "wear": 1,
+     "icon_url": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjNqgJ3KEtwYnp8jn417YUhahjNi0qnAJvaD2MPFrePaSVjKTwLYl4Lc7HnGxw04h4m3Uz9r7dXueZwVyFNIuEnuhyno9",
+     "name": "Sticker | sk0R | Paris 2023",
+     "reference": {
+      "price": 1,
+      "quantity": 1213,
+      "updated_at": "2026-11-03T12:16:23.015239Z"
+     }
+    }
+   ],
+   "tradable": 0,
+   "cs2_screenshot_id": "8256222983230530165",
+   "cs2_screenshot_at": "2026-10-31T12:43:37.653442Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010D0B789E7C801180420B6052804300438F9BDAEF10340E207620A080310A5381D0000803F63A13648"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 5,
+  "auction_details": {
+   "reserve_price": 3,
+   "expires_at": "2026-11-03T12:42:48.371941Z",
+   "min_next_bid": 3
+  },
+  "sold_at": "2026-11-03T12:42:53.406756Z"
+ },
+ {
+  "id": "x",
+  "created_at": "2026-11-03T10:50:47.656057Z",
+  "type": "buy_now",
+  "price": 72,
+  "state": "sold",
+  "reference": {
+   "base_price": 73,
+   "float_factor": 1,
+   "predicted_price": 73,
+   "quantity": 1523,
+   "last_updated": "2026-11-03T10:50:23.873304Z",
+   "sticker_overpay": {
+    "total_price": 12
+   }
+  },
+  "item": {
+   "def_index": 4,
+   "paint_index": 694,
+   "paint_seed": 73,
+   "float_value": 0.19126954674720764,
+   "is_stattrak": false,
+   "is_souvenir": false,
+   "rarity": 4,
+   "quality": 4,
+   "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+   "stickers": [
+    {
+     "stickerId": 7893,
+     "slot": 4,
+     "wear": 0.58,
+     "offset_x": -0.51295954,
+     "offset_y": -0.050388545,
+     "rotation": -54,
+     "icon_url": "https://steamcdn-a.akamaihd.net/apps/730/icons/econ/stickers/community/elemental_craft/paper_explosion_three.271978c025ccc5a230608668f47cf25a4751260e.png",
+     "name": "Sticker | Boom Epicenter",
+     "reference": {
+      "price": 2,
+      "quantity": 1962,
+      "updated_at": "2026-11-03T09:15:33.379186Z"
+     }
+    },
+    {
+     "stickerId": 5257,
+     "slot": 3,
+     "offset_x": 0.036080897,
+     "offset_y": -0.21061778,
+     "rotation": 12,
+     "icon_url": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJai0ki7VeTHjNmxJ3KZ4gQlptW7-UjyRBz6h6nk8i1J0OKveKF_bqOSWDbGw-xy4rBrGy_gkBghtznTzdj7eC6TOldzC5V4FOMPsxnrm9D5d7S1BeOncW8",
+     "name": "Sticker | Squeaky Door",
+     "reference": {
+      "price": 11,
+      "quantity": 14,
+      "updated_at": "2026-11-03T10:15:50.592164Z"
+     }
+    }
+   ],
+   "tradable": 0,
+   "cs2_screenshot_id": "7425191052723431399",
+   "cs2_screenshot_at": "2026-11-03T10:51:12.136617Z",
+   "is_commodity": false,
+   "type": "skin",
+   "rarity_name": "Restricted",
+   "type_name": "Skin",
+   "item_name": "Glock-18 | Moonrise",
+   "wear_name": "Field-Tested",
+   "collection": "The Clutch Collection",
+   "serialized_inspect": "steam://rungame/730/76561202255233023/+csgo_econ_action_preview%200010FC93EAAECA01180420B6052804300438AAB88FF20340496219080410D53D1DE17A143F2D000058C23D515103BF4538644EBD621908031089291D000000002D000040413D90C9133D4530AC57BE82A088D3"
+  },
+  "is_seller": false,
+  "is_watchlisted": false,
+  "watchers": 0,
+  "sold_at": "2026-11-03T12:02:08.281196Z"
+ }
+]
