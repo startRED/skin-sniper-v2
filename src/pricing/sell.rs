@@ -156,6 +156,15 @@ impl fmt::Display for NoEstimate {
     }
 }
 
+/// Multiplica o histórico pelo fator das vendas reais (`< 1` desconta; `1` deixa intacto).
+pub fn discount(points: &mut [PricePoint], factor: f64) {
+    if factor < 1.0 {
+        for p in points {
+            p.median_cents = (p.median_cents as f64 * factor).floor() as i64;
+        }
+    }
+}
+
 /// Quantil ponderado, **sem interpolação**. Ordena os pares `(valor, peso)` por valor; o quantil `q` é o
 /// primeiro valor cujo peso acumulado chega a `q × peso_total`. Com pesos inteiros isso é o mesmo que
 /// "peso acumulado ≥ ceil(q × total)" de docs/conhecimento.md 5.2. Devolve sempre um valor observado.

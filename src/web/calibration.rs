@@ -1,8 +1,9 @@
-//! Registro manual e números observados; a precificação ainda não usa estes dados.
+//! Registro manual e números observados; com 5 vendas de um tipo, `correction` desconta a precificação.
 
 use super::AppState;
 use super::api::{ApiError, Kind, Opportunity, Purchase, PurchaseStatus};
-use crate::db::now_unix;
+use crate::db::{Db, now_unix};
+use crate::pricing::sell::weighted_quantile;
 use axum::{
     Json,
     extract::{Path, State},
@@ -67,6 +68,11 @@ pub async fn sold(
             "A skin ainda não está liberada para venda.",
         )),
         Some(Ok(p)) => {
+            if let Some(rt) = &app.rt
+                && let Err(e) = rt.hunt.refresh_correction().await
+            {
+                tracing::warn!("fator das vendas reais não atualizou: {e:#}");
+            }
             let _ = app.events.send(super::api::Event::Purchase(p.clone()));
             Ok(Json(p))
         }
@@ -93,30 +99,82 @@ struct Hour {
     opportunities: i64,
 }
 
+/// Venda registrada: nome, tipo, preço médio previsto e o vendido (centavos, ambos > 0).
+pub(crate) struct Sale {
+    name: String,
+    kind: Kind,
+    predicted: i64,
+    sold: i64,
+}
+
+/// Vendas registradas, da mais nova à mais antiga (última venda informada de cada compra).
+fn load_sales(c: &rusqlite::Connection) -> rusqlite::Result<Vec<Sale>> {
+    let rows = c.prepare("SELECT p.json, o.sold_cents, (SELECT json FROM opportunities WHERE id = p.id) FROM purchases p JOIN outcomes o ON o.rowid = (SELECT rowid FROM outcomes WHERE purchase_id = p.id ORDER BY rowid DESC LIMIT 1) ORDER BY o.sold_at DESC, o.rowid DESC")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(json, sold, opportunity)| {
+            let p = serde_json::from_str::<Purchase>(&json).ok()?;
+            let kind = p.kind.or_else(|| {
+                opportunity
+                    .and_then(|j| serde_json::from_str::<Opportunity>(&j).ok())
+                    .map(|o| o.kind)
+            })?;
+            let predicted = p.sell.mid.price_cents;
+            (predicted > 0 && sold > 0).then_some(Sale {
+                name: p.name,
+                kind,
+                predicted,
+                sold,
+            })
+        })
+        .collect())
+}
+
+const CORRECTION_MIN_SALES: usize = 5;
+const CORRECTION_RECENT: usize = 30;
+/// Corrige no máximo 20 % para baixo: mais que isso é sinal de outro problema, não de viés.
+const CORRECTION_FLOOR: f64 = 0.8;
+
+/// Fator por tipo, `[desconto, raro]`, que multiplica o histórico antes de estimar a venda: mediana de
+/// vendido ÷ previsto nas 30 vendas mais recentes do tipo. Só desconta (nunca promete mais que o
+/// mercado) e só com 5 vendas ou mais; senão 1.
+pub(crate) fn correction(sales: &[Sale]) -> [f64; 2] {
+    let of = |kind: Kind| {
+        let ratios: Vec<(f64, f64)> = sales
+            .iter()
+            .filter(|s| s.kind == kind)
+            .take(CORRECTION_RECENT)
+            .map(|s| (s.sold as f64 / s.predicted as f64, 1.0))
+            .collect();
+        if ratios.len() < CORRECTION_MIN_SALES {
+            return 1.0;
+        }
+        weighted_quantile(&ratios, 0.5).map_or(1.0, |m| m.clamp(CORRECTION_FLOOR, 1.0))
+    };
+    [of(Kind::Desconto), of(Kind::Raro)]
+}
+
+pub(crate) async fn load_correction(db: &Db) -> anyhow::Result<[f64; 2]> {
+    Ok(correction(&db.call(|c| load_sales(c)).await?))
+}
+
 pub async fn get(State(app): State<AppState>) -> Result<Json<Calibration>, ApiError> {
     let since = (now_unix() - 30 * 86_400).div_euclid(3600);
     let (sales, activity) = app.db.call(move |c| {
-        let sales = c.prepare("SELECT p.json, o.sold_cents, (SELECT json FROM opportunities WHERE id = p.id) FROM purchases p JOIN outcomes o ON o.rowid = (SELECT rowid FROM outcomes WHERE purchase_id = p.id ORDER BY rowid DESC LIMIT 1)")?
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let sales = load_sales(c)?;
         let activity = c.prepare("SELECT hour_utc, listings, opportunities FROM hourly_activity WHERE hour_utc >= ?1 AND hour_utc <= ?2")?
             .query_map(params![since, now_unix().div_euclid(3600)], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok((sales, activity))
     }).await?;
     let mut groups: BTreeMap<(String, &'static str), (u64, f64, f64)> = BTreeMap::new();
-    for (json, sold, opportunity) in sales {
-        let Ok(p) = serde_json::from_str::<Purchase>(&json) else {
-            continue;
-        };
-        let kind = p.kind.or_else(|| {
-            opportunity
-                .and_then(|j| serde_json::from_str::<Opportunity>(&j).ok())
-                .map(|o| o.kind)
-        });
-        let Some(kind) = kind else { continue };
-        let predicted = p.sell.mid.price_cents;
-        if predicted <= 0 || sold <= 0 {
-            continue;
-        }
+    for Sale {
+        name,
+        kind,
+        predicted,
+        sold,
+    } in sales
+    {
         let family = [
             " (Factory New)",
             " (Minimal Wear)",
@@ -125,8 +183,8 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Calibration>, ApiEr
             " (Battle-Scarred)",
         ]
         .iter()
-        .find_map(|suffix| p.name.strip_suffix(suffix))
-        .unwrap_or(&p.name)
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(&name)
         .to_string();
         let key = (
             family,
@@ -176,6 +234,28 @@ fn sao_paulo_hour(hour: i64) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn correction_needs_five_sales_and_only_discounts() {
+        let sale = |kind, sold| Sale {
+            name: "X".into(),
+            kind,
+            predicted: 1000,
+            sold,
+        };
+        let four: Vec<_> = (0..4).map(|_| sale(Kind::Desconto, 500)).collect();
+        assert_eq!(correction(&four), [1.0, 1.0]);
+        let mut five: Vec<_> = [900, 950, 920, 2000, 100]
+            .into_iter()
+            .map(|s| sale(Kind::Desconto, s))
+            .collect();
+        assert_eq!(correction(&five)[0], 0.92); // mediana: um outlier de cada lado não move
+        assert_eq!(correction(&five)[1], 1.0); // raro tem fator próprio
+        five.iter_mut().for_each(|s| s.sold = 500);
+        assert_eq!(correction(&five)[0], CORRECTION_FLOOR);
+        five.iter_mut().for_each(|s| s.sold = 1500);
+        assert_eq!(correction(&five)[0], 1.0); // vender acima do previsto não sobe a previsão
+    }
 
     #[test]
     fn sao_paulo_respects_historical_summer_time() {

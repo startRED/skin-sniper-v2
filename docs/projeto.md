@@ -206,6 +206,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   anúncios são os novos vistos nas páginas consultadas, mesmo acima do saldo; oportunidades são novas entradas
   na lista. IDs sem observação há 3 dias são esquecidos e podem ser contados de novo se reaparecerem. Os registros
   começam na instalação desta versão; não representam todo o mercado nem alteram a agenda.
+- Correção automática: com 5 vendas ou mais de um tipo (desconto ou raro), a mediana de vendido ÷ médio previsto
+  das 30 vendas mais recentes desse tipo multiplica o histórico antes de estimar a venda (painel e caça). Só
+  desconta, no máximo 20 %; vender acima do previsto não sobe a previsão. Recalcula ao subir e a cada venda informada.
 
 ## Compra
 

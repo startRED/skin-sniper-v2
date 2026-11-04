@@ -314,18 +314,26 @@ async fn evaluate_one(
     notify_min: i64,
 ) -> Result<Judged> {
     let now = h.now();
-    let points = points_for(h, &l.name, now).await?;
+    let mut points = points_for(h, &l.name, now).await?;
     let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index);
+    let correction = h.correction(group.is_some());
+    sell::discount(&mut points, correction);
     let rare = match &group {
         Some(g) => Some(rare_evidence(h, &l.name, &g.key).await),
         None => None,
     };
-    let Ok(est) = sell::estimate(&points, now, others_min, rare) else {
+    let Ok(mut est) = sell::estimate(&points, now, others_min, rare) else {
         return Ok(Judged {
             found: None,
             near: None,
         });
     };
+    if correction < 1.0 {
+        est.evidence += &format!(
+            " · suas vendas saíram {}% abaixo do previsto, já descontado",
+            ((1.0 - correction) * 100.0).round()
+        );
+    }
     let ev = sell::evaluate(l.price_cents, &est, notify_min);
     let near = Some(Near {
         name: l.name.clone(),
