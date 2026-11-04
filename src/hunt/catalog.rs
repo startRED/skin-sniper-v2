@@ -6,7 +6,9 @@
 //! 2. razão BRL/USD medida entre um anúncio em BRL e o preço USD do mesmo item (nunca fixa no código);
 //! 3. `QueryPriceHistory` dos candidatos com piso ≤ saldo (cache de 6 h);
 //! 4. seleção por nota = vendas/dia × lucro possível × (1 + acertos), mais uma consulta de grupo raro por
-//!    skin com tabela × desgaste; raros ficam com metade das consultas. Tudo precisa caber no saldo.
+//!    skin com tabela × desgaste e um braço de float baixo para os melhores comuns. A nota só escolhe quem
+//!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
+//!    caber no saldo.
 //!
 //! shortcut: a varredura cobre `SCAN_ROUNDS` páginas (60 itens) por categoria, não o catálogo inteiro (cada
 //! página custa uma consulta e há milhares); subir se faltarem candidatos para o saldo.
@@ -32,6 +34,8 @@ pub const CATALOG_TTL: i64 = 24 * 3600;
 pub const MIN_SALES_PER_DAY: f64 = 3.0;
 pub const WATCH_MAX: usize = 40;
 pub const RARE_MAX_TASKS: usize = 24;
+/// Quantos dos melhores comuns ganham também um braço de float baixo.
+pub const FLOAT_ARMS: usize = WATCH_MAX / 2;
 /// Rank das entradas vindas da busca por nome de skin com tabela (depois da popularidade); não rebaixa o rank
 /// que a varredura já deu ao item.
 const SKIN_RANK_BASE: i64 = 100_000;
@@ -202,7 +206,7 @@ pub struct Ctx<'a> {
 
 /// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 3 vendas/dia e lucro possível ≥ mínimo, por nota
 /// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela × desgaste cujo piso cabe no saldo (até
-/// `RARE_MAX_TASKS`), com metade do peso das consultas. O piso é o do anúncio visto numa consulta recente;
+/// `RARE_MAX_TASKS`), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
 pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     let ratio_floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, c.ratio));
@@ -237,6 +241,24 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     common.truncate(WATCH_MAX);
     let total: f64 = common.iter().map(|c| c.1.score).sum();
     let mut tasks: Vec<Task> = common.into_iter().map(|c| c.1).collect();
+    // Float baixo: um braço extra para os melhores comuns. Mesmo critério de saldo e de taxa (piso mínimo),
+    // com o piso visto na própria consulta; sem consulta ainda, o piso do desconto serve de triagem.
+    let floats: Vec<Task> = tasks
+        .iter()
+        .filter(|t| t.wear.is_some())
+        .take(FLOAT_ARMS)
+        .filter(|t| {
+            let id = format!("f:{}", t.name);
+            observed(c.floors, &id, c.now)
+                .floor
+                .is_none_or(|f| f <= c.saldo && f >= min_floor)
+        })
+        .map(|t| Task {
+            id: format!("f:{}", t.name),
+            ..t.clone()
+        })
+        .collect();
+    tasks.extend(floats);
 
     // Raros: skin com tabela × desgaste, uma vez só (itens repetidos do catálogo não duplicam).
     let mut by_wear: BTreeMap<(&str, u8), (i64, &str)> = BTreeMap::new();
@@ -281,7 +303,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         .collect();
     rare.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
     rare.truncate(RARE_MAX_TASKS);
-    // Metade das consultas para raros: o peso somado deles iguala o dos comuns.
+    // Nota-base dos raros: soma igual à dos comuns (só desempata braços ainda não testados).
     let per_weight =
         if total > 0.0 { total } else { 10.0 } / rare.iter().map(|r| r.2).sum::<f64>().max(1e-9);
     tasks.extend(rare.into_iter().map(|(_, t, w)| Task {
@@ -720,7 +742,7 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
     let tasks = select(&items, &ctx);
     let (n, removed) = {
         let mut s = h.lock();
-        let removed = s.queue.set_tasks(tasks, &hits, now * 1000);
+        let removed = s.queue.set_tasks(tasks);
         s.selected = Some((saldo, now));
         (s.queue.len(), removed)
     };
@@ -1060,22 +1082,39 @@ mod tests {
     }
 
     #[test]
-    fn rare_tasks_take_half_of_the_queries() {
+    fn every_kind_of_arm_is_selected_and_nothing_is_lost() {
         let (items, saldo) = catalog_fixture();
         let floors = HashMap::new();
         let hit = NO_HITS();
         let tasks = select(&items, &ctx(saldo, &hit, &floors));
-        let mut q = super::super::scheduler::Queue::default();
-        q.set_tasks(tasks, &HashMap::new(), 0);
-        let (mut rare, mut now) = (0, 0);
-        for _ in 0..1200 {
-            let t = q.pick().unwrap();
-            q.done(&t.id, now);
-            rare += i32::from(t.rare());
-            now += 3_000;
+        let n = |p: &str| tasks.iter().filter(|t| t.id.starts_with(p)).count();
+        assert!(n("d:") > 0 && n("r:") > 0 && n("f:") > 0, "{tasks:?}");
+        // cada braço de float é irmão de um de desconto (mesmo nome), com id próprio
+        for f in tasks.iter().filter(|t| t.id.starts_with("f:")) {
+            assert!(tasks.iter().any(|t| t.id == format!("d:{}", f.name)));
         }
-        let share = f64::from(rare) / 1200.0;
-        assert!((0.4..=0.6).contains(&share), "parcela de raros {share}");
+    }
+
+    #[test]
+    fn float_arm_obeys_balance_and_fee_rules() {
+        let items: Vec<Item> = vec![item("S0 (Field-Tested)", 300, 1, 20.0, 0.3)];
+        let hits = NO_HITS();
+        let has_f = |floors: &HashMap<String, (Option<i64>, i64)>, saldo| {
+            select(&items, &ctx(saldo, &hits, floors))
+                .iter()
+                .any(|t| t.id.starts_with("f:"))
+        };
+        let none = HashMap::new();
+        assert!(has_f(&none, 100_000));
+        // o menor float visto custa mais que o saldo: sai (o de desconto, mais barato, continua)
+        let seen = HashMap::from([(
+            "f:S0 (Field-Tested)".to_string(),
+            (Some(5_001), 1_793_769_000),
+        )]);
+        assert!(!has_f(&seen, 5_000));
+        // abaixo do piso em que a taxa ainda deixa lucro: sai
+        let tiny = HashMap::from([("f:S0 (Field-Tested)".to_string(), (Some(50), 1_793_769_000))]);
+        assert!(!has_f(&tiny, 100_000));
     }
 
     #[test]
@@ -1084,12 +1123,18 @@ mod tests {
             .map(|i| item(&format!("S{i} (Field-Tested)"), 300, i, 5.0 + i as f64, 0.3))
             .collect();
         let (floors, hits) = (HashMap::new(), NO_HITS());
-        let tasks = select(&items, &ctx(100_000, &hits, &floors));
+        let commons = |tasks: Vec<Task>| -> Vec<Task> {
+            tasks
+                .into_iter()
+                .filter(|t| t.id.starts_with("d:"))
+                .collect()
+        };
+        let tasks = commons(select(&items, &ctx(100_000, &hits, &floors)));
         assert_eq!(tasks.len(), WATCH_MAX);
         // mais vendas, mais nota; acertos recentes sobem
         assert_eq!(tasks[0].id, "d:S99 (Field-Tested)");
         let hits = HashMap::from([("d:S0 (Field-Tested)".to_string(), 1000)]);
-        let tasks = select(&items, &ctx(100_000, &hits, &floors));
+        let tasks = commons(select(&items, &ctx(100_000, &hits, &floors)));
         assert_eq!(tasks[0].id, "d:S0 (Field-Tested)");
     }
 }

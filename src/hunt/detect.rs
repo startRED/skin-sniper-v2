@@ -2,8 +2,8 @@
 //! no banco e evento SSE; anúncio que sumiu numa nova consulta da mesma tarefa → `gone`.
 //! Docs/projeto.md, "Caça" 4 e "Precificação".
 
-use super::catalog::{HISTORY_TTL, wear_label, window_stats};
-use super::scheduler::Task;
+use super::catalog::{HISTORY_TTL, min_profit, wear_label, window_stats};
+use super::scheduler::{Found, NEAR_WEIGHT, Task};
 use super::{Active, Hunt};
 use crate::notify::{Alert, NotifyError};
 use crate::pricing::groups::group_of;
@@ -120,6 +120,15 @@ pub struct Outcome {
     /// Oportunidades novas e se vale avisar (`notify` da avaliação).
     pub found: Vec<(Opportunity, bool)>,
     pub gone: Vec<String>,
+    /// O que a consulta rendeu à agenda (achados novos e quase-lucros).
+    pub rewarded: Found,
+}
+
+/// Quase lucro: não entrou na lista, mas faltou pouco — até R$ 0,30 ou 10 % do preço, o que for maior.
+fn near_credit(n: &Near) -> Option<f64> {
+    let need = min_profit(n.price_cents);
+    let short = need - n.mid_cents;
+    (short > 0 && short <= 30.max(n.price_cents / 10)).then_some(NEAR_WEIGHT * need as f64)
 }
 
 /// Baixa `QueryPriceHistory` do nome e grava em `price_points` e em `items` (vendas/dia, dispersão).
@@ -491,6 +500,15 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         };
         let hist_now = history_at(h, &l.name).await?.unwrap_or(0);
         {
+            if let Some(c) = judged
+                .near
+                .as_ref()
+                .and_then(near_credit)
+                .filter(|_| judged.found.is_none())
+            {
+                out.rewarded.near_hits += 1;
+                out.rewarded.near_credit += c;
+            }
             let mut s = h.lock();
             if s.evaluated.len() >= EVALUATED_MAX {
                 s.evaluated.clear();
@@ -511,7 +529,11 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                         continue;
                     }
                 }
-                store_opportunity(h, task, l, &opp, fresh).await?;
+                store_opportunity(h, task, l, &opp).await?;
+                if fresh {
+                    out.rewarded.finds += 1;
+                    out.rewarded.gain_cents += opp.sell.mid.profit_cents;
+                }
                 out.found.push((opp, fresh && notify));
             }
             (None, Some(_)) => out
@@ -565,13 +587,7 @@ async fn store_seen(h: &Hunt, seen: &[&Listing], now: i64) -> Result<()> {
 }
 
 /// Guarda a oportunidade e o anúncio inteiro (a compra refaz o pedido a partir dele) e publica o evento.
-async fn store_opportunity(
-    h: &Hunt,
-    task: &Task,
-    l: &Listing,
-    opp: &Opportunity,
-    fresh: bool,
-) -> Result<()> {
+async fn store_opportunity(h: &Hunt, task: &Task, l: &Listing, opp: &Opportunity) -> Result<()> {
     let (id, json, lj, tid) = (
         opp.id.clone(),
         serde_json::to_string(opp)?,
@@ -601,9 +617,6 @@ async fn store_opportunity(
                 task: task.id.clone(),
             },
         );
-        if fresh {
-            s.queue.add_hit(&task.id);
-        }
     }
     let _ = h.events.send(Event::Opportunity(opp.clone()));
     Ok(())

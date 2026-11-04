@@ -24,9 +24,12 @@ type Facts = (String, String, f64, Vec<PricePoint>);
 
 pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
     let now = h.now();
-    let (tasks, floors) = {
+    let (tasks, floors, learned) = {
         let s = h.lock();
-        (s.queue.tasks(), s.floors.clone())
+        let tasks = s.queue.tasks();
+        let learned: Vec<(f64, String)> =
+            tasks.iter().map(|t| s.queue.describe(&t.id, now)).collect();
+        (tasks, s.floors.clone(), learned)
     };
     let names: Vec<String> = tasks.iter().map(|t| t.name.clone()).collect();
     let facts: Vec<Option<Facts>> =
@@ -67,7 +70,8 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
     let mut rows: Vec<WatchRow> = tasks
         .iter()
         .zip(facts)
-        .map(|(t, f)| {
+        .zip(learned)
+        .map(|((t, f), (score, reason))| {
             let seen = catalog::observed(&floors, &t.id, now);
             let (floor, at) = (seen.floor, seen.at);
             let rare = t.rare();
@@ -103,6 +107,9 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
                 kind: if rare { Kind::Raro } else { Kind::Desconto },
                 group: group.map(|g| g.label),
                 last_checked_at: at,
+                mode: t.mode().label().to_string(),
+                score,
+                reason,
             }
         })
         .collect();
