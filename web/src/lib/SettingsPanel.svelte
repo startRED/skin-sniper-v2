@@ -55,7 +55,9 @@
       }
       stateBeforeDone = app.state;
       account = result.account ?? '';
-      qrError = result.detail ?? '';
+      qrError = result.detail?.includes('salvar')
+        ? 'Não consegui salvar o login. Tente de novo.'
+        : 'A Steam não confirmou o login. Tente de novo.';
       phase = result.state;
       if (phase === 'done') void load();
     } catch {
