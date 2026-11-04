@@ -1,7 +1,7 @@
 //! HTTP único da Steam: cookie trocável, limitador global adaptativo e breaker por endpoint.
 //!
-//! Ritmo (docs/projeto.md, "Caça → Ritmo"): começa em 1 consulta a cada 3 s; cada 30 min sem 429 encurta
-//! 5 % (piso 1,5 s); um 429 pausa 60 s (dobrando até 10 min) e alonga o intervalo em 50 %.
+//! Ritmo (docs/projeto.md, "Caça → Ritmo"): começa em 1 consulta a cada 6 s (também o piso); cada 30 min sem
+//! 429 encurta 5 %; um 429 pausa 60 s (dobrando até 10 min) e alonga o intervalo em 50 %.
 //! O limitador é um só para todos os endpoints; os breakers são um por endpoint (conhecimento 2): falhas
 //! repetidas que não são 429 (5xx, rede) abrem só o breaker daquele endpoint.
 #![allow(dead_code)]
@@ -406,9 +406,10 @@ impl SteamClient {
 
     /// Guarda os `Set-Cookie` de uma resposta autenticada, menos o login e o `sessionid` (esses mandam
     /// em outro lugar). Cookie apagado (`Max-Age=0` ou valor vazio) sai do jar. Teto de 16 nomes.
-    fn keep_cookies(&self, set_cookie: &[String]) {
+    fn keep_cookies(&self, set_cookie: &[String], sent_by: Option<&str>) {
         let mut g = self.inner.lock().unwrap();
-        if g.cookie.is_none() {
+        if sent_by.is_none() || g.cookie.as_ref().map(|c| c.steam_login_secure.as_str()) != sent_by
+        {
             return;
         }
         for line in set_cookie {
@@ -629,9 +630,12 @@ impl SteamClient {
                 Some(w) => tokio::time::sleep(w).await,
             }
         }
+        // Sessão que mandou a consulta: cookies da resposta só valem para ela (o login pode mudar no meio).
+        let mut sent_by: Option<String> = None;
         if auth {
             let g = self.inner.lock().unwrap();
             if let Some(c) = &g.cookie {
+                sent_by = Some(c.steam_login_secure.clone());
                 let mut h = c.header();
                 for (k, v) in &g.extra {
                     h.push_str(&format!("; {k}={v}"));
@@ -661,7 +665,7 @@ impl SteamClient {
                 .iter()
                 .filter_map(|v| v.to_str().ok().map(str::to_string))
                 .collect();
-            self.keep_cookies(&set);
+            self.keep_cookies(&set, sent_by.as_deref());
         }
         let eresult = resp
             .headers()
@@ -1087,6 +1091,25 @@ mod tests {
             sessionid: None,
         };
         assert!(!format!("{c:?}").contains("segredo"));
+    }
+
+    #[test]
+    fn response_cookies_only_for_the_session_that_sent() {
+        let c = SteamClient::new().unwrap();
+        let login = |s: &str| {
+            c.set_cookie(Some(Cookie {
+                steam_login_secure: s.into(),
+                sessionid: None,
+            }))
+        };
+        let extra = |c: &SteamClient| c.inner.lock().unwrap().extra.clone();
+        login("a");
+        c.keep_cookies(&["webTradeEligibility=1; Path=/".into()], Some("a"));
+        assert_eq!(extra(&c), [("webTradeEligibility".into(), "1".into())]);
+        login("b"); // login trocou com a consulta de A em voo
+        c.keep_cookies(&["browserid=9".into()], Some("a"));
+        c.keep_cookies(&["browserid=8".into()], None);
+        assert!(extra(&c).iter().all(|(k, _)| k != "browserid"));
     }
 
     // gap de 100 ms para os testes de rede não dormirem 3 s por consulta

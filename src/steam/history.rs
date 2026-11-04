@@ -13,7 +13,7 @@ pub struct PricePoint {
     pub purchases: u32,
 }
 
-/// Histórico da skin comum do nome (sem login). Mede o preço da skin, nunca o prêmio de um exemplar raro.
+/// Histórico da skin comum do nome (logado quando há cookie; funciona sem). Mede o preço da skin, nunca o prêmio de um exemplar raro.
 pub async fn fetch_history(c: &SteamClient, market_hash_name: &str) -> Result<Vec<PricePoint>> {
     let data = c
         .action(
