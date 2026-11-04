@@ -734,6 +734,11 @@ impl SteamClient {
                 // 429 de uma sessão que já saiu não marca a conta nova.
                 let current = g.cookie.as_ref().map(|c| c.steam_login_secure.as_str());
                 if current == sent_by.as_deref() {
+                    // O intervalo longo veio dos 429 da conta; sem login a cota é outra e começa da base. Se o IP
+                    // também estiver segurando, o 1º 429 sem login volta a alongar.
+                    if g.anon_reads_until.is_none_or(|t| now >= t) {
+                        g.limiter.gap = g.limiter.gap.min(BASE_GAP);
+                    }
                     g.anon_reads_until = Some(now + ANON_AFTER_429);
                     Self::notify_pace(&mut g, now);
                 }
@@ -1247,6 +1252,28 @@ mod tests {
         let s = c.stats();
         assert!(s.paused_until.is_some());
         assert_eq!(s.gap_ms, 150);
+    }
+
+    #[tokio::test]
+    async fn logged_429_resets_long_gap_to_base() {
+        let app = Router::new().route(
+            "/market/actions",
+            get(|| async { (AxStatus::TOO_MANY_REQUESTS, String::new()) }),
+        );
+        let base = serve(app).await;
+        let c = SteamClient::with_base(&base).unwrap();
+        c.set_cookie(Some(Cookie {
+            steam_login_secure: "x".into(),
+            sessionid: None,
+        }));
+        c.inner.lock().unwrap().limiter.gap = MAX_GAP; // alongado pelos 429 da conta
+        let e = c
+            .action(Endpoint::Listings, "Q", &serde_json::json!([1]))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::RateLimited { .. }));
+        let s = c.stats();
+        assert_eq!((s.paused_until, s.gap_ms), (None, 6000));
     }
 
     #[test]
