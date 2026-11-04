@@ -25,9 +25,10 @@ fn to_sse(ev: Event) -> Option<sse::Event> {
 pub async fn events(
     State(app): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<sse::Event, Infallible>>> {
-    // Receptor lento perde eventos (Lagged) em vez de travar quem publica; o painel relê via GET.
+    // Lagged encerra o stream: o EventSource reconecta e o painel recarrega tudo, em vez de perder gone/purchase.
     let stream = BroadcastStream::new(app.events.subscribe())
-        .filter_map(|ev| ev.ok().and_then(to_sse))
+        .map_while(|ev| ev.ok())
+        .filter_map(to_sse)
         .map(Ok);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }

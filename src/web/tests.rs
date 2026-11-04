@@ -301,3 +301,21 @@ async fn sse_delivers_published_event() {
     );
     publisher.await.unwrap();
 }
+
+#[tokio::test]
+async fn sse_closes_when_client_lags() {
+    let s = start().await;
+    let mut r = s.get("/api/events").send().await.unwrap();
+    // Espera o handler assinar, depois estoura a capacidade (256) sem ninguém ler.
+    while s.app.events.receiver_count() == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    for i in 0..1000 {
+        let _ = s.app.events.send(Event::Gone { id: i.to_string() });
+    }
+    let end = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while r.chunk().await.ok().flatten().is_some() {}
+    })
+    .await;
+    assert!(end.is_ok(), "stream deveria encerrar após Lagged");
+}

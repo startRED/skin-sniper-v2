@@ -21,7 +21,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 const LOG_MAX: u64 = 5 * 1024 * 1024;
-const LOG_KEEP: u32 = 3; // sniper.log, sniper.log.1, sniper.log.2
+const LOG_KEEP: u32 = 3; // sniper.log, sniper.log.1, sniper.log.2 (archive() assume 3)
+const LOG_RETRY_BYTES: u64 = 256 * 1024; // após falha de rotação, só tenta de novo depois disso
 
 /// Arquivo de log com rotação por tamanho, sem crate: 5 MB × 3.
 #[derive(Clone)]
@@ -31,6 +32,7 @@ struct LogInner {
     path: PathBuf,
     file: Option<std::fs::File>,
     size: u64,
+    retry_at: u64,
 }
 
 impl RotatingLog {
@@ -44,6 +46,7 @@ impl RotatingLog {
             path,
             file: Some(file),
             size,
+            retry_at: 0,
         }))))
     }
 }
@@ -55,22 +58,49 @@ impl LogInner {
         s.into()
     }
 
+    /// Arquiva o log atual em `.1`. Se algo falhar, o log atual segue intacto e em uso.
     fn rotate(&mut self) -> io::Result<()> {
         self.file = None; // o Windows não renomeia arquivo aberto
-        for n in (1..LOG_KEEP - 1).rev() {
-            let _ = std::fs::rename(self.suffixed(n), self.suffixed(n + 1)); // sobrescreve o mais velho
+        let archived = self.archive();
+        if let Err(e) = &archived {
+            // Reabre o atual e adia a próxima tentativa, para não renomear a cada linha.
+            self.retry_at = self.size + LOG_RETRY_BYTES;
+            tracing_fallback(e);
         }
-        let _ = std::fs::rename(&self.path, self.suffixed(1));
-        self.file = Some(std::fs::File::create(&self.path)?);
-        self.size = 0;
+        let reopen = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path);
+        self.file = Some(reopen?);
+        if archived.is_ok() {
+            self.size = 0;
+        }
         Ok(())
     }
+
+    fn archive(&self) -> io::Result<()> {
+        let (older, newer) = (self.suffixed(2), self.suffixed(1));
+        // Só o histórico que não existe é ignorado; qualquer outro erro aborta antes de tocar no atual.
+        if newer.exists() {
+            match std::fs::remove_file(&older) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            std::fs::rename(&newer, &older)?;
+        }
+        std::fs::rename(&self.path, &newer)
+    }
+}
+
+/// O log em si está quebrado; o aviso vai para o stderr.
+fn tracing_fallback(e: &io::Error) {
+    eprintln!("rotação do log falhou, seguindo no arquivo atual: {e}");
 }
 
 impl Write for RotatingLog {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if g.size + buf.len() as u64 > LOG_MAX {
+        if g.size + buf.len() as u64 > LOG_MAX && g.size >= g.retry_at {
             g.rotate()?;
         }
         let n = g
@@ -160,5 +190,26 @@ mod tests {
         assert!(size(&dir.path().join("sniper.log.1")).is_some());
         assert!(size(&dir.path().join("sniper.log.2")).is_some());
         assert!(size(&dir.path().join("sniper.log.3")).is_none());
+    }
+
+    #[test]
+    fn failed_rotation_keeps_current_log() {
+        let dir = db::tempfile_dir::Dir::new();
+        let path = dir.path().join("sniper.log");
+        let mut log = RotatingLog::open(path.clone()).unwrap();
+        log.write_all(b"antes\n").unwrap();
+        // .1 e .2 viram diretórios não vazios: arquivar .1 em .2 falha.
+        for n in [1, 2] {
+            let d = dir.path().join(format!("sniper.log.{n}"));
+            std::fs::create_dir_all(d.join("x")).unwrap();
+        }
+        let chunk = vec![b'y'; 1024 * 1024];
+        for _ in 0..6 {
+            log.write_all(&chunk).unwrap();
+        }
+        log.write_all(b"depois\n").unwrap();
+        log.flush().unwrap();
+        let text = std::fs::read(&path).unwrap();
+        assert!(text.starts_with(b"antes\n") && text.ends_with(b"depois\n"));
     }
 }
