@@ -529,7 +529,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                         continue;
                     }
                 }
-                store_opportunity(h, task, l, &opp).await?;
+                store_opportunity(h, task, l, &opp, fresh).await?;
                 if fresh {
                     out.rewarded.finds += 1;
                     out.rewarded.gain_cents += opp.sell.mid.profit_cents;
@@ -587,7 +587,13 @@ async fn store_seen(h: &Hunt, seen: &[&Listing], now: i64) -> Result<()> {
 }
 
 /// Guarda a oportunidade e o anúncio inteiro (a compra refaz o pedido a partir dele) e publica o evento.
-async fn store_opportunity(h: &Hunt, task: &Task, l: &Listing, opp: &Opportunity) -> Result<()> {
+async fn store_opportunity(
+    h: &Hunt,
+    task: &Task,
+    l: &Listing,
+    opp: &Opportunity,
+    fresh: bool,
+) -> Result<()> {
     let (id, json, lj, tid) = (
         opp.id.clone(),
         serde_json::to_string(opp)?,
