@@ -108,6 +108,8 @@ Os arquivos rotacionados .1 e .2 não existiam. Nenhuma falha de histórico ness
 parâmetro incorreto ou bloqueio de taxa. Três sondas anônimas espaçadas responderam 200 com
 139379 bytes e anúncios: Moonrise FT, código G180420B6053004, sem filtro de propriedade.
 As duas primeiras omitiram o sort; a terceira reproduziu também sort field=0/direction=0.
+Duas sondas adicionais, também espaçadas: listagens com filtro seed 58–59 (200, 58356 bytes) e
+histórico do mesmo nome (200, 270361 bytes). As cinco consultas esgotaram o limite autorizado.
 Não foi capturado corpo nulo ao vivo. `testdata/steam_actions_null_contract.json` é
 contrato reconstruído do diagnóstico, não captura bruta. Uma página vazia real já tem
 fixture em `steam_actions_karambit_doppler.json` e continua válida.
