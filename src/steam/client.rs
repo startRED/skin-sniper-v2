@@ -1,7 +1,7 @@
 //! HTTP único da Steam: cookie trocável, limitador global adaptativo e breaker por endpoint.
 //!
 //! Ritmo (docs/projeto.md, "Caça → Ritmo"): começa em 1 consulta a cada 6 s (também o piso); cada 10 min sem
-//! 429 encurta 15 %; um 429 pausa 60 s (dobrando até 10 min) e alonga o intervalo em 50 %.
+//! 429 encurta 15 %; um 429 pausa 60 s (dobrando até 30 min) e alonga o intervalo em 50 %.
 //! O limitador é um só para todos os endpoints; os breakers são um por endpoint (conhecimento 2): falhas
 //! repetidas que não são 429 (5xx, rede) abrem só o breaker daquele endpoint.
 #![allow(dead_code)]
@@ -33,10 +33,12 @@ const MAX_GAP: Duration = Duration::from_secs(60);
 const SHORTEN_EVERY: Duration = Duration::from_secs(10 * 60);
 const SHORTEN_FACTOR: f64 = 0.85;
 const PAUSE_START: Duration = Duration::from_secs(60);
-const PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
+// 30 min: em 04/11 a Steam seguiu dando 429 por horas com uma tentativa a cada 10 min; uma consulta depois de
+// minutos quietos passou. Tentar menos deixa a penalidade esfriar.
+const PAUSE_MAX: Duration = Duration::from_secs(30 * 60);
 // O degrau da pausa só volta a 60 s depois de tanto tempo sem 429: uma resposta boa de outro
 // endpoint entre dois 429 não pode zerar a escalada.
-const PAUSE_RESET_AFTER: Duration = Duration::from_secs(30 * 60);
+const PAUSE_RESET_AFTER: Duration = Duration::from_secs(60 * 60); // maior que PAUSE_MAX, senão a escalada zera sozinha
 // Leitura logada levou 429: anúncios e histórico vão sem login por este tempo. Em 04/11 o logado tomou 429
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
 const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
@@ -220,7 +222,7 @@ impl Limiter {
         if self.paused_until.is_some_and(|p| now < p) {
             return;
         }
-        // 30 min sem 429 (mesmo sem nenhuma resposta no meio): a escalada recomeça.
+        // 60 min sem 429 (mesmo sem nenhuma resposta no meio): a escalada recomeça.
         if self
             .last_429
             .is_some_and(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
@@ -235,7 +237,7 @@ impl Limiter {
         self.last_adjust = now;
     }
 
-    /// Resposta que não foi 429: o degrau da pausa volta ao início se o último 429 já tem 30 min.
+    /// Resposta que não foi 429: o degrau da pausa volta ao início se o último 429 já tem 60 min.
     pub(crate) fn on_ok(&mut self, now: Instant) {
         if self
             .last_429
@@ -485,7 +487,7 @@ impl SteamClient {
 
     /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms|fim
     /// das leituras sem login Unix`). Sem pausa ativa, o 1º campo é a hora do último 429: ao subir, a
-    /// escalada só zera 30 min depois dele.
+    /// escalada só zera 60 min depois dele.
     fn saved_pace(g: &mut Inner, now: Instant) -> String {
         let s = g.limiter.stats(now);
         let last_429 = g
@@ -1048,11 +1050,11 @@ mod tests {
         fresh.restore_pace("lixo");
         let s = fresh.stats();
         assert_eq!((s.gap_ms, s.paused_until), (6000, None));
-        // 429 de mais de 30 min atrás: a escalada não volta
+        // 429 de mais de 60 min atrás: a escalada não volta
         let old = SteamClient::new().unwrap();
-        old.restore_pace(&format!("{}|6000|600000", unix_in(Duration::ZERO) - 3600));
+        old.restore_pace(&format!("{}|6000|600000", unix_in(Duration::ZERO) - 3700));
         assert_eq!(pause(&old), PAUSE_START);
-        // e um 429 depois de 30 min quietos recomeça em 60 s, sem precisar de resposta boa no meio
+        // e um 429 depois de 60 min quietos recomeça em 60 s, sem precisar de resposta boa no meio
         let mut l = Limiter::new(t0());
         l.on_429(t0(), None);
         l.on_429(t0() + Duration::from_secs(120), None);
@@ -1084,27 +1086,27 @@ mod tests {
             l.try_acquire(t2 + Duration::from_secs(119)),
             Err(Duration::from_secs(1))
         );
-        // degraus: 60, 120, 240, 480, 600, 600
+        // degraus: 60, 120, 240, 480, 960, 1800, 1800
         let mut now = t2;
         let mut lens = vec![];
         for _ in 0..5 {
-            now += Duration::from_secs(700);
+            now += Duration::from_secs(1900);
             l.on_429(now, None);
             lens.push(l.paused_until.unwrap().duration_since(now).as_secs());
         }
-        assert_eq!(lens, vec![240, 480, 600, 600, 600]);
+        assert_eq!(lens, vec![240, 480, 960, 1800, 1800]);
         // resposta boa logo depois (de outro endpoint) não zera a escalada
-        l.on_ok(now + Duration::from_secs(700));
-        l.on_429(now + Duration::from_secs(1400), None);
+        l.on_ok(now + Duration::from_secs(1000));
+        l.on_429(now + Duration::from_secs(1900), None);
         assert_eq!(
             l.paused_until
                 .unwrap()
-                .duration_since(now + Duration::from_secs(1400))
+                .duration_since(now + Duration::from_secs(1900))
                 .as_secs(),
-            600
+            1800
         );
-        now += Duration::from_secs(1400);
-        // 30 min sem 429: o degrau volta a 60 s
+        now += Duration::from_secs(1900);
+        // 60 min sem 429: o degrau volta a 60 s
         l.on_ok(now + PAUSE_RESET_AFTER);
         now += PAUSE_RESET_AFTER + Duration::from_secs(1);
         l.on_429(now, None);
