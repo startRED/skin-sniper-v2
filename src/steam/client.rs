@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, RETRY_AFTER};
@@ -293,6 +293,8 @@ impl Breaker {
 
 // ---------------------------------------------------------------------------------------------
 
+type PaceHook = Arc<dyn Fn(String) + Send + Sync>;
+
 struct Inner {
     limiter: Limiter,
     breakers: [Breaker; 6],
@@ -300,6 +302,7 @@ struct Inner {
     /// Cookies que a Steam setou nas respostas autenticadas (`webTradeEligibility` etc.); valem enquanto
     /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
     extra: Vec<(String, String)>,
+    on_pace: Option<PaceHook>,
 }
 
 pub struct SteamClient {
@@ -356,6 +359,7 @@ impl SteamClient {
                 breakers: [Breaker::new(); 6],
                 cookie: None,
                 extra: Vec::new(),
+                on_pace: None,
             }),
         })
     }
@@ -435,16 +439,42 @@ impl SteamClient {
         self.inner.lock().unwrap().limiter.stats(Instant::now())
     }
 
-    /// Retoma pausa e intervalo salvos antes de um reinício: reiniciar não zera a cota da Steam.
-    pub fn restore_pace(&self, paused_until: Option<i64>, gap_ms: u64) {
+    /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms`).
+    fn saved_pace(l: &mut Limiter, now: Instant) -> String {
+        let s = l.stats(now);
+        format!(
+            "{}|{}|{}",
+            s.paused_until.unwrap_or(0),
+            s.gap_ms,
+            l.pause_len.as_millis()
+        )
+    }
+
+    /// Retoma o que `saved_pace` gravou antes de um reinício: reiniciar não zera a cota da Steam.
+    /// Texto que não é desse formato é ignorado.
+    pub fn restore_pace(&self, saved: &str) {
+        let mut parts = saved.split('|').map(str::parse::<i64>);
+        let (Some(Ok(until)), Some(Ok(gap)), pause) = (parts.next(), parts.next(), parts.next())
+        else {
+            return;
+        };
         let now = Instant::now();
-        let left = paused_until.map(|u| u - unix_in(Duration::ZERO));
+        let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
         let l = &mut self.inner.lock().unwrap().limiter;
-        l.gap = Duration::from_millis(gap_ms).clamp(MIN_GAP, MAX_GAP);
-        l.last_adjust = now;
-        if let Some(s) = left.filter(|s| *s > 0) {
-            l.paused_until = Some(now + Duration::from_secs(s as u64));
+        l.gap = ms(gap).clamp(MIN_GAP, MAX_GAP);
+        if let Some(Ok(p)) = pause {
+            l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
         }
+        l.last_adjust = now;
+        let left = until - unix_in(Duration::ZERO);
+        if left > 0 {
+            l.paused_until = Some(now + Duration::from_secs(left as u64));
+        }
+    }
+
+    /// Chamado (fora do lock) a cada 429, de qualquer endpoint, com o texto para `restore_pace`.
+    pub fn on_pace_change(&self, f: impl Fn(String) + Send + Sync + 'static) {
+        self.inner.lock().unwrap().on_pace = Some(Arc::new(f));
     }
 
     /// Fim da pausa do breaker do endpoint (segundos Unix), se estiver aberto.
@@ -629,6 +659,14 @@ impl SteamClient {
                 .stats(now)
                 .paused_until
                 .unwrap_or_else(|| unix_in(PAUSE_START));
+            let saved = g
+                .on_pace
+                .clone()
+                .map(|f| (f, Self::saved_pace(&mut g.limiter, now)));
+            drop(g);
+            if let Some((f, v)) = saved {
+                f(v);
+            }
             return Err(Error::RateLimited { until });
         }
         let body = resp
@@ -898,17 +936,31 @@ mod tests {
         assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 3000);
     }
 
-    #[test]
-    fn restored_pace_keeps_pause_and_gap_across_restart() {
-        let c = SteamClient::new().unwrap();
-        c.restore_pace(Some(unix_in(Duration::from_secs(120))), 6750);
-        let s = c.stats();
-        assert_eq!(s.gap_ms, 6750);
-        assert!(s.paused_until.unwrap() >= unix_in(Duration::from_secs(110)));
-        // pausa vencida não volta; intervalo abaixo do piso sobe para 3 s
-        let c = SteamClient::new().unwrap();
-        c.restore_pace(Some(unix_in(Duration::ZERO) - 5), 1500);
-        let s = c.stats();
+    #[tokio::test]
+    async fn pace_saved_on_429_survives_restart() {
+        let app = Router::new().route("/busy", get(|| async { (AxStatus::TOO_MANY_REQUESTS, "") }));
+        let c = fast(&serve(app).await);
+        let saved = Arc::new(Mutex::new(None));
+        let hook = saved.clone();
+        c.on_pace_change(move |v| *hook.lock().unwrap() = Some(v));
+        let r = c.get_json(Endpoint::History, "/busy", &[]).await;
+        assert!(matches!(r, Err(Error::RateLimited { .. })));
+        let v = saved.lock().unwrap().clone().expect("429 chama o gancho");
+        let before = c.stats();
+
+        let again = SteamClient::new().unwrap();
+        again.restore_pace(&v);
+        let after = again.stats();
+        assert_eq!(after.paused_until, before.paused_until);
+        assert_eq!(after.gap_ms, before.gap_ms.max(3000)); // `fast` encurta abaixo do piso
+        let pause = |c: &SteamClient| c.inner.lock().unwrap().limiter.pause_len;
+        assert_eq!(pause(&again), pause(&c)); // a próxima pausa segue dobrada
+
+        // pausa vencida não volta; lixo é ignorado
+        let fresh = SteamClient::new().unwrap();
+        fresh.restore_pace(&format!("{}|1500|60000", unix_in(Duration::ZERO) - 5));
+        fresh.restore_pace("lixo");
+        let s = fresh.stats();
         assert_eq!((s.gap_ms, s.paused_until), (3000, None));
     }
 
