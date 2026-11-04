@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { app, load, lostRows, start } from './lib/store.svelte';
+  import { app, load, lostRows, readingSaldo, start } from './lib/store.svelte';
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
   import OppTable from './lib/OppTable.svelte';
@@ -14,8 +14,7 @@
   const lostCount = $derived(lostRows().length);
   const noSaldo = $derived(app.state?.saldo_source === 'none');
   const noSteam = $derived(app.state != null && !app.state.keys.steam.set);
-  // logo depois de ligar: a Steam ainda não respondeu (ou está em pausa), o saldo vem dela
-  const reading = $derived(noSaldo && app.state?.keys.steam.set === true && app.state.keys.steam.ok === null);
+  const reading = $derived(readingSaldo());
 </script>
 
 <TopBar />
