@@ -459,6 +459,26 @@ async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Ritmo do último 429 (texto de `SteamClient::restore_pace`), retomado ao subir.
+const PACE_KEY: &str = "steam_pace";
+
+/// Retoma o ritmo salvo e passa a salvar a cada 429, venha de qual endpoint vier.
+pub async fn load_pace(h: &Hunt) -> anyhow::Result<()> {
+    if let Some(v) = catalog::get_setting(&h.db, PACE_KEY).await? {
+        h.steam.restore_pace(&v);
+    }
+    let db = h.db.clone();
+    h.steam.on_pace_change(move |v| {
+        let db = db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = catalog::set_setting(&db, PACE_KEY, v).await {
+                tracing::warn!("ritmo da Steam não salvou: {e:#}");
+            }
+        });
+    });
+    Ok(())
+}
+
 /// Erro de consulta: 429 e breaker já seguram o limitador; o resto espera um pouco para não girar em falso.
 async fn backoff(h: &Hunt, e: &anyhow::Error) {
     let pause = match e.downcast_ref::<SteamError>() {

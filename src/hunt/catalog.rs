@@ -798,7 +798,7 @@ async fn recent_hits(db: &Db, now: i64) -> Result<HashMap<String, u32>> {
     Ok(rows.into_iter().collect())
 }
 
-async fn get_setting(db: &Db, key: &'static str) -> Result<Option<String>> {
+pub(crate) async fn get_setting(db: &Db, key: &'static str) -> Result<Option<String>> {
     db.call(move |c| {
         c.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
             r.get(0)
@@ -808,7 +808,7 @@ async fn get_setting(db: &Db, key: &'static str) -> Result<Option<String>> {
     .await
 }
 
-async fn set_setting(db: &Db, key: &'static str, value: String) -> Result<()> {
+pub(crate) async fn set_setting(db: &Db, key: &'static str, value: String) -> Result<()> {
     db.call(move |c| {
         c.execute(
             "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

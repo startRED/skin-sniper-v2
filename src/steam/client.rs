@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, RETRY_AFTER};
@@ -21,13 +21,18 @@ pub const CURRENCY_BRL: i32 = 7;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-const BASE_GAP: Duration = Duration::from_secs(3);
-const MIN_GAP: Duration = Duration::from_millis(1500);
+// 15 consultas/min: com 3 s (20/min) a Steam deu 429 em série ao vivo em 04/11.
+const BASE_GAP: Duration = Duration::from_secs(4);
+// Piso = base (acima da regra de ≥ 3 s): encurtar só desfaz o alongamento depois de 429.
+const MIN_GAP: Duration = BASE_GAP;
 // Teto do intervalo depois de vários 429 seguidos (acréscimo meu: o desenho não limita o alongamento).
 const MAX_GAP: Duration = Duration::from_secs(60);
 const SHORTEN_EVERY: Duration = Duration::from_secs(30 * 60);
 const PAUSE_START: Duration = Duration::from_secs(60);
 const PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
+// O degrau da pausa só volta a 60 s depois de tanto tempo sem 429: uma resposta boa de outro
+// endpoint entre dois 429 não pode zerar a escalada.
+const PAUSE_RESET_AFTER: Duration = Duration::from_secs(30 * 60);
 
 const BREAKER_THRESHOLD: u32 = 3;
 const BREAKER_OPEN_START: Duration = Duration::from_secs(30);
@@ -159,6 +164,7 @@ pub(crate) struct Limiter {
     next_at: Instant,
     paused_until: Option<Instant>,
     pause_len: Duration,
+    last_429: Option<Instant>,
     /// Último 429 ou último encurtamento; o próximo encurta 30 min depois.
     last_adjust: Instant,
     last_query: Option<Instant>,
@@ -172,6 +178,7 @@ impl Limiter {
             next_at: now,
             paused_until: None,
             pause_len: PAUSE_START,
+            last_429: None,
             last_adjust: now,
             last_query: None,
             recent: VecDeque::new(),
@@ -206,16 +213,29 @@ impl Limiter {
         if self.paused_until.is_some_and(|p| now < p) {
             return;
         }
+        // 30 min sem 429 (mesmo sem nenhuma resposta no meio): a escalada recomeça.
+        if self
+            .last_429
+            .is_some_and(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
+        {
+            self.pause_len = PAUSE_START;
+        }
         let pause = self.pause_len.max(retry_after.unwrap_or_default());
         self.paused_until = Some(now + pause);
         self.pause_len = (self.pause_len * 2).min(PAUSE_MAX);
+        self.last_429 = Some(now);
         self.gap = self.gap.mul_f64(1.5).min(MAX_GAP);
         self.last_adjust = now;
     }
 
-    /// Resposta que não foi 429: o degrau da pausa volta ao início.
-    pub(crate) fn on_ok(&mut self) {
-        self.pause_len = PAUSE_START;
+    /// Resposta que não foi 429: o degrau da pausa volta ao início se o último 429 já tem 30 min.
+    pub(crate) fn on_ok(&mut self, now: Instant) {
+        if self
+            .last_429
+            .is_none_or(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
+        {
+            self.pause_len = PAUSE_START;
+        }
     }
 
     pub(crate) fn stats(&mut self, now: Instant) -> Stats {
@@ -292,6 +312,8 @@ impl Breaker {
 
 // ---------------------------------------------------------------------------------------------
 
+type PaceHook = Arc<dyn Fn(String) + Send + Sync>;
+
 struct Inner {
     limiter: Limiter,
     breakers: [Breaker; 6],
@@ -299,6 +321,7 @@ struct Inner {
     /// Cookies que a Steam setou nas respostas autenticadas (`webTradeEligibility` etc.); valem enquanto
     /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
     extra: Vec<(String, String)>,
+    on_pace: Option<PaceHook>,
 }
 
 pub struct SteamClient {
@@ -355,6 +378,7 @@ impl SteamClient {
                 breakers: [Breaker::new(); 6],
                 cookie: None,
                 extra: Vec::new(),
+                on_pace: None,
             }),
         })
     }
@@ -432,6 +456,46 @@ impl SteamClient {
 
     pub fn stats(&self) -> Stats {
         self.inner.lock().unwrap().limiter.stats(Instant::now())
+    }
+
+    /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms`).
+    fn saved_pace(l: &mut Limiter, now: Instant) -> String {
+        let s = l.stats(now);
+        format!(
+            "{}|{}|{}",
+            s.paused_until.unwrap_or(0),
+            s.gap_ms,
+            l.pause_len.as_millis()
+        )
+    }
+
+    /// Retoma o que `saved_pace` gravou antes de um reinício: reiniciar não zera a cota da Steam.
+    /// Texto que não é desse formato é ignorado.
+    pub fn restore_pace(&self, saved: &str) {
+        let mut parts = saved.split('|').map(str::parse::<i64>);
+        let (Some(Ok(until)), Some(Ok(gap)), pause) = (parts.next(), parts.next(), parts.next())
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
+        let l = &mut self.inner.lock().unwrap().limiter;
+        l.gap = ms(gap).clamp(MIN_GAP, MAX_GAP);
+        let quiet = unix_in(Duration::ZERO) - until >= PAUSE_RESET_AFTER.as_secs() as i64;
+        if let Some(Ok(p)) = pause.filter(|_| !quiet) {
+            l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
+            l.last_429 = Some(now); // a escalada segue valendo depois de subir
+        }
+        l.last_adjust = now;
+        let left = until - unix_in(Duration::ZERO);
+        if left > 0 {
+            l.paused_until = Some(now + Duration::from_secs(left as u64));
+        }
+    }
+
+    /// Chamado (fora do lock) a cada 429, de qualquer endpoint, com o texto para `restore_pace`.
+    pub fn on_pace_change(&self, f: impl Fn(String) + Send + Sync + 'static) {
+        self.inner.lock().unwrap().on_pace = Some(Arc::new(f));
     }
 
     /// Fim da pausa do breaker do endpoint (segundos Unix), se estiver aberto.
@@ -616,6 +680,14 @@ impl SteamClient {
                 .stats(now)
                 .paused_until
                 .unwrap_or_else(|| unix_in(PAUSE_START));
+            let saved = g
+                .on_pace
+                .clone()
+                .map(|f| (f, Self::saved_pace(&mut g.limiter, now)));
+            drop(g);
+            if let Some((f, v)) = saved {
+                f(v);
+            }
             return Err(Error::RateLimited { until });
         }
         let body = resp
@@ -625,7 +697,7 @@ impl SteamClient {
         let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
         {
             let mut g = self.inner.lock().unwrap();
-            g.limiter.on_ok();
+            g.limiter.on_ok(now);
             if status.is_server_error() || status == StatusCode::FORBIDDEN || bad_envelope.is_some()
             {
                 g.breakers[ep.idx()].on_fail(now);
@@ -868,19 +940,60 @@ mod tests {
         assert!(l.try_acquire(t).is_ok());
         assert_eq!(
             l.try_acquire(t + Duration::from_secs(1)),
-            Err(Duration::from_secs(2))
+            Err(Duration::from_secs(3))
         );
-        assert!(l.try_acquire(t + Duration::from_secs(3)).is_ok());
+        assert!(l.try_acquire(t + Duration::from_secs(4)).is_ok());
     }
 
     #[test]
     fn limiter_shortens_5pct_per_30min_with_floor() {
         let t = t0();
         let mut l = Limiter::new(t);
-        assert_eq!(l.stats(t + Duration::from_secs(30 * 60)).gap_ms, 2850);
-        assert_eq!(l.stats(t + Duration::from_secs(60 * 60)).gap_ms, 2707); // 2850 × 0,95 = 2707,5
-        // depois de muitas horas fica no piso de 1,5 s
-        assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 1500);
+        // sem 429 não passa da base de 4 s
+        assert_eq!(l.stats(t + Duration::from_secs(30 * 60)).gap_ms, 4000);
+        l.on_429(t + Duration::from_secs(30 * 60), None);
+        let after = t + Duration::from_secs(60 * 60);
+        assert_eq!(l.stats(after).gap_ms, 5700); // 6000 × 0,95
+        assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 4000);
+    }
+
+    #[tokio::test]
+    async fn pace_saved_on_429_survives_restart() {
+        let app = Router::new().route("/busy", get(|| async { (AxStatus::TOO_MANY_REQUESTS, "") }));
+        let c = fast(&serve(app).await);
+        let saved = Arc::new(Mutex::new(None));
+        let hook = saved.clone();
+        c.on_pace_change(move |v| *hook.lock().unwrap() = Some(v));
+        let r = c.get_json(Endpoint::History, "/busy", &[]).await;
+        assert!(matches!(r, Err(Error::RateLimited { .. })));
+        let v = saved.lock().unwrap().clone().expect("429 chama o gancho");
+        let before = c.stats();
+
+        let again = SteamClient::new().unwrap();
+        again.restore_pace(&v);
+        let after = again.stats();
+        assert_eq!(after.paused_until, before.paused_until);
+        assert_eq!(after.gap_ms, before.gap_ms.max(4000)); // `fast` encurta abaixo do piso
+        let pause = |c: &SteamClient| c.inner.lock().unwrap().limiter.pause_len;
+        assert_eq!(pause(&again), pause(&c)); // a próxima pausa segue dobrada
+
+        // pausa vencida não volta; lixo é ignorado
+        let fresh = SteamClient::new().unwrap();
+        fresh.restore_pace(&format!("{}|1500|60000", unix_in(Duration::ZERO) - 5));
+        fresh.restore_pace("lixo");
+        let s = fresh.stats();
+        assert_eq!((s.gap_ms, s.paused_until), (4000, None));
+        // 429 de mais de 30 min atrás: a escalada não volta
+        let old = SteamClient::new().unwrap();
+        old.restore_pace(&format!("{}|6000|600000", unix_in(Duration::ZERO) - 3600));
+        assert_eq!(pause(&old), PAUSE_START);
+        // e um 429 depois de 30 min quietos recomeça em 60 s, sem precisar de resposta boa no meio
+        let mut l = Limiter::new(t0());
+        l.on_429(t0(), None);
+        l.on_429(t0() + Duration::from_secs(120), None);
+        let later = t0() + Duration::from_secs(120) + PAUSE_RESET_AFTER;
+        l.on_429(later, None);
+        assert_eq!(l.paused_until.unwrap().duration_since(later).as_secs(), 60);
     }
 
     #[test]
@@ -889,7 +1002,7 @@ mod tests {
         let mut l = Limiter::new(t);
         l.on_429(t, None);
         let s = l.stats(t);
-        assert_eq!(s.gap_ms, 4500);
+        assert_eq!(s.gap_ms, 6000);
         assert!(s.paused_until.is_some());
         assert_eq!(
             l.try_acquire(t + Duration::from_secs(30)),
@@ -897,7 +1010,7 @@ mod tests {
         );
         // outro 429 dentro da pausa não avança o degrau
         l.on_429(t + Duration::from_secs(10), None);
-        assert_eq!(l.stats(t).gap_ms, 4500);
+        assert_eq!(l.stats(t).gap_ms, 6000);
         // fim da pausa; novo 429 dobra: 120 s
         let t2 = t + Duration::from_secs(61);
         assert!(l.try_acquire(t2).is_ok());
@@ -915,9 +1028,20 @@ mod tests {
             lens.push(l.paused_until.unwrap().duration_since(now).as_secs());
         }
         assert_eq!(lens, vec![240, 480, 600, 600, 600]);
-        // resposta boa volta o degrau a 60 s
-        l.on_ok();
-        now += Duration::from_secs(700);
+        // resposta boa logo depois (de outro endpoint) não zera a escalada
+        l.on_ok(now + Duration::from_secs(700));
+        l.on_429(now + Duration::from_secs(1400), None);
+        assert_eq!(
+            l.paused_until
+                .unwrap()
+                .duration_since(now + Duration::from_secs(1400))
+                .as_secs(),
+            600
+        );
+        now += Duration::from_secs(1400);
+        // 30 min sem 429: o degrau volta a 60 s
+        l.on_ok(now + PAUSE_RESET_AFTER);
+        now += PAUSE_RESET_AFTER + Duration::from_secs(1);
         l.on_429(now, None);
         assert_eq!(l.paused_until.unwrap().duration_since(now).as_secs(), 60);
     }
@@ -927,7 +1051,7 @@ mod tests {
         let t = t0();
         let mut l = Limiter::new(t);
         for i in 0..5 {
-            assert!(l.try_acquire(t + Duration::from_secs(3 * i)).is_ok());
+            assert!(l.try_acquire(t + Duration::from_secs(4 * i)).is_ok());
         }
         assert_eq!(l.stats(t + Duration::from_secs(14)).queries_per_min, 5);
         assert_eq!(l.stats(t + Duration::from_secs(63)).queries_per_min, 4); // t=0 saiu da janela de 60 s
