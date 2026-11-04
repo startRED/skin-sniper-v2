@@ -18,5 +18,18 @@ Get-Process skin-sniper -ErrorAction SilentlyContinue |
 Start-Sleep 1
 Copy-Item (Join-Path $raiz 'target\release\skin-sniper.exe') $Destino -Force -ErrorAction Stop
 Copy-Item (Join-Path $PSScriptRoot 'Iniciar Skin Sniper.vbs') $Destino -Force -ErrorAction Stop
-Start-Process (Join-Path $Destino 'skin-sniper.exe') -WorkingDirectory $Destino -WindowStyle Hidden
-Write-Host "Instalado em $Destino e ligado: http://localhost:8788"
+$vbs = Join-Path $Destino 'Iniciar Skin Sniper.vbs'
+# Liga pelo WMI: o processo nasce fora do grupo de quem chamou o instalador (um terminal ou uma IA), então
+# não morre quando ele fecha. Sem janela.
+$exe = Join-Path $Destino 'skin-sniper.exe'
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create `
+    -Arguments @{ CommandLine = "`"$exe`""; CurrentDirectory = $Destino }
+if ($r.ReturnValue -ne 0) { throw "falha ao ligar o Skin Sniper (WMI $($r.ReturnValue))" }
+# Liga sozinho ao entrar no Windows, sem abrir o navegador.
+$atalho = Join-Path ([Environment]::GetFolderPath('Startup')) 'Skin Sniper.lnk'
+$lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($atalho)
+$lnk.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+$lnk.Arguments = "`"$vbs`" ao-entrar"
+$lnk.WorkingDirectory = $Destino
+$lnk.Save()
+Write-Host "Instalado em $Destino e ligado: http://localhost:8788 (liga sozinho ao entrar no Windows)"
