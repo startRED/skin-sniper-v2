@@ -400,13 +400,21 @@ pub enum Tick {
 }
 
 /// Um passo do laço: descoberta (se há crédito) ou a próxima consulta de vigilância.
+const NO_SALDO: &str = "sem saldo: informe um valor ou configure o cookie da Steam";
+
 pub async fn tick(h: &Arc<Hunt>) -> Tick {
     detect::roll_cycle(h);
     if h.saldo() <= 0 {
-        h.set_message(Some(
-            "sem saldo: informe um valor ou configure o cookie da Steam".into(),
-        ));
+        h.set_message(Some(NO_SALDO.into()));
         return Tick::Idle;
+    }
+    // O saldo chegou (ex.: a Steam respondeu depois de uma pausa): o aviso de falta não pode ficar
+    // no painel enquanto a descoberta espera o limitador.
+    {
+        let mut s = h.lock();
+        if s.message.as_deref() == Some(NO_SALDO) {
+            s.message = None;
+        }
     }
     if let Err(e) = catalog::maybe_reselect(h).await {
         tracing::warn!("seleção falhou: {e:#}");
