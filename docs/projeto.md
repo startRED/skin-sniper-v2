@@ -171,10 +171,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 - Base (item comum): pontos horários dos últimos 7 dias de `QueryPriceHistory`, quantis ponderados
   por compras: Q25, Q50, Q75. Tendência: mediana dos últimos 3 dias contra a dos dias 4–14; se cair,
   multiplica tudo pelo fator projetado em 7 dias (piso 0,85); se subir, não credita (fator 1).
+  Sem estimativa com menos de 3 compras nos 7 dias ou com compras em menos de 3 dias distintos (pico ou lote velho).
 - `quick = min(Q25·f, menor outro anúncio − 1 centavo)`, `mid = min(Q50·f, menor outro anúncio − 1 centavo)`, `high = Q75·f`
   (quem compra leva o mais barato: vender acima do concorrente já à venda não é o mais provável).
 - Raro: o grupo do anúncio (tier, fase, faixa de fade) busca vendas do CSFloat do mesmo grupo
-  (`price / reference.base_price`). Com n ≥ 3: os três preços da base × Q25/Q50/Q75 do múltiplo. Com n < 3:
+  (`price / reference.base_price`). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
+  prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
   usa a base comum e escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço.
 - Prazo `eta_hours` = 24 / (vendas/dia × fração do peso com mediana ≥ preço), depois da trava.
 - Confiança: alta (≥ 20 vendas/dia e ≥ 100 pontos em 7 dias; raro com n ≥ 8), média (≥ 5/dia; raro n ≥ 3),
@@ -261,7 +263,7 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   encerra (`gone`) as oportunidades dela, porque ninguém mais as confere.
 - `gone` só vale com a página confiável: página vazia precisa se repetir 2 vezes, e anúncio fora da primeira
   página (`more`) só some se o preço dele estava dentro da faixa vista.
-- Reavaliação (revisão do Codex): anúncio já visto é avaliado de novo quando o preço ou o histórico do item mudam
+- Reavaliação (revisão do Codex): anúncio já visto é avaliado de novo quando o preço, o histórico do item ou o menor concorrente mudam
   (e, se é oportunidade ativa com histórico velho, a cada passagem). A oportunidade atualizada mantém a posição
   (`seen_at`) e só republica o evento se algo mudou; se deixou de compensar, vira `gone`. O aviso do Telegram sai
   só para oportunidade nova. O mapa de avaliados vive em memória (reavalia tudo uma vez após reiniciar).

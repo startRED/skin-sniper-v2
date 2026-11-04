@@ -57,8 +57,8 @@ pub(crate) struct Shared {
     /// Consultas seguidas que vieram vazias por tarefa (uma página vazia pode ser transitória).
     pub empty_streak: HashMap<String, u8>,
     pub last_state_pub: i64,
-    /// Último (preço, `history_at`) com que cada anúncio foi avaliado: muda → avalia de novo.
-    pub evaluated: HashMap<String, (i64, i64)>,
+    /// Último (preço, `history_at`, menor concorrente) com que cada anúncio foi avaliado: muda → avalia de novo.
+    pub evaluated: HashMap<String, (i64, i64, Option<i64>)>,
     /// Balanço do ciclo de 10 min (o que foi conferido e o que chegou perto).
     pub cycle: detect::Cycle,
     /// Por tarefa: menor anúncio visto na última consulta (se havia algum) e quando foi.

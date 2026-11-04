@@ -23,6 +23,8 @@ const TREND_FLOOR: f64 = 0.85;
 const TREND_MIN_PURCHASES: u32 = 5;
 /// Menos que isto em 7 dias não sustenta preço nenhum.
 const MIN_PURCHASES: u32 = 3;
+/// Vendas concentradas em menos dias que isto (um pico ou um lote velho) não sustentam o preço de hoje.
+const MIN_SALE_DAYS: usize = 3;
 
 /// Menor preço que rende algo ao vendedor: `buyer_pays(1)` = 1 + 1 + 1 centavos.
 pub const MIN_PRICE_CENTS: i64 = 3;
@@ -129,6 +131,8 @@ pub enum NoEstimate {
     NoData,
     /// Há pontos, mas poucas compras para confiar.
     TooFewSales { purchases: u32 },
+    /// As compras caíram em poucos dias distintos da janela.
+    FewSaleDays { days: usize },
     /// Preço fora de uma faixa plausível (dado ruim no histórico ou no prêmio).
     Implausible,
     /// O menor outro anúncio é tão barato que nenhum preço rápido o bate e ainda rende algo.
@@ -144,6 +148,12 @@ impl fmt::Display for NoEstimate {
                 write!(
                     f,
                     "o menor anúncio é barato demais para bater numa venda rápida"
+                )
+            }
+            NoEstimate::FewSaleDays { days } => {
+                write!(
+                    f,
+                    "vendas em só {days} dos últimos 7 dias (mínimo {MIN_SALE_DAYS})"
                 )
             }
             NoEstimate::TooFewSales { purchases } => {
@@ -279,6 +289,16 @@ pub fn estimate(
     if purchases < MIN_PURCHASES {
         return Err(NoEstimate::TooFewSales { purchases });
     }
+    let days = points
+        .iter()
+        .filter(|p| p.ts > now - BASE_DAYS * DAY && p.ts <= now)
+        .filter(|p| p.purchases > 0 && p.median_cents > 0)
+        .map(|p| p.ts.div_euclid(DAY))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if days < MIN_SALE_DAYS {
+        return Err(NoEstimate::FewSaleDays { days });
+    }
     let sales_per_day = f64::from(purchases) / BASE_DAYS as f64;
     let factor = trend_factor(points, now);
     let q = |p: f64| weighted_quantile(&window, p).unwrap_or(0.0) * factor;
@@ -323,7 +343,9 @@ pub fn estimate(
                 weighted_quantile(&m, 0.5).unwrap_or(1.0),
                 weighted_quantile(&m, 0.75).unwrap_or(1.0),
             );
-            (p25, p50, p75) = (p25 * m25, p50 * m50, p75 * m75);
+            // A venda rápida não conta com o prêmio: ele vem do CSFloat e já saiu bem abaixo na Steam
+            // (previsto 2,33×, vendido 0,96×). Assim `safe` só marca o que paga mesmo sem prêmio.
+            (p25, p50, p75) = (p25 * m25.min(1.0), p50 * m50, p75 * m75);
             proven_rare = true;
             evidence += &format!(
                 " · grupo raro: {}, {}x a {}x o preço comum",
@@ -611,12 +633,27 @@ mod tests {
                 .to_string()
                 .contains("só 1")
         );
-        // um ponto só, mas com compras suficientes: estima, confiança baixa, tudo igual
-        let ok = [PricePoint {
+        // compras suficientes num dia só (pico ou lote velho): não sustenta preço
+        let one_day = [PricePoint {
             ts: NOW - 3600,
             median_cents: 500,
             purchases: 10,
         }];
+        assert_eq!(
+            estimate(&one_day, NOW, None, None),
+            Err(NoEstimate::FewSaleDays { days: 1 })
+        );
+        assert!(
+            NoEstimate::FewSaleDays { days: 2 }
+                .to_string()
+                .contains("só 2 dos últimos 7 dias")
+        );
+        // três pontos em três dias: estima, confiança baixa, tudo igual
+        let ok = [0, 1, 2].map(|d| PricePoint {
+            ts: NOW - 3600 - d * DAY,
+            median_cents: 500,
+            purchases: 4,
+        });
         let e = estimate(&ok, NOW, None, None).unwrap();
         assert_eq!(
             (e.quick.price_cents, e.mid.price_cents, e.high.price_cents),
@@ -650,10 +687,13 @@ mod tests {
         .unwrap();
         assert_eq!(e.confidence, Confidence::Medium);
         // 20/dia mas poucos pontos (30 pontos com 5 compras): média
-        let e = estimate(&hourly(30, 0, |_| (500, 5)), NOW, None, None).unwrap();
+        let every = |n: i64, buys: u32| {
+            hourly(24 * 7, 0, move |h| (500, if h % n == 0 { buys } else { 0 }))
+        };
+        let e = estimate(&every(5, 5), NOW, None, None).unwrap(); // 34 pontos
         assert_eq!(e.confidence, Confidence::Medium);
         // 4/dia: baixa
-        let e = estimate(&hourly(28, 0, |_| (500, 1)), NOW, None, None).unwrap();
+        let e = estimate(&every(6, 1), NOW, None, None).unwrap();
         assert_eq!(e.confidence, Confidence::Low);
         assert_eq!(e.confidence.as_str(), "baixa");
     }
@@ -668,9 +708,14 @@ mod tests {
                 purchases: 1,
             },
             PricePoint {
-                ts: NOW - 7200,
+                ts: NOW - 7200 - DAY,
                 median_cents: 500,
-                purchases: 99,
+                purchases: 50,
+            },
+            PricePoint {
+                ts: NOW - 7200 - 2 * DAY,
+                median_cents: 500,
+                purchases: 49,
             },
         ];
         let e = estimate(&pts, NOW, None, None).unwrap();
@@ -761,11 +806,11 @@ mod tests {
                 .evidence
                 .contains("(1 venda)")
         );
-        // n = 3: multiplica pelos quantis; Q25 = menor, Q50 = do meio, Q75 = maior
+        // n = 3: mid e alto multiplicam pelos quantis (Q50 = do meio, Q75 = maior); o rápido fica sem prêmio
         let e = estimate(&flat(1000, 5), NOW, None, Some(rare(&[2.0, 1.4, 1.6]))).unwrap();
         assert_eq!(
             (e.quick.price_cents, e.mid.price_cents, e.high.price_cents),
-            (1400, 1600, 2000)
+            (1000, 1600, 2000)
         );
         assert_eq!(e.confidence, Confidence::Medium); // n < 8 nunca é alta
         assert_eq!(e.mid.eta_hours, None);
@@ -774,6 +819,9 @@ mod tests {
             "{}",
             e.evidence
         );
+        // prêmio abaixo de 1× derruba o rápido também
+        let e = estimate(&flat(1000, 5), NOW, None, Some(rare(&[0.8, 1.4, 1.6]))).unwrap();
+        assert_eq!(e.quick.price_cents, 800);
         // múltiplos inválidos não contam
         let e = estimate(
             &flat(1000, 5),
@@ -873,7 +921,8 @@ mod tests {
         let e = estimate(&flat(1000, 16), NOW, None, Some(m8.clone())).unwrap();
         assert_eq!(e.confidence, Confidence::High);
         // base fraca puxa para baixo mesmo com n alto
-        let e = estimate(&hourly(28, 0, |_| (1000, 1)), NOW, None, Some(m8.clone())).unwrap();
+        let weak = hourly(24 * 7, 0, |h| (1000, u32::from(h % 6 == 0))); // 28 compras em 7 dias
+        let e = estimate(&weak, NOW, None, Some(m8.clone())).unwrap();
         assert_eq!(e.confidence, Confidence::Low);
     }
 
@@ -917,7 +966,13 @@ mod tests {
         );
         different.probabilities = [0.0; 3];
         assert_eq!(evaluate(500, &different, 0).ev_profit_cents, None);
-        let sparse = estimate(&flat(1000, 16)[..1], NOW, None, None).unwrap();
+        // dias sem vizinho: sem retornos diários, sem volatilidade
+        let sparse: Vec<_> = flat(1000, 16)
+            .into_iter()
+            .filter(|p| [1, 3, 5].contains(&((NOW - p.ts) / DAY)) && (NOW - p.ts) % DAY == 0)
+            .collect();
+        assert_eq!(sparse.len(), 3);
+        let sparse = estimate(&sparse, NOW, None, None).unwrap();
         assert_eq!(sparse.volatility, None);
         assert_eq!(evaluate(500, &sparse, 0).ev_profit_cents, None);
         let rare = estimate(&flat(1000, 16), NOW, None, Some(rare(&[2.0; 3]))).unwrap();
@@ -1002,9 +1057,9 @@ mod tests {
         let multiples = [1.05 / 0.73, 1.49 / 0.73, 1.50 / 0.73, 1.22 / 0.73]; // 1,44 / 1,67 / 2,04 / 2,05
         let e = estimate(&pts, NOW, Some(1500), Some(rare(&multiples))).unwrap();
         let ev = evaluate(560, &e, 100);
-        // o modelo teria sugerido vender entre ~R$ 9 e ~R$ 14, com o miolo perto de R$ 11
+        // o modelo teria sugerido vender entre ~R$ 6,50 (sem prêmio) e ~R$ 14, com o miolo perto de R$ 11
         assert!(
-            (900..=1000).contains(&e.quick.price_cents),
+            (640..=690).contains(&e.quick.price_cents),
             "quick {}",
             e.quick.price_cents
         );
