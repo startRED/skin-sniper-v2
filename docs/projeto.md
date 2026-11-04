@@ -134,8 +134,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 1. **Descoberta (1×/dia e quando o saldo muda muito):** `search/render` ordenado por popularidade nas
    categorias de arma, sem faca/luva, até cobrir os itens com piso ≤ saldo. Para cada candidato,
    `QueryPriceHistory` (cache 6 h) dá vendas/dia e dispersão.
-2. **Seleção:** vigia itens com piso entre o mínimo viável e o saldo e ≥ 3 vendas/dia. Nota = vendas/dia ×
-   lucro possível em reais × (1 + acertos recentes). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
+2. **Seleção:** vigia itens com piso entre o mínimo viável e o saldo e ≥ 1 venda/dia. Nota = vendas/dia
+   (até 10: quem compra uma unidade não ganha com giro maior) × lucro possível em reais × (1 + acertos recentes). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
    por (skin com tabela × desgaste) cujo piso cabe no saldo (`propertyFilters` por faixa de seed dos tiers; a
