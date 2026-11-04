@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
     let settings = settings::SettingsStore::new(db.clone());
     let mut app = web::AppState::new(db.clone(), settings.clone());
     let steam = Arc::new(steam::client::SteamClient::new()?);
+    app.login.attach(steam.clone());
     let csfloat = Arc::new(csfloat::CsfloatClient::new()?);
     let telegram = Arc::new(notify::Telegram::new()?);
     let hunt = hunt::Hunt::new(hunt::HuntDeps {

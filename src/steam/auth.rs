@@ -12,7 +12,8 @@
 //! protobuf binário com `x-eresult`. São poucos campos, codificados à mão abaixo.
 //! O `refresh_token` fica só nas configurações (chave interna, nunca no painel) e nunca é logado.
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
@@ -20,9 +21,10 @@ use serde::Serialize;
 
 use crate::runtime::Runtime;
 use crate::settings::SettingsStore;
+use crate::steam::client::{Endpoint, Error as ClientError, SteamClient};
 
 const API: &str = "https://api.steampowered.com";
-const REFRESH_KEY: &str = "steam_refresh_token";
+const REFRESH_KEY: &str = crate::settings::REFRESH_KEY;
 const COOKIE_KEY: &str = "steam_login_secure";
 /// Quanto o QR vale. HIPÓTESE: a Steam não documenta; o app recusa QR velho e a consulta falha.
 const QR_LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -343,6 +345,8 @@ impl Status {
 }
 
 struct Pending {
+    /// Número da tentativa: resposta de um QR já substituído não pode gravar nada.
+    attempt: u64,
     client_id: u64,
     request_id: Vec<u8>,
     interval: Duration,
@@ -356,7 +360,8 @@ struct Pending {
 /// Resultado de uma renovação.
 #[derive(Debug, PartialEq)]
 pub enum Renewal {
-    /// Sem refresh token (cookie colado à mão) ou o cookie ainda tem tempo.
+    /// Sem refresh token (cookie colado à mão), cookie ainda com tempo, ou a sessão guardada mudou
+    /// durante a renovação (resultado descartado).
     NotNeeded,
     Renewed,
     /// A Steam recusou o refresh token: só escaneando o QR de novo.
@@ -367,69 +372,90 @@ pub enum Renewal {
 
 pub struct Login {
     settings: SettingsStore,
-    http: reqwest::Client,
+    /// Cliente da Steam: todo pedido passa pelo limitador global e pelo recuo de 429 dele.
+    steam: OnceLock<Arc<SteamClient>>,
     base: String,
     pending: Mutex<Option<Pending>>,
+    attempts: AtomicU64,
+    /// Serializa a troca de tentativa e a gravação do login, para uma resposta atrasada não vencer.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl Login {
     pub fn new(settings: SettingsStore) -> Arc<Self> {
-        Self::with_base(settings, API)
+        Self::with_base(settings, API, None)
     }
 
-    fn with_base(settings: SettingsStore, base: &str) -> Arc<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent("okhttp/4.9.2")
-            .timeout(Duration::from_secs(20))
-            .build()
-            .expect("cliente http");
+    fn with_base(
+        settings: SettingsStore,
+        base: &str,
+        steam: Option<Arc<SteamClient>>,
+    ) -> Arc<Self> {
+        let cell = OnceLock::new();
+        if let Some(s) = steam {
+            let _ = cell.set(s);
+        }
         Arc::new(Login {
             settings,
-            http,
+            steam: cell,
             base: base.trim_end_matches('/').to_string(),
             pending: Mutex::new(None),
+            attempts: AtomicU64::new(0),
+            write_lock: tokio::sync::Mutex::new(()),
         })
     }
 
-    /// POST do método com a mensagem em `input_protobuf_encoded`. Devolve o corpo protobuf.
-    /// Erro: HTTP fora de 2xx ou `x-eresult` diferente de 1 (OK); a mensagem não leva dado da resposta.
+    /// Liga ao cliente da Steam do programa (o mesmo limitador da caça). Sem isso nada sai.
+    pub fn attach(&self, steam: Arc<SteamClient>) {
+        let _ = self.steam.set(steam);
+    }
+
+    /// POST do método com a mensagem em `input_protobuf_encoded`, pelo limitador global.
+    /// Devolve o corpo protobuf. Erro: HTTP fora de 2xx ou `x-eresult` diferente de 1 (OK); a mensagem
+    /// não leva dado da resposta.
     async fn call(&self, method: &str, msg: &[u8]) -> Result<Vec<u8>, CallError> {
-        let resp = self
-            .http
-            .post(format!("{}/IAuthenticationService/{method}/v1/", self.base))
-            .form(&[("input_protobuf_encoded", b64_encode(msg))])
-            .send()
-            .await
-            .map_err(|e| CallError::Transient(format!("rede: {}", e.without_url())))?;
-        let status = resp.status();
-        let eresult = resp
-            .headers()
-            .get("x-eresult")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<i32>().ok());
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| CallError::Transient(format!("rede: {}", e.without_url())))?;
-        match (status.as_u16(), eresult) {
-            (200..=299, Some(1) | None) => Ok(body.to_vec()),
+        let Some(steam) = self.steam.get() else {
+            return Err(CallError::Transient("cliente da Steam não ligado".into()));
+        };
+        let req = steam
+            .request_url(
+                reqwest::Method::POST,
+                &format!("{}/IAuthenticationService/{method}/v1/", self.base),
+            )
+            .header("user-agent", "okhttp/4.9.2")
+            .form(&[("input_protobuf_encoded", b64_encode(msg))]);
+        let (parts, body) = match steam.send(Endpoint::Auth, req, false).await {
+            Ok(r) => r,
+            // 401/403 da API = recusa; o resto (429, breaker, 5xx, rede) passa
+            Err(ClientError::Http {
+                status: 401 | 403, ..
+            }) => {
+                return Err(CallError::Refused(format!("{method}: HTTP recusado")));
+            }
+            Err(e) => return Err(CallError::Transient(format!("{method}: {e}"))),
+        };
+        match (parts.status, parts.eresult) {
+            (200..=299, Some(1) | None) => Ok(body),
             // 3 sem conexão, 16 tempo esgotado, 20 serviço fora, 84 limite de pedidos
-            (429 | 500..=599, _) | (_, Some(3 | 16 | 20 | 84)) => Err(CallError::Transient(
-                format!("{method}: HTTP {} eresult {eresult:?}", status.as_u16()),
-            )),
+            (_, Some(3 | 16 | 20 | 84)) => Err(CallError::Transient(format!(
+                "{method}: HTTP {} eresult {:?}",
+                parts.status, parts.eresult
+            ))),
             _ => Err(CallError::Refused(format!(
-                "{method}: HTTP {} eresult {eresult:?}",
-                status.as_u16()
+                "{method}: HTTP {} eresult {:?}",
+                parts.status, parts.eresult
             ))),
         }
     }
 
-    /// Pede um QR novo e descarta o anterior.
+    /// Pede um QR novo e descarta o anterior (respostas atrasadas dele deixam de valer).
     pub async fn start_qr(&self) -> Result<QrStart> {
         let begin = parse_begin(&self.call("BeginAuthSessionViaQR", &begin_request()).await?)?;
         let svg = qr_svg(&begin.challenge_url)?;
         let expires_at = now_unix() + QR_LIFETIME.as_secs() as i64;
+        let _w = self.write_lock.lock().await;
         *self.pending.lock().unwrap() = Some(Pending {
+            attempt: self.attempts.fetch_add(1, Ordering::SeqCst) + 1,
             client_id: begin.client_id,
             request_id: begin.request_id,
             interval: Duration::from_secs_f32(begin.interval.clamp(1.0, 30.0)).max(MIN_POLL_GAP),
@@ -447,7 +473,7 @@ impl Login {
     /// Consulta a Steam (no máximo uma vez por `interval`). `true` junto quando o login acabou de
     /// ser salvo: quem chamou deve aplicar as configurações.
     pub async fn poll(&self) -> (Status, bool) {
-        let (client_id, request_id) = {
+        let (attempt, client_id, request_id) = {
             let mut g = self.pending.lock().unwrap();
             let Some(p) = g.as_mut() else {
                 return (Status::of(State::Expired), false);
@@ -459,15 +485,11 @@ impl Login {
                 p.outcome = Some(Status::of(State::Expired));
                 return (Status::of(State::Expired), false);
             }
-            let waiting = |p: &Pending| Status {
-                qr_svg: qr_svg(&p.qr_url).ok(),
-                ..Status::of(State::Waiting)
-            };
             if p.last_poll.is_some_and(|t| t.elapsed() < p.interval) {
-                return (waiting(p), false);
+                return (waiting_of(p), false);
             }
             p.last_poll = Some(Instant::now());
-            (p.client_id, p.request_id.clone())
+            (p.attempt, p.client_id, p.request_id.clone())
         };
         let polled = self
             .call(
@@ -476,45 +498,66 @@ impl Login {
             )
             .await
             .and_then(|b| parse_poll(&b).map_err(|e| CallError::Refused(e.to_string())));
+        // Daqui em diante só vale se esta ainda é a tentativa atual (outro QR pode ter aberto no meio).
+        let _w = self.write_lock.lock().await;
+        if !self.is_current(attempt) {
+            return (self.waiting_status(), false);
+        }
         let poll = match polled {
             Ok(p) => p,
             // falha passageira: segue esperando; o QR expira sozinho
             Err(CallError::Transient(_)) => return (self.waiting_status(), false),
             Err(CallError::Refused(d)) => {
                 tracing::warn!("login por QR recusado: {d}");
-                return self.finish(Status {
-                    detail: Some(d),
-                    ..Status::of(State::Error)
-                });
+                return self.finish(
+                    attempt,
+                    Status {
+                        detail: Some(d),
+                        ..Status::of(State::Error)
+                    },
+                );
             }
         };
         if let (Some(refresh), Some(access)) = (&poll.refresh_token, &poll.access_token) {
             let Some(steamid) = jwt_claims(refresh).and_then(|c| c.sub) else {
-                return self.finish(Status {
-                    detail: Some("a Steam devolveu um token que não consegui ler".into()),
-                    ..Status::of(State::Error)
-                });
+                return self.finish(
+                    attempt,
+                    Status {
+                        detail: Some("a Steam devolveu um token que não consegui ler".into()),
+                        ..Status::of(State::Error)
+                    },
+                );
             };
             let saved = async {
+                let before = self.settings.get(REFRESH_KEY).await?;
                 self.settings
-                    .set_raw(REFRESH_KEY, Some(refresh.clone()))
-                    .await?;
-                self.settings
-                    .set_raw(COOKIE_KEY, Some(cookie_value(steamid, access)))
+                    .write_if(
+                        (REFRESH_KEY, before),
+                        vec![
+                            (REFRESH_KEY, Some(refresh.clone())),
+                            (COOKIE_KEY, Some(cookie_value(steamid, access))),
+                        ],
+                    )
                     .await
             }
             .await;
-            if let Err(e) = saved {
-                tracing::error!("login por QR: não consegui salvar: {e:#}");
-                return self.finish(Status {
-                    detail: Some("não consegui salvar o login".into()),
-                    ..Status::of(State::Error)
-                });
+            if !matches!(saved, Ok(true)) {
+                tracing::error!("login por QR: não consegui salvar o login");
+                return self.finish(
+                    attempt,
+                    Status {
+                        detail: Some("não consegui salvar o login".into()),
+                        ..Status::of(State::Error)
+                    },
+                );
             }
-            let (status, _) = self.finish(Status {
-                account: Some(poll.account_name.unwrap_or_else(|| steamid.to_string())),
-                ..Status::of(State::Done)
-            });
+            let (status, _) = self.finish(
+                attempt,
+                Status {
+                    account: Some(poll.account_name.unwrap_or_else(|| steamid.to_string())),
+                    ..Status::of(State::Done)
+                },
+            );
             return (status, true);
         }
         if let Some(p) = self.pending.lock().unwrap().as_mut() {
@@ -528,27 +571,32 @@ impl Login {
         (self.waiting_status(), false)
     }
 
-    fn waiting_status(&self) -> Status {
-        let url = self
-            .pending
+    fn is_current(&self, attempt: u64) -> bool {
+        self.pending
             .lock()
             .unwrap()
             .as_ref()
-            .map(|p| p.qr_url.clone());
-        Status {
-            qr_svg: url.and_then(|u| qr_svg(&u).ok()),
-            ..Status::of(State::Waiting)
+            .is_some_and(|p| p.attempt == attempt && p.outcome.is_none())
+    }
+
+    fn waiting_status(&self) -> Status {
+        match self.pending.lock().unwrap().as_ref() {
+            Some(p) => waiting_of(p),
+            None => Status::of(State::Expired),
         }
     }
 
-    fn finish(&self, s: Status) -> (Status, bool) {
-        if let Some(p) = self.pending.lock().unwrap().as_mut() {
+    fn finish(&self, attempt: u64, s: Status) -> (Status, bool) {
+        if let Some(p) = self.pending.lock().unwrap().as_mut()
+            && p.attempt == attempt
+        {
             p.outcome = Some(s.clone());
         }
         (s, false)
     }
 
     /// Troca o refresh token por um access token novo quando o cookie está perto de vencer.
+    /// O resultado só é gravado se o refresh token guardado ainda for o que iniciou a renovação.
     pub async fn renew_if_needed(&self) -> Renewal {
         let read = |k| async move { self.settings.get(k).await };
         let (Ok(Some(refresh)), cookie) = (read(REFRESH_KEY).await, read(COOKIE_KEY).await) else {
@@ -559,7 +607,7 @@ impl Login {
             return Renewal::NotNeeded;
         }
         let Some(steamid) = jwt_claims(&refresh).and_then(|c| c.sub) else {
-            return self.expire().await;
+            return self.expire(refresh).await;
         };
         let renewed = self
             .call(
@@ -571,24 +619,35 @@ impl Login {
         match renewed {
             Ok(access) => match self
                 .settings
-                .set_raw(COOKIE_KEY, Some(cookie_value(steamid, &access)))
+                .write_if(
+                    (REFRESH_KEY, Some(refresh)),
+                    vec![(COOKIE_KEY, Some(cookie_value(steamid, &access)))],
+                )
                 .await
             {
-                Ok(()) => Renewal::Renewed,
+                Ok(true) => Renewal::Renewed,
+                // outra conta entrou (ou o cookie foi trocado à mão) durante a renovação: descarta
+                Ok(false) => Renewal::NotNeeded,
                 Err(e) => Renewal::Retry(format!("não consegui salvar: {e:#}")),
             },
             Err(CallError::Transient(d)) => Renewal::Retry(d),
             Err(CallError::Refused(d)) => {
                 tracing::warn!("renovação do login recusada: {d}");
-                self.expire().await
+                self.expire(refresh).await
             }
         }
     }
 
-    /// Esquece o refresh token: sem ele só um QR novo resolve, e paramos de insistir.
-    async fn expire(&self) -> Renewal {
-        let _ = self.settings.set_raw(REFRESH_KEY, None).await;
-        Renewal::Expired
+    /// Esquece o refresh token `old` (só se ainda for ele): sem o token só um QR novo resolve.
+    async fn expire(&self, old: String) -> Renewal {
+        match self
+            .settings
+            .write_if((REFRESH_KEY, Some(old)), vec![(REFRESH_KEY, None)])
+            .await
+        {
+            Ok(true) => Renewal::Expired,
+            _ => Renewal::NotNeeded,
+        }
     }
 
     /// Confere a cada minuto se o cookie precisa de renovação e aplica o resultado.
@@ -609,6 +668,13 @@ impl Login {
                 tokio::time::sleep(RENEW_CHECK).await;
             }
         });
+    }
+}
+
+fn waiting_of(p: &Pending) -> Status {
+    Status {
+        qr_svg: qr_svg(&p.qr_url).ok(),
+        ..Status::of(State::Waiting)
     }
 }
 
@@ -810,7 +876,11 @@ mod tests {
         for done in [false, true] {
             let (db, _dir) = temp_db();
             let settings = SettingsStore::new(db);
-            let login = Login::with_base(settings.clone(), &fake_steam(done).await);
+            let login = Login::with_base(
+                settings.clone(),
+                &fake_steam(done).await,
+                Some(test_client()),
+            );
             let q = login.start_qr().await.unwrap();
             assert!(q.qr_svg.contains("<svg") && q.expires_at > now_unix());
             let (st, applied) = login.poll().await;
@@ -832,7 +902,11 @@ mod tests {
     #[tokio::test]
     async fn poll_without_qr_or_after_expiry_is_expired() {
         let (db, _dir) = temp_db();
-        let login = Login::with_base(SettingsStore::new(db), "http://127.0.0.1:1");
+        let login = Login::with_base(
+            SettingsStore::new(db),
+            "http://127.0.0.1:1",
+            Some(test_client()),
+        );
         assert_eq!(login.poll().await.0.state, State::Expired);
     }
 
@@ -840,7 +914,7 @@ mod tests {
     async fn renewal_only_when_close_to_expiry() {
         let (db, _dir) = temp_db();
         let settings = SettingsStore::new(db);
-        let login = Login::with_base(settings.clone(), "http://127.0.0.1:1");
+        let login = Login::with_base(settings.clone(), "http://127.0.0.1:1", Some(test_client()));
         // sem refresh token (cookie colado à mão): nada a fazer
         assert_eq!(login.renew_if_needed().await, Renewal::NotNeeded);
         let refresh = jwt(r#"{"sub":"76561198000000001","exp":9999999999}"#);
@@ -873,11 +947,180 @@ mod tests {
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         let (db, _dir) = temp_db();
         let settings = SettingsStore::new(db);
-        let login = Login::with_base(settings.clone(), &format!("http://{addr}"));
+        let login = Login::with_base(
+            settings.clone(),
+            &format!("http://{addr}"),
+            Some(test_client()),
+        );
         let refresh = jwt(r#"{"sub":"76561198000000001","exp":9999999999}"#);
         settings.set_raw(REFRESH_KEY, Some(refresh)).await.unwrap();
         assert_eq!(login.renew_if_needed().await, Renewal::Expired);
         assert!(settings.get(REFRESH_KEY).await.unwrap().is_none());
+    }
+
+    fn test_client() -> Arc<SteamClient> {
+        let c = Arc::new(SteamClient::with_base("http://127.0.0.1:1").unwrap());
+        c.set_gap_for_test(Duration::ZERO);
+        c
+    }
+
+    /// Servidor de mentira com atraso controlado: o Poll do client_id 1 demora e entrega tokens; o
+    /// GenerateAccessTokenForApp também demora. `status` permite simular 429.
+    async fn slow_steam(begin_status: u16) -> String {
+        use axum::{Router, http::StatusCode, routing::post};
+        let counter = Arc::new(AtomicU64::new(0));
+        let tokens = (
+            jwt(r#"{"sub":"76561198000000001","exp":9999999999}"#),
+            jwt(&format!(
+                r#"{{"sub":"76561198000000001","exp":{}}}"#,
+                now_unix() + 86_400
+            )),
+        );
+        let app = Router::new()
+            .route(
+                "/IAuthenticationService/BeginAuthSessionViaQR/v1/",
+                post(move || {
+                    let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    async move {
+                        let mut b = Vec::new();
+                        put_varint(&mut b, 1, n);
+                        put_bytes(&mut b, 2, format!("https://s.team/q/1/{n}").as_bytes());
+                        put_bytes(&mut b, 3, &[n as u8]);
+                        (
+                            StatusCode::from_u16(begin_status).unwrap(),
+                            [("x-eresult", "1")],
+                            b,
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/IAuthenticationService/PollAuthSessionStatus/v1/",
+                post({
+                    let (refresh, access) = tokens.clone();
+                    move |body: String| {
+                        let (refresh, access) = (refresh.clone(), access.clone());
+                        async move {
+                            let mut b = Vec::new();
+                            // o QR "1" (A) responde tarde, já aprovado
+                            if body.contains("input_protobuf_encoded=CAE") {
+                                tokio::time::sleep(Duration::from_millis(400)).await;
+                                put_bytes(&mut b, 3, refresh.as_bytes());
+                                put_bytes(&mut b, 4, access.as_bytes());
+                                put_bytes(&mut b, 6, b"conta_A");
+                            }
+                            ([("x-eresult", "1")], b)
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/IAuthenticationService/GenerateAccessTokenForApp/v1/",
+                post({
+                    let access = tokens.1.clone();
+                    move || {
+                        let access = access.clone();
+                        async move {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            let mut b = Vec::new();
+                            put_bytes(&mut b, 1, access.as_bytes());
+                            ([("x-eresult", "1")], b)
+                        }
+                    }
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn late_answer_of_replaced_qr_is_discarded() {
+        let (db, _dir) = temp_db();
+        let settings = SettingsStore::new(db);
+        let login = Login::with_base(
+            settings.clone(),
+            &slow_steam(200).await,
+            Some(test_client()),
+        );
+        login.start_qr().await.unwrap(); // A
+        let a = tokio::spawn({
+            let l = login.clone();
+            async move { l.poll().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        login.start_qr().await.unwrap(); // B substitui A enquanto a resposta de A não chegou
+        let (st, applied) = a.await.unwrap();
+        assert!(!applied && st.state == State::Waiting, "{st:?}");
+        assert!(settings.get(COOKIE_KEY).await.unwrap().is_none());
+        assert!(settings.get(REFRESH_KEY).await.unwrap().is_none());
+        // B segue esperando: não foi marcado como concluído por causa de A
+        let (st, applied) = login.poll().await;
+        assert!(!applied && st.state == State::Waiting);
+    }
+
+    #[tokio::test]
+    async fn renewal_in_flight_does_not_overwrite_a_newer_login() {
+        let (db, _dir) = temp_db();
+        let settings = SettingsStore::new(db);
+        let login = Login::with_base(
+            settings.clone(),
+            &slow_steam(200).await,
+            Some(test_client()),
+        );
+        let refresh_a = jwt(r#"{"sub":"76561198000000001","exp":9999999999}"#);
+        let old = jwt(&format!(r#"{{"exp":{}}}"#, now_unix() + 60));
+        settings
+            .set_raw(REFRESH_KEY, Some(refresh_a))
+            .await
+            .unwrap();
+        settings
+            .set_raw(COOKIE_KEY, Some(cookie_value(1, &old)))
+            .await
+            .unwrap();
+        let r = tokio::spawn({
+            let l = login.clone();
+            async move { l.renew_if_needed().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // enquanto a renovação de A voa, o QR de B grava a conta B
+        let refresh_b = jwt(r#"{"sub":"76561198000000002","exp":9999999999}"#);
+        settings
+            .set_raw(REFRESH_KEY, Some(refresh_b.clone()))
+            .await
+            .unwrap();
+        settings
+            .set_raw(COOKIE_KEY, Some("B-cookie".into()))
+            .await
+            .unwrap();
+        assert_eq!(r.await.unwrap(), Renewal::NotNeeded);
+        assert_eq!(
+            settings.get(COOKIE_KEY).await.unwrap().as_deref(),
+            Some("B-cookie")
+        );
+        assert_eq!(settings.get(REFRESH_KEY).await.unwrap(), Some(refresh_b));
+    }
+
+    #[tokio::test]
+    async fn login_requests_go_through_the_global_limiter_and_429_backoff() {
+        let (db, _dir) = temp_db();
+        let steam = test_client();
+        let login = Login::with_base(
+            SettingsStore::new(db),
+            &slow_steam(429).await,
+            Some(steam.clone()),
+        );
+        assert!(login.start_qr().await.is_err());
+        assert!(steam.stats().last_query_at.is_some(), "contou no limitador");
+        assert!(steam.stats().paused_until.is_some(), "429 pausou tudo");
+        // com tudo pausado, a segunda tentativa nem sai (breaker/limitador devolvem erro de pausa)
+        let t = Instant::now();
+        let second = tokio::time::timeout(Duration::from_millis(500), login.start_qr()).await;
+        assert!(
+            second.is_err() || t.elapsed() >= Duration::from_millis(400),
+            "esperou a pausa"
+        );
     }
 
     /// AO VIVO: um único `BeginAuthSessionViaQR` para ver se a Steam aceita o pedido. Não completa login.
@@ -886,6 +1129,7 @@ mod tests {
     async fn live_begin_qr() {
         let (db, _dir) = temp_db();
         let login = Login::new(SettingsStore::new(db));
+        login.attach(Arc::new(SteamClient::new().unwrap()));
         let raw = login
             .call("BeginAuthSessionViaQR", &begin_request())
             .await
