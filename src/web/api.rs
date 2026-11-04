@@ -136,6 +136,22 @@ pub struct History {
     pub sell: Sell,
 }
 
+/// Uma linha de `GET /api/watch`: o que a caça está vigiando.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchRow {
+    pub name: String,
+    pub icon_url: String,
+    /// Menor anúncio visto na última consulta; `null` se ainda não consultou ou a página veio vazia.
+    pub floor_cents: Option<i64>,
+    /// Maior preço de compra que ainda daria lucro ≥ R$ 0,20 e ≥ 5 % no preço médio; `null` sem estimativa
+    /// (histórico curto) e sempre `null` em item raro.
+    pub max_buy_cents: Option<i64>,
+    pub sales_per_day: f64,
+    pub kind: Kind,
+    pub group: Option<String>,
+    pub last_checked_at: Option<i64>,
+}
+
 /// Leitura de `Settings`: segredos já mascarados (`••••gLO9`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
@@ -208,7 +224,7 @@ pub enum Event {
     Purchase(Purchase),
 }
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub(crate) StatusCode, pub(crate) String);
 
 impl ApiError {
     pub fn new(code: StatusCode, msg: impl Into<String>) -> Self {
@@ -257,6 +273,9 @@ pub async fn put_saldo(
         ));
     }
     app.settings.set_saldo(body.cents).await?;
+    if let Some(rt) = &app.rt {
+        rt.settings_changed().await?;
+    }
     let state = app.current_state().await?;
     let _ = app.events.send(Event::State(state.clone()));
     Ok(Json(state))
@@ -293,27 +312,32 @@ pub async fn opportunity_history(
     AxState(app): AxState<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<History> {
-    let known = app
-        .db
-        .call(move |c| {
-            c.query_row(
-                "SELECT count(*) FROM opportunities WHERE id = ?1",
-                [id],
-                |r| r.get::<_, i64>(0),
-            )
-        })
-        .await?;
-    if known == 0 {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "oportunidade desconhecida",
-        ));
-    }
-    Err(ApiError::not_wired("histórico (precificação)"))
+    let Some(rt) = &app.rt else {
+        return Err(ApiError::not_wired("histórico (precificação)"));
+    };
+    Ok(Json(rt.history(&id).await?))
 }
 
-pub async fn buy() -> ApiResult<Purchase> {
-    Err(ApiError::not_wired("compra"))
+#[derive(Deserialize)]
+pub struct BuyInput {
+    pub id: String,
+}
+
+pub async fn watch(AxState(app): AxState<AppState>) -> ApiResult<Vec<WatchRow>> {
+    let Some(rt) = &app.rt else {
+        return Err(ApiError::not_wired("vigilância"));
+    };
+    Ok(Json(crate::hunt::watch::list(&rt.hunt).await?))
+}
+
+pub async fn buy(
+    AxState(app): AxState<AppState>,
+    Json(body): Json<BuyInput>,
+) -> ApiResult<Purchase> {
+    let Some(rt) = &app.rt else {
+        return Err(ApiError::not_wired("compra"));
+    };
+    Ok(Json(rt.buy(&body.id).await?))
 }
 
 pub async fn list_purchases(AxState(app): AxState<AppState>) -> ApiResult<Vec<Purchase>> {
@@ -342,6 +366,9 @@ pub async fn put_settings(
             Err(e) => e.into(),
         }
     })?;
+    if let Some(rt) = &app.rt {
+        rt.settings_changed().await?;
+    }
     // Painel e Telegram mostram o estado das chaves; empurra o novo.
     if let Ok(state) = app.current_state().await {
         let _ = app.events.send(Event::State(state));

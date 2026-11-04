@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DAY: i64 = 86_400;
 
 /// Cada item é uma migração; `user_version` = quantas já foram aplicadas.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
     CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE items (
         name TEXT PRIMARY KEY, g_code TEXT, paint_index INTEGER,
@@ -32,7 +33,18 @@ const MIGRATIONS: &[&str] = &[r#"
     );
     CREATE TABLE purchases (id TEXT PRIMARY KEY, json TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE outcomes (purchase_id TEXT NOT NULL, sold_cents INTEGER NOT NULL, sold_at INTEGER NOT NULL);
-    "#];
+    "#,
+    // Caça: catálogo (varredura por popularidade, histórico) e o que a compra precisa para refazer o pedido.
+    r#"
+    ALTER TABLE items ADD COLUMN floor_usd_cents INTEGER;
+    ALTER TABLE items ADD COLUMN dispersion REAL;
+    ALTER TABLE items ADD COLUMN history_at INTEGER;
+    ALTER TABLE items ADD COLUMN icon_url TEXT;
+    ALTER TABLE items ADD COLUMN rank INTEGER;
+    ALTER TABLE opportunities ADD COLUMN task TEXT;
+    ALTER TABLE opportunities ADD COLUMN listing_json TEXT;
+    "#,
+];
 
 pub fn now_unix() -> i64 {
     SystemTime::now()
@@ -212,7 +224,7 @@ mod tests {
             ("active", None),
         ] {
             conn.execute(
-                "INSERT INTO opportunities VALUES (?1, '{}', 0, ?2)",
+                "INSERT INTO opportunities(id, json, created_at, gone_at) VALUES (?1, '{}', 0, ?2)",
                 (id, gone),
             )
             .unwrap();

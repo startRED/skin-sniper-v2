@@ -363,6 +363,12 @@ impl SteamClient {
         self.inner.lock().unwrap().cookie.clone()
     }
 
+    /// Só para teste: encurta o intervalo do limitador para não dormir 3 s por consulta.
+    #[cfg(test)]
+    pub(crate) fn set_gap_for_test(&self, gap: Duration) {
+        self.inner.lock().unwrap().limiter.gap = gap;
+    }
+
     pub fn stats(&self) -> Stats {
         self.inner.lock().unwrap().limiter.stats(Instant::now())
     }
@@ -393,7 +399,13 @@ impl SteamClient {
             .query(&[("q", method), ("qp", &qp.to_string())])
             .header("x-valve-request-type", "queryAction")
             .header("accept", "application/json, text/javascript, */*");
-        let (_, body) = self.send(ep, req, false).await?;
+        let (_, body) = self
+            .send_checked(ep, req, false, Some(envelope_problem))
+            .await
+            .map_err(|e| match e {
+                Error::Parse(m) => Error::Parse(format!("{method}: {m}")),
+                other => other,
+            })?;
         let mut v: Value =
             serde_json::from_slice(&body).map_err(|e| Error::Parse(format!("{method}: {e}")))?;
         match v.get_mut("data") {
@@ -450,8 +462,20 @@ impl SteamClient {
     pub(crate) async fn send(
         &self,
         ep: Endpoint,
+        req: RequestBuilder,
+        auth: bool,
+    ) -> Result<(Parts, Vec<u8>)> {
+        self.send_checked(ep, req, auth, None).await
+    }
+
+    /// Como `send`, mas `check(status, corpo)` pode dizer que a resposta (200) não é o envelope esperado:
+    /// conta como falha no breaker, não como sucesso, e vira `Error::Parse` com o diagnóstico.
+    async fn send_checked(
+        &self,
+        ep: Endpoint,
         mut req: RequestBuilder,
         auth: bool,
+        check: Option<EnvelopeCheck>,
     ) -> Result<(Parts, Vec<u8>)> {
         loop {
             let wait = {
@@ -508,10 +532,12 @@ impl SteamClient {
             .bytes()
             .await
             .map_err(|e| Error::Transport(e.without_url().to_string()))?;
+        let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
         {
             let mut g = self.inner.lock().unwrap();
             g.limiter.on_ok();
-            if status.is_server_error() || status == StatusCode::FORBIDDEN {
+            if status.is_server_error() || status == StatusCode::FORBIDDEN || bad_envelope.is_some()
+            {
                 g.breakers[ep.idx()].on_fail(now);
             } else {
                 g.breakers[ep.idx()].on_ok();
@@ -522,6 +548,9 @@ impl SteamClient {
                 endpoint: ep,
                 status: status.as_u16(),
             });
+        }
+        if let Some(diag) = bad_envelope {
+            return Err(Error::Parse(format!("resposta sem `data` ({diag})")));
         }
         Ok((
             Parts {
@@ -537,6 +566,34 @@ impl SteamClient {
         self.http.request(method, self.url(path))
     }
 }
+
+/// `None` se o corpo é o envelope de `/market/actions` (JSON com `data` não nulo). Senão, um diagnóstico
+/// sem conteúdo do usuário: status, tamanho, nomes das chaves do topo e `success` se for número ou booleano.
+fn envelope_problem(status: u16, body: &[u8]) -> Option<String> {
+    let Ok(v) = serde_json::from_slice::<Value>(body) else {
+        return Some(format!("status {status}, {} bytes, não é JSON", body.len()));
+    };
+    if v.get("data").is_some_and(|d| !d.is_null()) {
+        return None;
+    }
+    let keys: Vec<&str> = v
+        .as_object()
+        .map(|o| o.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let success = v
+        .get("success")
+        .filter(|s| s.is_number() || s.is_boolean())
+        .map(|s| format!(", success {s}"))
+        .unwrap_or_default();
+    Some(format!(
+        "status {status}, {} bytes, chaves [{}]{success}",
+        body.len(),
+        keys.join(", ")
+    ))
+}
+
+/// Confere o corpo de uma resposta 200; `Some(diagnóstico)` = fora do formato esperado.
+type EnvelopeCheck = fn(u16, &[u8]) -> Option<String>;
 
 pub(crate) struct Parts {
     pub status: u16,
@@ -728,5 +785,35 @@ mod tests {
             }
         ));
         assert!(c.breaker_open_until(Endpoint::Listings).is_none());
+    }
+
+    #[tokio::test]
+    async fn envelope_without_data_counts_as_failure_with_diagnostic() {
+        let app = Router::new().route(
+            "/market/actions",
+            get(|| async { r#"{"success":false,"lista":[1,2]}"# }),
+        );
+        let c = fast(&serve(app).await);
+        let qp = serde_json::json!({});
+        for _ in 0..3 {
+            let e = c
+                .action(Endpoint::Listings, "QueryListingsForItem", &qp)
+                .await
+                .unwrap_err();
+            let m = e.to_string();
+            assert!(m.contains("sem `data`"), "{m}");
+            assert!(
+                m.contains("status 200") && m.contains("chaves [lista, success]"),
+                "{m}"
+            );
+            assert!(m.contains("success false"), "{m}");
+            assert!(!m.contains("[1,2]"), "{m}"); // só nomes de chave, nunca o conteúdo
+        }
+        // três respostas assim seguidas abrem o breaker do endpoint, como um 5xx
+        let e = c
+            .action(Endpoint::Listings, "QueryListingsForItem", &qp)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::BreakerOpen { .. }), "{e}");
     }
 }

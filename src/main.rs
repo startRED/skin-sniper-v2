@@ -1,13 +1,11 @@
 //! Skin Sniper v2 — desenho em docs/projeto.md.
 
-// Os módulos de caça ainda são esqueleto: sem chamadores, muito código público fica "morto" por ora.
-#![allow(dead_code)]
-
 mod csfloat;
 mod db;
 mod hunt;
 mod notify;
 mod pricing;
+mod runtime;
 mod settings;
 mod steam;
 mod web;
@@ -21,7 +19,6 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 const LOG_MAX: u64 = 5 * 1024 * 1024;
-const LOG_KEEP: u32 = 3; // sniper.log, sniper.log.1, sniper.log.2 (archive() assume 3)
 const LOG_RETRY_BYTES: u64 = 256 * 1024; // após falha de rotação, só tenta de novo depois disso
 
 /// Arquivo de log com rotação por tamanho, sem crate: 5 MB × 3.
@@ -152,7 +149,33 @@ async fn main() -> Result<()> {
     let path = dir.join("sniper.db");
     let db = tokio::task::spawn_blocking(move || db::Db::open(&path)).await??;
     db::spawn_retention(db.clone());
-    let app = web::AppState::new(db.clone(), settings::SettingsStore::new(db));
+    let settings = settings::SettingsStore::new(db.clone());
+    let mut app = web::AppState::new(db.clone(), settings.clone());
+    let steam = Arc::new(steam::client::SteamClient::new()?);
+    let csfloat = Arc::new(csfloat::CsfloatClient::new()?);
+    let telegram = Arc::new(notify::Telegram::new()?);
+    let hunt = hunt::Hunt::new(hunt::HuntDeps {
+        db: db.clone(),
+        steam: steam.clone(),
+        csfloat: csfloat.clone(),
+        events: app.events.clone(),
+        settings: settings.clone(),
+        telegram: Some(telegram.clone()),
+    });
+    hunt.load().await?;
+    let rt = runtime::Runtime::new(
+        db,
+        settings,
+        app.events.clone(),
+        hunt.clone(),
+        steam,
+        csfloat,
+        telegram,
+    );
+    rt.settings_changed().await?;
+    rt.spawn_wallet_refresh();
+    tokio::spawn(hunt::scheduler::run(hunt));
+    app.rt = Some(rt);
 
     tracing::info!(%listen, data = %dir.display(), "no ar");
     let stop = Arc::new(Notify::new());

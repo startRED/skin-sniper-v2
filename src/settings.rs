@@ -47,6 +47,7 @@ impl SettingsStore {
         }
     }
 
+    #[cfg(test)]
     /// Recebe o nome de cada chave que mudou (ex.: `"steam_login_secure"`, `"saldo_manual_cents"`).
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.changed.subscribe()

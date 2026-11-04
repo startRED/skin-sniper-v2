@@ -59,6 +59,7 @@ GET  /api/opportunities    -> Opportunity[]         (ativas, ordem livre; o fron
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
 POST /api/buy              {id: string}            -> Purchase
 GET  /api/purchases        -> Purchase[]
+GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
 GET  /api/settings         -> Settings              (chaves mascaradas)
 PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga)
 GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id} | "state" State | "purchase" Purchase
@@ -87,6 +88,14 @@ Opportunity = {
   confidence: "alta" | "media" | "baixa",
   evidence: string,              // frase curta: "392 vendas/dia nos últimos 7 dias"
   seen_at: number
+}
+WatchRow = {
+  name: string, icon_url: string,
+  floor_cents: number | null,      // menor anúncio visto na última consulta; null se ainda não consultou / página vazia
+  max_buy_cents: number | null,    // maior preço que ainda dá lucro >= R$ 0,20 e >= 5 % no preço médio;
+                                   // null sem estimativa e sempre null em item raro (o teto depende do grupo)
+  sales_per_day: number, kind: "desconto" | "raro", group: string | null,
+  last_checked_at: number | null   // ordem: (floor - max_buy) crescente; sem os dois, por último
 }
 Sell = { high: Tier, mid: Tier, quick: Tier }
 Tier = { price_cents: number, net_cents: number, profit_cents: number, eta_hours: number | null }
@@ -165,3 +174,28 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 
 `AGENTS.md` lista os comandos. Todo parser tem fixture em `testdata/` e teste sem rede. O teste final é
 usar o painel de verdade no navegador contra a Steam real, com o robô antigo pausado durante a medição.
+
+## Desvios registrados (caça, implementação)
+
+- Varredura limitada a 6 páginas (60 itens) por categoria por ciclo, intercaladas entre as categorias: cada página
+  é uma consulta e o catálogo tem milhares. Os candidatos vêm só do que a varredura viu.
+- A razão BRL/USD é a mediana de até 3 amostras (menor anúncio em BRL ÷ menor ask em USD do mesmo item, de US$ 1 a
+  US$ 20), guardada em `settings` (`usd_brl_ratio`) e remedida a cada 24 h.
+- Consulta de desconto leva o filtro de desgaste do nome (`Exterior`); o código cobre todos os desgastes e
+  qualidades. Consulta rara não filtra desgaste, só seed.
+- Concorrência do `quick`: só conta outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns); um
+  comum barato não limita a venda de um T1.
+- Anúncio acima do saldo não entra em `listings_seen`: se o saldo subir, ainda é novo. Tarefa que sai da seleção
+  encerra (`gone`) as oportunidades dela, porque ninguém mais as confere.
+- `gone` só vale com a página confiável: página vazia precisa se repetir 2 vezes, e anúncio fora da primeira
+  página (`more`) só some se o preço dele estava dentro da faixa vista.
+- Reavaliação (revisão do Codex): anúncio já visto é avaliado de novo quando o preço ou o histórico do item mudam
+  (e, se é oportunidade ativa com histórico velho, a cada passagem). A oportunidade atualizada mantém a posição
+  (`seen_at`) e só republica o evento se algo mudou; se deixou de compensar, vira `gone`. O aviso do Telegram sai
+  só para oportunidade nova. O mapa de avaliados vive em memória (reavalia tudo uma vez após reiniciar).
+- Balanço de 10 min: `State.hunt.message` diz quantos anúncios foram conferidos e o quanto o mais perto dava de
+  lucro (ou prejuízo); o log INFO traz os 3 mais perto, com o lucro no preço médio e no rápido.
+- `QueryListingsForItem` com 200 sem `data` conta como falha do endpoint (breaker) e loga status, tamanho, nomes
+  das chaves do topo e `success`; nunca o conteúdo.
+- Compra: uma por vez, do pedido até confirmar/terminar e ajustar o saldo; a segunda recebe 409 "termine a compra
+  em andamento primeiro".
