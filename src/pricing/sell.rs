@@ -87,6 +87,8 @@ pub struct SellEstimate {
     pub confidence: Confidence,
     pub probabilities: [f64; 3],
     pub volatility: Option<f64>,
+    /// Desvio do preço em 7 dias (a trava de troca), medido direto entre medianas com 7 dias de distância.
+    pub week_move: Option<f64>,
     pub risk: Risk,
     /// Frase curta em português para leigo.
     pub evidence: String,
@@ -99,7 +101,8 @@ pub enum Risk {
     High,
 }
 
-fn daily_volatility(points: &[PricePoint], now: i64) -> Option<f64> {
+/// Medianas diárias (dia, mediana ponderada por compras) dos últimos 30 dias, em ordem.
+fn daily_medians(points: &[PricePoint], now: i64) -> Vec<(i64, f64)> {
     let mut days = std::collections::BTreeMap::<i64, Vec<(f64, f64)>>::new();
     for p in points
         .iter()
@@ -109,21 +112,52 @@ fn daily_volatility(points: &[PricePoint], now: i64) -> Option<f64> {
             .or_default()
             .push((p.median_cents as f64, f64::from(p.purchases)));
     }
-    let medians: Vec<_> = days
-        .iter()
+    days.iter()
         .filter_map(|(day, values)| weighted_quantile(values, 0.5).map(|v| (*day, v)))
-        .collect();
-    let returns: Vec<_> = medians
+        .collect()
+}
+
+fn std_dev(values: &[f64]) -> f64 {
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    (values.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt()
+}
+
+fn daily_returns(medians: &[(i64, f64)]) -> Vec<f64> {
+    medians
         .windows(2)
         .filter(|w| w[1].0 == w[0].0 + 1)
         .map(|w| w[1].1 / w[0].1 - 1.0)
-        .collect();
-    if returns.len() < 2 {
-        return None;
-    }
-    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-    Some((returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64).sqrt())
+        .collect()
 }
+
+fn daily_volatility(medians: &[(i64, f64)]) -> Option<f64> {
+    let returns = daily_returns(medians);
+    (returns.len() >= 2).then(|| std_dev(&returns))
+}
+
+/// Desvio somado à queda média (subida não soma): descida contínua tem desvio zero, mas é risco.
+fn spread_with_drop(values: &[f64], scale: f64) -> f64 {
+    let drop = (values.iter().sum::<f64>() / values.len() as f64).min(0.0);
+    (std_dev(values) * scale.sqrt()).hypot(drop * scale)
+}
+
+/// A mediana diária oscila e volta, então o desvio diário vezes √7 tende a exagerar o risco de 7 dias
+/// (cerca do dobro nos itens medidos). Com pares suficientes mede o movimento de 7 dias direto, somando a
+/// queda média; senão cai no diário (desvio × √7 somado à queda média diária × 7).
+fn week_move(medians: &[(i64, f64)]) -> Option<f64> {
+    let by_day: std::collections::HashMap<_, _> = medians.iter().copied().collect();
+    let moves: Vec<_> = medians
+        .iter()
+        .filter_map(|(day, v)| by_day.get(&(day + 7)).map(|later| later / v - 1.0))
+        .collect();
+    if moves.len() >= WEEK_MOVE_MIN_PAIRS {
+        return Some(spread_with_drop(&moves, 1.0));
+    }
+    let returns = daily_returns(medians);
+    (returns.len() >= 2).then(|| spread_with_drop(&returns, 7.0))
+}
+
+const WEEK_MOVE_MIN_PAIRS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoEstimate {
@@ -411,7 +445,9 @@ pub fn estimate(
             .sum::<f64>()
             / weight(&window)
     };
-    let volatility = daily_volatility(points, now);
+    let medians = daily_medians(points, now);
+    let volatility = daily_volatility(&medians);
+    let week_move = week_move(&medians);
     let risk = match volatility {
         Some(v)
             if v <= 0.02
@@ -430,6 +466,7 @@ pub fn estimate(
     Ok(SellEstimate {
         probabilities: [probability(quick), probability(mid), probability(high)],
         volatility,
+        week_move,
         risk,
         quick: tier(quick),
         mid: tier(mid),
@@ -508,7 +545,7 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         && sell.mid.profit_cents >= MIN_LIST_PROFIT_CENTS
         && margin_pct >= MIN_LIST_MARGIN_PCT;
     let total: f64 = est.probabilities.iter().sum();
-    let ev_profit_cents = est.volatility.filter(|_| total > 0.0).map(|vol| {
+    let ev_profit_cents = est.week_move.filter(|_| total > 0.0).map(|week| {
         let expected = [
             sell.quick.profit_cents,
             sell.mid.profit_cents,
@@ -518,7 +555,7 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         .zip(est.probabilities)
         .map(|(profit, p)| *profit as f64 * p / total)
         .sum::<f64>();
-        (expected - price_cents as f64 * (vol * 7.0_f64.sqrt()).min(1.0)).round() as i64
+        (expected - price_cents as f64 * week.min(1.0)).round() as i64
     });
     let notify = listable
         && sell.mid.profit_cents >= notify_min_cents
@@ -938,6 +975,7 @@ mod tests {
             confidence: Confidence::High,
             probabilities: [1.0, 1.0, 1.0],
             volatility: Some(0.0),
+            week_move: Some(0.0),
             risk: Risk::Low,
             evidence: String::new(),
         }
@@ -959,7 +997,7 @@ mod tests {
             + weighted.sell.mid.profit_cents as f64)
             / 3.0;
         assert_eq!(weighted.ev_profit_cents, Some(expected.round() as i64));
-        different.volatility = Some(1.0);
+        different.week_move = Some(1.0);
         assert_eq!(
             evaluate(500, &different, 0).ev_profit_cents,
             Some(expected.round() as i64 - 500)
@@ -974,6 +1012,7 @@ mod tests {
         assert_eq!(sparse.len(), 3);
         let sparse = estimate(&sparse, NOW, None, None).unwrap();
         assert_eq!(sparse.volatility, None);
+        assert_eq!(sparse.week_move, None);
         assert_eq!(evaluate(500, &sparse, 0).ev_profit_cents, None);
         let rare = estimate(&flat(1000, 16), NOW, None, Some(rare(&[2.0; 3]))).unwrap();
         assert_eq!(rare.risk, Risk::Medium);
@@ -991,17 +1030,56 @@ mod tests {
     }
 
     #[test]
+    fn week_move_measures_seven_days_directly() {
+        // um dia por semana 10 % acima: oscila todo dia, mas em 7 dias volta ao mesmo preço
+        let mut weekly = hourly(24 * 29, 0, |_| (1000, 16));
+        for p in &mut weekly {
+            if p.ts.div_euclid(DAY) % 7 == 0 {
+                p.median_cents = 1100;
+            }
+        }
+        let e = estimate(&weekly, NOW, None, None).unwrap();
+        assert!(e.volatility.unwrap() > 0.03);
+        assert_eq!(e.week_move, Some(0.0));
+        // poucos pares de 7 dias: volta ao diário vezes √7
+        let short = estimate(&flat(1000, 16), NOW, None, None).unwrap();
+        assert_eq!(short.week_move, Some(0.0));
+        // 8 pares (d, d+7): 0, +10 %, -10 %, ... → desvio ≈ 0,0927 (média positiva não soma)
+        let mut medians: Vec<(i64, f64)> = (0..8).map(|d| (d, 1000.0)).collect();
+        medians.extend((8..15).map(|d| (d, if d % 2 == 0 { 1100.0 } else { 900.0 })));
+        let w = week_move(&medians).unwrap();
+        assert!((w - 0.0927).abs() < 0.0005, "{w}");
+        // 7 pares: volta ao diário vezes √7 (a queda média diária aqui é quase nula)
+        medians.pop();
+        let daily = daily_volatility(&medians).unwrap() * 7.0_f64.sqrt();
+        let w = week_move(&medians).unwrap();
+        assert!(w >= daily && w - daily < 0.001, "{w} vs {daily}");
+        // queda contínua de 10 % por semana: desvio zero, mas o risco é a queda
+        let falling: Vec<(i64, f64)> = (0..15)
+            .map(|d| (d, 1000.0 * 0.9_f64.powi(d as i32 / 7)))
+            .collect();
+        let w = week_move(&falling).unwrap();
+        assert!((w - 0.1).abs() < 1e-9, "{w}");
+        // queda diária contínua com poucos pares: o diário também soma a queda
+        let daily_fall: Vec<(i64, f64)> = (0..5)
+            .map(|d| (d, 1000.0 * 0.95_f64.powi(d as i32)))
+            .collect();
+        let w = week_move(&daily_fall).unwrap();
+        assert!((w - 0.35).abs() < 1e-9, "{w}");
+    }
+
+    #[test]
     fn risk_adjusted_negative_profit_does_not_notify() {
         let quick = crate::pricing::fees::buyer_pays(10_100);
         let mid = crate::pricing::fees::buyer_pays(10_500);
         let mut estimate = est(quick, mid, mid);
         estimate.probabilities = [0.5, 0.5, 0.0];
-        estimate.volatility = Some(0.05);
+        estimate.week_move = Some(0.05 * 7.0_f64.sqrt());
         let ev = evaluate(10_000, &estimate, 100);
         assert_eq!(ev.sell.mid.profit_cents, 500);
         assert_eq!(ev.ev_profit_cents, Some(-1023));
         assert!(ev.listable && ev.safe && !ev.notify);
-        estimate.volatility = None;
+        estimate.week_move = None;
         assert!(!evaluate(10_000, &estimate, 100).notify);
     }
 
