@@ -32,6 +32,12 @@ const MAX_GAP: Duration = Duration::from_secs(60);
 // de uma série de 429 o intervalo ficava perto de 60 s por quase um dia (visto ao vivo em 04/11).
 const SHORTEN_EVERY: Duration = Duration::from_secs(10 * 60);
 const SHORTEN_FACTOR: f64 = 0.85;
+// Ritmo aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso, e cada 6 h sem 429 desce
+// um degrau. Em 04–05/11, a 6 s fixos a Steam bloqueava a cada 1–2 h e cada série custava até 2 h paradas; o
+// encurtamento voltava aos 6 s em ~1,5 h e batia no mesmo limite de novo.
+const FLOOR_STEP: f64 = 1.25;
+const FLOOR_RELAX_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+const FLOOR_MAX: Duration = Duration::from_secs(20);
 const PAUSE_START: Duration = Duration::from_secs(60);
 // 30 min: em 04/11 a Steam seguiu dando 429 por horas com uma tentativa a cada 10 min; uma consulta depois de
 // minutos quietos passou. Tentar menos deixa a penalidade esfriar.
@@ -178,6 +184,9 @@ pub(crate) struct Limiter {
     last_adjust: Instant,
     last_query: Option<Instant>,
     recent: VecDeque<Instant>,
+    /// Piso aprendido no 1º 429 da última série e a hora do último 429 (ver `FLOOR_STEP`).
+    floor_at_429: Duration,
+    floor_since: Option<Instant>,
 }
 
 impl Limiter {
@@ -191,12 +200,26 @@ impl Limiter {
             last_adjust: now,
             last_query: None,
             recent: VecDeque::new(),
+            floor_at_429: MIN_GAP,
+            floor_since: None,
         }
     }
 
+    /// Menor intervalo agora: o aprendido no último 429, um degrau abaixo a cada 6 h quietas.
+    fn floor(&self, now: Instant) -> Duration {
+        let Some(t) = self.floor_since else {
+            return MIN_GAP;
+        };
+        let steps = now.saturating_duration_since(t).as_secs() / FLOOR_RELAX_EVERY.as_secs();
+        self.floor_at_429
+            .div_f64(FLOOR_STEP.powi(steps.min(20) as i32))
+            .max(MIN_GAP)
+    }
+
     fn shorten(&mut self, now: Instant) {
+        let floor = self.floor(now);
         while now.duration_since(self.last_adjust) >= SHORTEN_EVERY {
-            self.gap = self.gap.mul_f64(SHORTEN_FACTOR).max(MIN_GAP);
+            self.gap = self.gap.mul_f64(SHORTEN_FACTOR).max(floor);
             self.last_adjust += SHORTEN_EVERY;
         }
     }
@@ -229,6 +252,14 @@ impl Limiter {
         {
             self.pause_len = PAUSE_START;
         }
+        // 1º 429 da série: o intervalo em uso passou do que a Steam aguenta agora. Todo 429 recomeça as 6 h.
+        if self
+            .last_429
+            .is_none_or(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
+        {
+            self.floor_at_429 = self.gap.mul_f64(FLOOR_STEP).clamp(MIN_GAP, FLOOR_MAX);
+        }
+        self.floor_since = Some(now);
         let pause = self.pause_len.max(retry_after.unwrap_or_default());
         self.paused_until = Some(now + pause);
         self.pause_len = (self.pause_len * 2).min(PAUSE_MAX);
@@ -498,11 +529,15 @@ impl SteamClient {
             .map_or(0, |t| unix_in(t - now));
         let adjusted =
             unix_in(Duration::ZERO) - now.duration_since(g.limiter.last_adjust).as_secs() as i64;
+        let floor_since = g.limiter.floor_since.map_or(0, |t| {
+            unix_in(Duration::ZERO) - now.saturating_duration_since(t).as_secs() as i64
+        });
         format!(
-            "{}|{}|{}|{anon}|{adjusted}",
+            "{}|{}|{}|{anon}|{adjusted}|{}|{floor_since}",
             s.paused_until.or(last_429).unwrap_or(0),
             s.gap_ms,
-            g.limiter.pause_len.as_millis()
+            g.limiter.pause_len.as_millis(),
+            g.limiter.floor_at_429.as_millis()
         )
     }
 
@@ -518,6 +553,8 @@ impl SteamClient {
         // shortcut: texto antigo (4 campos) encurta a partir do 1º campo; se foi salvo num 429 logado ou numa troca de
         // conta, encurta duas vezes uma única vez (nunca abaixo do piso de 6 s). Some no próximo 429, que grava o 5º.
         let adjusted = parts.next().and_then(|r| r.ok()).unwrap_or(until);
+        let floor = parts.next().and_then(|r| r.ok());
+        let floor_since = parts.next().and_then(|r| r.ok());
         let now = Instant::now();
         let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
         let g = &mut *self.inner.lock().unwrap();
@@ -527,24 +564,31 @@ impl SteamClient {
                 Some(now + Duration::from_secs(anon_left as u64).min(ANON_AFTER_429));
         }
         let l = &mut g.limiter;
+        if let (Some(f), Some(t)) = (floor, floor_since.filter(|t| *t > 0)) {
+            let ago = (unix_in(Duration::ZERO) - t).max(0) as u64;
+            l.floor_at_429 = ms(f).clamp(MIN_GAP, FLOOR_MAX);
+            l.floor_since = now.checked_sub(Duration::from_secs(ago));
+        }
         // O tempo desde o último encurtamento salvo continua encurtando; sem isso cada reinício voltava ao
         // intervalo de horas atrás e levava mais 2,5 h para sair dele (visto ao vivo em 04/11).
         let since = (unix_in(Duration::ZERO) - adjusted).max(0) as u64;
         let every = SHORTEN_EVERY.as_secs();
         l.gap = ms(gap)
             .mul_f64(SHORTEN_FACTOR.powi((since / every).min(100) as i32))
-            .clamp(MIN_GAP, MAX_GAP);
+            .clamp(MIN_GAP, MAX_GAP)
+            .max(l.floor(now));
         // o pedaço de 10 min já andado também conta para o próximo encurtamento
         l.last_adjust = now
             .checked_sub(Duration::from_secs(since % every))
             .unwrap_or(now);
-        let quiet_for = (unix_in(Duration::ZERO) - until).max(0) as u64;
+        // a hora do último 429 vem do 7º campo; texto antigo usa o 1º (o fim da pausa, se salvo durante uma)
+        let last_429 = floor_since.filter(|t| *t > 0).unwrap_or(until);
+        let quiet_for = (unix_in(Duration::ZERO) - last_429).max(0) as u64;
         let quiet = quiet_for >= PAUSE_RESET_AFTER.as_secs();
         if let Some(Ok(p)) = pause.filter(|_| !quiet) {
             l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
             // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
-            // shortcut: salvo durante uma pausa, conta do fim da pausa (mais cauteloso que o 429 real); gravar a
-            // hora do 429 num 5º campo se a escalada longa atrapalhar.
+            // shortcut: texto antigo salvo durante uma pausa conta do fim da pausa (mais cauteloso que o 429 real).
             l.last_429 = Some(
                 now.checked_sub(Duration::from_secs(quiet_for))
                     .unwrap_or(now),
@@ -1037,6 +1081,46 @@ mod tests {
         let after = t + Duration::from_secs(40 * 60);
         assert_eq!(l.stats(after).gap_ms, 7650); // 9000 × 0,85
         assert_eq!(l.stats(t + Duration::from_secs(48 * 3600)).gap_ms, 6000);
+    }
+
+    #[test]
+    fn limiter_learns_floor_from_first_429_and_relaxes_every_6h() {
+        let t = t0();
+        let mut l = Limiter::new(t);
+        l.on_429(t, None); // a 6 s: piso 7,5 s
+        // 429s seguintes da série (intervalo já alongado) não sobem o piso
+        l.on_429(t + Duration::from_secs(61), None);
+        let h = |x: u64| t + Duration::from_secs(x * 3600);
+        assert_eq!(l.stats(h(5)).gap_ms, 7500);
+        assert_eq!(l.stats(h(7)).gap_ms, 6000); // 6 h quietas: 7,5 ÷ 1,25
+        // a 6 s de novo, outro 429 depois de 60 min: piso 7,5 s outra vez, sobrevive ao reinício
+        l.on_429(h(7), None);
+        assert_eq!(l.stats(h(10)).gap_ms, 7500);
+        // um 429 da mesma série 30 min depois não sobe o piso, mas recomeça as 6 h
+        let half = h(7) + Duration::from_secs(1800);
+        l.on_429(half, None);
+        assert_eq!(l.stats(h(13)).gap_ms, 7500);
+        assert_eq!(l.stats(h(14)).gap_ms, 6000);
+        l.on_429(h(15), None);
+        let c = SteamClient::new().unwrap();
+        c.inner.lock().unwrap().limiter = l;
+        let saved = SteamClient::saved_pace(&mut c.inner.lock().unwrap(), Instant::now());
+        let again = SteamClient::new().unwrap();
+        again.restore_pace(&saved);
+        let floor = again.inner.lock().unwrap().limiter.floor(Instant::now());
+        assert_eq!(floor, Duration::from_millis(7500));
+        // reinício no meio de uma pausa: o último 429 é a hora do 7º campo, não o fim da pausa
+        let now_u = unix_in(Duration::ZERO);
+        let mid = SteamClient::new().unwrap();
+        mid.restore_pace(&format!(
+            "{}|9000|120000|0|{}|7500|{}",
+            now_u + 600,
+            now_u - 1800,
+            now_u - 1800
+        ));
+        let ago =
+            Instant::now().duration_since(mid.inner.lock().unwrap().limiter.last_429.unwrap());
+        assert!((1795..=1805).contains(&ago.as_secs()), "{ago:?}");
     }
 
     #[tokio::test]
