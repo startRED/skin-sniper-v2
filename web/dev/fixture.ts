@@ -78,7 +78,12 @@ let lastQuery = nowS();
 let keyExamples: State['keys'] | null = null;
 let qrExample: { state: 'waiting' | 'done' | 'expired' | 'error'; account?: string; detail?: string } = { state: 'waiting' };
 
+// Compras simuladas em andamento: `reset` cancela, senão a compra de uma rodada termina no meio da seguinte.
+let buyTimers: ReturnType<typeof setTimeout>[] = [];
+
 function reset(scenario: string) {
+  buyTimers.forEach(clearTimeout);
+  buyTimers = [];
   seq = 0;
   saldoCents = 5000;
   saldoSource = 'steam';
@@ -223,13 +228,13 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     if (o.price_cents > saldoCents) return send(res, 400, { error: 'Saldo insuficiente para essa compra.' });
     const pur: Purchase = { id: o.id, name: o.name, icon_url: o.icon_url, price_cents: o.price_cents, status: 'pending', message: null, bought_at: null, tradable_at: null, sell: o.sell };
     purchases = [pur, ...purchases.filter((x) => x.id !== o.id)];
-    setTimeout(() => { Object.assign(pur, { status: 'need_confirmation' }); emit('purchase', pur); }, 1200);
-    setTimeout(() => {
+    buyTimers.push(setTimeout(() => { Object.assign(pur, { status: 'need_confirmation' }); emit('purchase', pur); }, 1200));
+    buyTimers.push(setTimeout(() => {
       Object.assign(pur, { status: 'bought', bought_at: nowS(), tradable_at: nowS() + 7 * 86400 });
       saldoCents -= o.price_cents;
       opps = opps.filter((x) => x.id !== o.id);
       emit('purchase', pur); emit('gone', { id: o.id }); emit('state', state());
-    }, 5500);
+    }, 5500));
     return send(res, 200, pur);
   }
   if (p === '/api/__dev/scenario' && m === 'POST') {
