@@ -187,10 +187,16 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 - Nota por dia é uma hipótese, não probabilidade medida de venda: em cada preço, calcula a fração do peso
   dos últimos 7 dias com preço projetado igual ou maior; no raro comprovado, combina cada ponto com cada
   múltiplo válido do grupo. Normaliza as três frações para somarem 1 e faz a média ponderada dos lucros
-  líquidos. Desconta `preço de compra × min(1, volatilidade × √7)`: penalidade conservadora para possível
+  líquidos. Desconta `preço de compra × min(1, movimento de 7 dias)`: penalidade conservadora para possível
   queda durante a trava, não chance estatística de queda. Arredonda o resultado em centavos.
+  Movimento de 7 dias é o desvio padrão populacional das variações entre medianas diárias com 7 dias de
+  distância, se houver pelo menos 8 pares nos últimos 30 dias; senão, volatilidade × √7. A mediana diária
+  oscila e volta, e o diário × √7 chegou a dobrar o risco medido direto nos itens conferidos. A queda média de
+  7 dias entra junto (raiz da soma dos quadrados), para que uma descida contínua não pareça risco zero; no
+  caso sem pares, entra a queda média diária × 7.
   Volatilidade é o desvio padrão populacional das variações entre medianas diárias ponderadas por compras,
-  em dias consecutivos dos últimos 30 dias; exige pelo menos duas variações. Sem isso, lucro esperado é nulo.
+  em dias consecutivos dos últimos 30 dias; exige pelo menos duas variações.
+  Sem nenhuma das duas medidas, lucro esperado é nulo.
   Dias presos = 7 + prazo médio em horas / 24; sem prazo medido (incluindo raro comprovado), dias e nota são
   nulos. Nota = lucro esperado / dias presos, arredondada em centavos; nulos ficam por último.
 - Risco baixo: volatilidade ≤ 2 % ao dia, ≥ 20 vendas/dia e, em raro, n ≥ 8. Médio: volatilidade ≤ 5 %,
