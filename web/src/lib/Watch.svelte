@@ -81,8 +81,8 @@
             <span class="names"><span class="nm">{w.name}</span><small class="reason">vende {Math.round(w.sales_per_day)}/dia · pedidos lidos {w.book_at ? ago(w.book_at, app.now) : '—'}</small></span>
           </div>
           <div class="c" role="cell"><small class="muted">pedir a</small> <b>{money(w.bid_cents!)}</b></div>
-          <div class="c" role="cell"><span class="pill ok">+{money(w.bid_profit_cents!)}</span> <small class="muted">se encher</small></div>
-          <div class="c" role="cell"><a class="btn" href={steam(w.name)} target="_blank" rel="noopener noreferrer">Abrir na Steam</a></div>
+          <div class="c" role="cell"><span class="pill ok">+{money(w.bid_profit_cents!)}</span> <small class="muted nowrap">se encher</small></div>
+          <div class="c go" role="cell"><a class="btn" href={steam(w.name)} target="_blank" rel="noopener noreferrer">Abrir na Steam</a></div>
         </div>
       {/each}
     </div>
@@ -118,6 +118,7 @@
   .head { min-height: 34px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
   .row { min-height: 56px; border-bottom: 1px solid var(--line); }
   .bid { display: grid; align-items: center; column-gap: 12px; padding: 0 16px; grid-template-columns: minmax(260px, 3fr) repeat(2, minmax(110px, 1fr)) auto; }
+  .nowrap { white-space: nowrap; }
   .row.ready { background: var(--green-bg); box-shadow: inset 3px 0 0 var(--green); }
   .c { min-width: 0; }
   .c::before { content: attr(data-l); display: none; }
@@ -130,7 +131,9 @@
   @media (max-width: 899px) {
     .head { display: none; }
     .grid { grid-template-columns: repeat(3, 1fr); row-gap: 8px; padding: 12px 14px; }
-    .bid { grid-template-columns: repeat(3, 1fr); row-gap: 8px; padding: 12px 14px; }
+    .bid { grid-template-columns: repeat(2, 1fr); row-gap: 8px; padding: 12px 14px; }
+    .bid .go { grid-column: 1 / -1; }
+    .bid .go .btn { width: 100%; justify-content: center; }
     .skin { grid-column: 1 / -1; }
     .c::before { display: block; color: var(--faint); font-size: 11px; }
     .skin::before { display: none; }
