@@ -226,7 +226,7 @@ pub struct Ctx<'a> {
 
 /// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 1 venda/dia e lucro possível ≥ mínimo, por nota
 /// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela × desgaste cujo piso cabe no saldo (até
-/// `RARE_MAX_TASKS`), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
+/// `RARE_MAX_TASKS`, os que mais vendem primeiro), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
 pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     let ratio_floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, c.ratio));
@@ -262,7 +262,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     let total: f64 = common.iter().map(|c| c.1.score).sum();
     let mut tasks: Vec<Task> = common.into_iter().map(|c| c.1).collect();
     // Raros: skin com tabela × desgaste, uma vez só (itens repetidos do catálogo não duplicam).
-    let mut by_wear: BTreeMap<(&str, u8), (i64, &str)> = BTreeMap::new();
+    let mut by_wear: BTreeMap<(&str, u8), (i64, &str, f64)> = BTreeMap::new();
     for i in items {
         let (Some(code), Some(wear)) = (i.code.as_deref(), wear_of(&i.name)) else {
             continue;
@@ -270,12 +270,15 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         let f = ratio_floor(i).unwrap_or(0);
         let plain = !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir");
         if plain && f <= c.saldo && !seed_ranges(&i.name).is_empty() {
-            by_wear.entry((code, wear)).or_insert((f, i.name.as_str()));
+            let spd = i.sales_per_day.unwrap_or(MIN_SALES_PER_DAY);
+            by_wear
+                .entry((code, wear))
+                .or_insert((f, i.name.as_str(), spd));
         }
     }
-    let mut rare: Vec<(i64, Task, f64)> = by_wear
+    let mut rare: Vec<(f64, i64, Task, f64)> = by_wear
         .into_iter()
-        .filter_map(|((code, wear), (f, name))| {
+        .filter_map(|((code, wear), (f, name, spd))| {
             let id = format!("r:{code}:{wear}");
             let seeds = seed_ranges(name);
             let seen = observed(c.floors, &id, c.now);
@@ -298,16 +301,22 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
                 } else {
                     1.0
                 };
-                (seen.floor.unwrap_or(f), task, weight)
+                (spd, seen.floor.unwrap_or(f), task, weight)
             })
         })
         .collect();
-    rare.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+    // Quem mais vende primeiro: mais anúncios novos por hora (mais chance de seed rara) e revenda mais rápida.
+    // O único achado real (Moonrise FT, ~300 vendas/dia) veio do topo; skins de 0–1 venda/dia ocupavam vagas.
+    rare.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.id.cmp(&b.2.id))
+    });
     rare.truncate(RARE_MAX_TASKS);
     // Nota-base dos raros: soma igual à dos comuns (só desempata braços ainda não testados).
     let per_weight =
-        if total > 0.0 { total } else { 10.0 } / rare.iter().map(|r| r.2).sum::<f64>().max(1e-9);
-    tasks.extend(rare.into_iter().map(|(_, t, w)| Task {
+        if total > 0.0 { total } else { 10.0 } / rare.iter().map(|r| r.3).sum::<f64>().max(1e-9);
+    tasks.extend(rare.into_iter().map(|(_, _, t, w)| Task {
         score: per_weight * w,
         ..t
     }));
@@ -1064,6 +1073,33 @@ mod tests {
             (moon.wear, moon.seeds.len()),
             (Some(2), seed_ranges(&moon.name).len())
         );
+    }
+
+    #[test]
+    fn rare_tasks_that_sell_more_come_first() {
+        let (mut items, saldo) = catalog_fixture();
+        let spd = |name: &str, v: f64, items: &mut Vec<Item>| {
+            items
+                .iter_mut()
+                .find(|i| i.name == name)
+                .unwrap()
+                .sales_per_day = Some(v);
+        };
+        spd("Glock-18 | Moonrise (Battle-Scarred)", 0.2, &mut items);
+        spd("Glock-18 | Moonrise (Field-Tested)", 335.0, &mut items);
+        spd("Five-SeveN | Case Hardened (Field-Tested)", 3.0, &mut items);
+        let hit = NO_HITS();
+        let rare: Vec<String> = select(&items, &ctx(saldo, &hit, &HashMap::new()))
+            .into_iter()
+            .filter(|t| t.rare())
+            .map(|t| t.name)
+            .collect();
+        // o corte em RARE_MAX_TASKS fica com o começo desta ordem. Heat Treated FT vem do fixture com 241/dia;
+        // sem venda medida conta 1/dia; o de 0,2/dia vai para o fim
+        assert_eq!(rare[0], "Glock-18 | Moonrise (Field-Tested)");
+        assert_eq!(rare[1], "Desert Eagle | Heat Treated (Field-Tested)");
+        assert_eq!(rare[2], "Five-SeveN | Case Hardened (Field-Tested)");
+        assert_eq!(rare.last().unwrap(), "Glock-18 | Moonrise (Battle-Scarred)");
     }
 
     #[test]
