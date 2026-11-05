@@ -63,16 +63,19 @@ pub enum Endpoint {
     Buy,
     /// api.steampowered.com (login por QR e renovação): mesmo limitador global, breaker próprio.
     Auth,
+    /// Livro de pedidos de compra (`/market/orderbook`).
+    Book,
 }
 
 impl Endpoint {
-    const ALL: [Endpoint; 6] = [
+    const ALL: [Endpoint; 7] = [
         Self::Listings,
         Self::History,
         Self::Search,
         Self::Session,
         Self::Buy,
         Self::Auth,
+        Self::Book,
     ];
     fn idx(self) -> usize {
         self as usize
@@ -356,7 +359,7 @@ type PaceHook = Arc<dyn Fn(String) + Send + Sync>;
 
 struct Inner {
     limiter: Limiter,
-    breakers: [Breaker; 6],
+    breakers: [Breaker; 7],
     cookie: Option<Cookie>,
     /// Cookies que a Steam setou nas respostas autenticadas (`webTradeEligibility` etc.); valem enquanto
     /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
@@ -415,7 +418,7 @@ impl SteamClient {
             base: base.trim_end_matches('/').to_string(),
             inner: Mutex::new(Inner {
                 limiter: Limiter::new(Instant::now()),
-                breakers: [Breaker::new(); 6],
+                breakers: [Breaker::new(); 7],
                 cookie: None,
                 extra: Vec::new(),
                 on_pace: None,
@@ -628,10 +631,21 @@ impl SteamClient {
     /// cookie, como a página do mercado aberta no navegador (pedido do Erick: ler o mercado logado), menos
     /// nas 6 h depois de um 429 logado (`ANON_AFTER_429`).
     pub async fn action(&self, ep: Endpoint, method: &str, qp: &Value) -> Result<Value> {
+        self.action_at(ep, "/market/actions", method, qp).await
+    }
+
+    /// `action` numa rota própria (ex.: `/market/orderbook`, método `Load`).
+    pub async fn action_at(
+        &self,
+        ep: Endpoint,
+        route: &str,
+        method: &str,
+        qp: &Value,
+    ) -> Result<Value> {
         for attempt in 0..2 {
             let req = self
                 .http
-                .get(self.url("/market/actions"))
+                .get(self.url(route))
                 .query(&[("q", method), ("qp", &qp.to_string())])
                 .header("x-valve-request-type", "queryAction")
                 .header("accept", "application/json, text/javascript, */*");
@@ -742,7 +756,7 @@ impl SteamClient {
         if auth {
             let g = self.inner.lock().unwrap();
             // Decidido depois da vaga: um 429 logado de outra consulta durante a espera já vale para esta.
-            let anon = matches!(ep, Endpoint::Listings | Endpoint::History)
+            let anon = matches!(ep, Endpoint::Listings | Endpoint::History | Endpoint::Book)
                 && g.anon_reads_until.is_some_and(|t| Instant::now() < t);
             if let Some(c) = g.cookie.as_ref().filter(|_| !anon) {
                 sent_by = Some(c.steam_login_secure.clone());
@@ -790,7 +804,9 @@ impl SteamClient {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(Duration::from_secs);
             let mut g = self.inner.lock().unwrap();
-            if sent_by.is_some() && matches!(ep, Endpoint::Listings | Endpoint::History) {
+            if sent_by.is_some()
+                && matches!(ep, Endpoint::Listings | Endpoint::History | Endpoint::Book)
+            {
                 // A Steam segurou a conta, não o IP: sem pausa, a próxima leitura (no ritmo) vai sem login.
                 // 429 de uma sessão que já saiu não marca a conta nova.
                 let current = g.cookie.as_ref().map(|c| c.steam_login_secure.as_str());

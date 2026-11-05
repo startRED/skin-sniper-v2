@@ -75,4 +75,7 @@ export type WatchRow = {
   mode: 'barato' | 'seed';
   score: number;
   reason: string;
+  bid_cents: number | null; // pedido de compra sugerido (1 centavo acima do maior); null quando não compensa
+  bid_profit_cents: number | null; // lucro no preço médio se o pedido encher
+  book_at: number | null;
 };

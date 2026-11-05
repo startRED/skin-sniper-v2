@@ -24,6 +24,10 @@
     return [...by.values()];
   });
   const n = $derived(rows.length);
+  // Pedidos de compra que compensam, o de maior lucro primeiro. Só sugestão: quem abre na Steam é o Erick.
+  // Livro com mais de 1 h some também aqui: a lista pode ter ficado velha se a atualização falhou.
+  const bids = $derived(app.watch.filter((w) => w.bid_cents != null && app.now - w.book_at! <= 3600).sort((a, b) => b.bid_profit_cents! - a.bid_profit_cents!));
+  const steam = (name: string) => `https://steamcommunity.com/market/listings/730/${encodeURIComponent(name)}`;
   // Quanto o menor anúncio precisa cair para dar lucro; null sem os dois números (max_buy ≤ 0 = nenhum preço dá lucro).
   const gap = (w: WatchRow) =>
     w.floor_cents != null && w.max_buy_cents != null && w.max_buy_cents > 0 ? w.floor_cents - w.max_buy_cents : null;
@@ -65,6 +69,26 @@
   </div>
 {/snippet}
 
+{#if bids.length > 0}
+  <section aria-labelledby="h-bids">
+    <h2 id="h-bids">Pedidos de compra que compensam</h2>
+    <p class="muted sub">Abra um pedido na Steam com o valor abaixo: ele fica na frente da fila e, se alguém vender para ele, dá esse lucro na venda pelo preço médio.</p>
+    <div class="table" role="table" aria-label="Pedidos de compra sugeridos">
+      {#each bids as w (w.name)}
+        <div class="row bid" role="row">
+          <div class="c skin" role="cell">
+            <img src={w.icon_url} alt="" width="40" height="40" loading="lazy" />
+            <span class="names"><span class="nm">{w.name}</span><small class="reason">vende {Math.round(w.sales_per_day)}/dia · pedidos lidos {w.book_at ? ago(w.book_at, app.now) : '—'}</small></span>
+          </div>
+          <div class="c" role="cell"><small class="muted">pedir a</small> <b>{money(w.bid_cents!)}</b></div>
+          <div class="c" role="cell"><span class="pill ok">+{money(w.bid_profit_cents!)}</span> <small class="muted">se encher</small></div>
+          <div class="c" role="cell"><a class="btn" href={steam(w.name)} target="_blank" rel="noopener noreferrer">Abrir na Steam</a></div>
+        </div>
+      {/each}
+    </div>
+  </section>
+{/if}
+
 {#if n > 0}
   {#if collapsed}
     <details class="fold">
@@ -93,6 +117,7 @@
   }
   .head { min-height: 34px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
   .row { min-height: 56px; border-bottom: 1px solid var(--line); }
+  .bid { display: grid; align-items: center; column-gap: 12px; padding: 0 16px; grid-template-columns: minmax(260px, 3fr) repeat(2, minmax(110px, 1fr)) auto; }
   .row.ready { background: var(--green-bg); box-shadow: inset 3px 0 0 var(--green); }
   .c { min-width: 0; }
   .c::before { content: attr(data-l); display: none; }
@@ -105,6 +130,7 @@
   @media (max-width: 899px) {
     .head { display: none; }
     .grid { grid-template-columns: repeat(3, 1fr); row-gap: 8px; padding: 12px 14px; }
+    .bid { grid-template-columns: repeat(3, 1fr); row-gap: 8px; padding: 12px 14px; }
     .skin { grid-column: 1 / -1; }
     .c::before { display: block; color: var(--faint); font-size: 11px; }
     .skin::before { display: none; }

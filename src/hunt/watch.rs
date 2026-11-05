@@ -67,7 +67,10 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
         })
         .await?;
 
-    let correction = h.lock().correction;
+    let (correction, books, saldo) = {
+        let s = h.lock();
+        (s.correction, s.books.clone(), s.saldo)
+    };
     let mut rows: Vec<WatchRow> = tasks
         .iter()
         .zip(facts)
@@ -97,12 +100,30 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
             };
             // O piso entra como concorrente de propósito: o teto vale para um anúncio NOVO abaixo dele, que
             // disputa a venda com o piso. O próprio anúncio do piso já foi julgado pelo `detect` contra o
-            // segundo mais barato da página.
-            let max = (!rare || evidence.is_some())
-                .then(|| sell::estimate(&pts, now, floor.filter(|_| !rare), evidence).ok())
-                .flatten()
+            // segundo mais barato da página. O menor anúncio do livro (≤ 1 h) também concorre.
+            let book = books.get(&t.name).filter(|_| !rare);
+            let fresh = book
+                .filter(|(at, _)| now - at <= super::orders::STALE)
+                .and_then(|(_, b)| b.as_ref());
+            let rival = floor
+                .into_iter()
+                .chain(fresh.and_then(|b| b.min_sell_cents))
+                .min()
+                .filter(|_| !rare);
+            let est = (!rare || evidence.is_some())
+                .then(|| sell::estimate(&pts, now, rival, evidence).ok())
+                .flatten();
+            let max = est
+                .as_ref()
                 .map(|e| max_buy(seller_gets(e.mid.price_cents)))
                 .filter(|m| *m > 0); // sem preço de compra que dê lucro: sem teto
+            let bid = fresh
+                .and_then(|b| b.max_buy_cents)
+                .map(|top| top + 1)
+                .filter(|&p| p <= saldo && rival.is_none_or(|r| p < r))
+                .zip(est.as_ref())
+                .map(|(p, e)| (p, sell::evaluate(p, e, 0)))
+                .filter(|(_, ev)| ev.listable && ev.ev_profit_cents.is_some_and(|x| x > 0));
             WatchRow {
                 name: t.name.clone(),
                 icon_url: icon,
@@ -115,6 +136,9 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
                 mode: t.mode().label().to_string(),
                 score,
                 reason,
+                bid_cents: bid.as_ref().map(|(p, _)| *p),
+                bid_profit_cents: bid.map(|(_, ev)| ev.sell.mid.profit_cents),
+                book_at: book.map(|(at, _)| *at),
             }
         })
         .collect();

@@ -32,6 +32,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `steam/client.rs` | HTTP único da Steam: cookie da sessão, limitador adaptativo, breakers por endpoint |
 | `steam/listings.rs` | código G, `QueryListingsForItem` (com `propertyFilters`), parse de `asset_properties` |
 | `steam/history.rs` | `QueryPriceHistory` → pontos `(ts, mediana_centavos, compras)` |
+| `steam/book.rs` | `/market/orderbook` `Load` → maior pedido de compra e quantos pedidos abertos |
 | `steam/search.rs` | `search/render` para descoberta de catálogo (USD → BRL por razão medida) |
 | `steam/session.rs` | valida o `steamLoginSecure`, obtém `sessionid`, lê saldo da carteira |
 | `steam/buy.rs` | `buylisting` com o fluxo `need_confirmation` |
@@ -267,6 +268,13 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   valerem mesmo com a fila atrasada.
 - `/api/watch`: teto de compra ≤ 0 vira nulo e linhas sem teto vão para o fim. Raro mostra teto só quando o
   CSFloat já em cache tem ≥ 3 vendas do grupo (sem rede na rota); senão nulo.
+- Pedidos de compra (decisão do Erick: só sugerir, ele abre na Steam): `hunt/orders.rs` gasta uma volta do laço a
+  cada 60 s com o livro do alvo comum mais velho (livro com < 30 min não é relido; leitura que falhou conta como lida
+  e apaga o livro; raro nunca). `/api/watch` sugere `bid_cents` = maior pedido + 1 centavo quando o livro tem ≤ 1 h,
+  cabe no saldo, fica abaixo do menor anúncio (o visto na caça e o do próprio livro, que também limita a revenda e o
+  "compraria até"), entra na lista
+  (lucro ≥ R$ 0,20 e margem ≥ 5 % no preço médio) e o lucro com o risco dos 7 dias é positivo. Os livros ficam só em
+  memória: reiniciar começa do zero.
 - Concorrência do `quick` e do `mid`: só conta outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns); um
   comum barato não limita a venda de um T1.
 - Anúncio acima do saldo não entra em `listings_seen`: se o saldo subir, ainda é novo. Tarefa que sai da seleção

@@ -89,7 +89,7 @@ Protobuf (dump do webui): `CEconItem_AssetProperty {propertyid=1; int64 int_valu
 - Antigo: `/market/pricehistory/?appid=&market_hash_name=` exige sessão logada (`steamLoginSecure`) — https://github.com/Laxnring/csgoprices , https://github.com/HilliamT/scm-price-history
 - **Novo (sonda local): `q=QueryPriceHistory&qp=[730,"Glock-18 | Moonrise (Field-Tested)"]` responde sem login**, com `{"ecurrency":7,"prices":[{"time":unix,"price_median":float BRL,"purchases":n}]}`. São 3895 pontos desde 2018: diários no começo, **horários nos últimos ~30 dias** (horário a partir de 2026-10-05, 721 pontos). A página do item também já vem com o histórico embutido.
 - `QueryRecentSales`: 50 vendas globais de vários apps (`listingid, rtSold, strSoldPrice`), sem float nem seed. Não serve para preço por item.
-- Livro: `GET /market/orderbook?q=Load&qp=[730,"<hash name>"]` (header queryAction) → `amtMaxBuyOrder, amtMinSellOrder, eCurrency, cBuyOrders, cSellOrders, rgCompactBuyOrders[preço,qtd,...]`. O front revalida a cada 5 s (`refetchInterval:5e3` no bundle).
+- Livro: `GET /market/orderbook?q=Load&qp=[730,"<hash name>"]` (header queryAction) → `amtMaxBuyOrder, amtMinSellOrder, eCurrency, cBuyOrders, cSellOrders, rgCompactBuyOrders[preço,qtd,...]`. O front revalida a cada 5 s (`refetchInterval:5e3` no bundle). Medido em 05/11/2026 sem login (fixture `steam_orderbook_negev_2026-11.json`): o `data` do envelope é `{"success":true,"data":{…}}`, valores em centavos BRL.
 - **HIPÓTESE:** a moeda BRL sem login vem da geolocalização do IP (o cookie devolvido foi `timezoneName=America/Los_Angeles`, então não é por fuso).
 
 ---

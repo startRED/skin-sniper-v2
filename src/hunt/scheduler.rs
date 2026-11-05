@@ -385,6 +385,8 @@ pub enum Tick {
     Idle,
     Discovery,
     Watched(String),
+    /// Leu um livro de pedidos (`orders`).
+    Book,
 }
 
 /// Um passo do laço: descoberta (se há crédito) ou a próxima consulta de vigilância.
@@ -429,6 +431,9 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
                 return Tick::Discovery;
             }
         }
+    }
+    if super::orders::maybe_step(h).await {
+        return Tick::Book;
     }
     // `next` já conta a consulta: uma falha não deixa o mesmo alvo ocupando a frente.
     let next = h.lock().queue.next(h.now());

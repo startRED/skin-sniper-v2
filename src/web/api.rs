@@ -188,6 +188,13 @@ pub struct WatchRow {
     /// Por que a agenda dá (ou não) consultas a este alvo, em palavras curtas: "rendeu R$ 1,20 em 30
     /// consultas", "testando alvo novo", "quase deu lucro 3 vezes", "sem achar nada há 5 h".
     pub reason: String,
+    /// Pedido de compra sugerido: 1 centavo acima do maior pedido aberto, só quando cabe no saldo, fica abaixo
+    /// do menor anúncio e ainda dá lucro (preço médio) com o risco dos 7 dias positivo. Nunca em item raro.
+    pub bid_cents: Option<i64>,
+    /// Lucro no preço médio se o pedido encher.
+    pub bid_profit_cents: Option<i64>,
+    /// Quando o livro de pedidos foi lido.
+    pub book_at: Option<i64>,
 }
 
 /// Leitura de `Settings`: segredos já mascarados (`••••gLO9`).
