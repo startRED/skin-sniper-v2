@@ -139,7 +139,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
    por (skin com tabela × desgaste) cujo piso cabe no saldo (`propertyFilters` por faixa de seed dos tiers; a
-   tarefa percorre as faixas em rodízio, uma por consulta).
+   tarefa percorre as faixas em rodízio, uma por consulta). Até 24 raros, os que mais vendem por dia primeiro
+   (sem venda medida conta 1/dia): giro alto traz anúncio novo, e a revenda sai mais rápido.
    - **Piso:** o do anúncio visto na última consulta da tarefa (vale 6 h); sem consulta ainda, USD × razão medida,
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
      o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
