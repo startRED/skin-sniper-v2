@@ -129,7 +129,8 @@ function say(text: string) {
 }
 
 function qualifies(o: Opportunity) {
-  return o.safe && o.sell.mid.profit_cents >= (app.settings?.notify_min_profit_cents ?? 100);
+  // mesma regra do servidor (sell::evaluate): lucro esperado positivo, sem exigir lucro na venda rápida
+  return (o.ev_profit_cents ?? 0) > 0 && o.sell.mid.profit_cents >= (app.settings?.notify_min_profit_cents ?? 100);
 }
 
 export function notify(o: Opportunity) {

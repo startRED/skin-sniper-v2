@@ -722,9 +722,18 @@ pub async fn drop_tasks(h: &Hunt, tasks: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Aviso no Telegram (uma vez por anúncio; o próprio `Telegram` lembra). Em segundo plano: o envio
-/// espera o ritmo do Telegram e não pode segurar a caça.
+/// Aviso no Windows e no Telegram (uma vez por anúncio: só chega aqui o que é novo; o próprio
+/// `Telegram` também lembra). Em segundo plano: o envio espera o ritmo do Telegram e não pode segurar a caça.
 fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>) {
+    crate::notify::desktop(
+        &format!("{} de lucro · {}", brl(opp.sell.mid.profit_cents), opp.name),
+        &format!(
+            "Compre por {} e venda por {}. Clique para abrir na Steam.",
+            brl(opp.price_cents),
+            brl(opp.sell.mid.price_cents)
+        ),
+        &opp.steam_url,
+    );
     let Some(tg) = h.telegram.clone() else {
         return;
     };

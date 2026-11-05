@@ -475,7 +475,8 @@ pub struct Evaluation {
     pub safe: bool,
     /// Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 %.
     pub listable: bool,
-    /// Vale avisar: entra na lista, é `safe`, tem lucro esperado positivo e `mid` chega ao mínimo.
+    /// Vale avisar: entra na lista, tem lucro esperado positivo e `mid` chega ao mínimo. Não exige `safe`:
+    /// o lucro esperado já pesa o risco, e raro quase nunca é `safe` (a venda rápida ignora o prêmio).
     pub notify: bool,
 }
 
@@ -520,7 +521,6 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         (expected - price_cents as f64 * (vol * 7.0_f64.sqrt()).min(1.0)).round() as i64
     });
     let notify = listable
-        && safe
         && sell.mid.profit_cents >= notify_min_cents
         && ev_profit_cents.is_some_and(|profit| profit > 0);
     let days_locked = sell.mid.eta_hours.map(|hours| 7.0 + hours / 24.0);
@@ -1031,9 +1031,9 @@ mod tests {
         let big = 100_000;
         let ev = evaluate(big, &est(big, 120_000, 120_000), 0);
         assert!(ev.sell.mid.profit_cents >= 20 && ev.margin_pct < 5.0 && !ev.listable);
-        // lucra no mid, perde no quick: lista mas não é safe nem avisa
+        // lucra no mid, perde no quick: não é safe, mas avisa porque o lucro esperado é positivo
         let ev = evaluate(560, &est(500, 1107, 1400), 100);
-        assert!(ev.listable && !ev.safe && !ev.notify);
+        assert!(ev.listable && !ev.safe && ev.notify);
         // lucro abaixo do mínimo do usuário: lista, não avisa
         let ev = evaluate(560, &est(900, 1107, 1400), 500);
         assert!(ev.listable && ev.safe && !ev.notify);
