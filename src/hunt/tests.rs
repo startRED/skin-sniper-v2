@@ -703,6 +703,50 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
     let est = sell::estimate(&pts, NOW, None, None).unwrap();
     assert!(sell::evaluate(max, &est, 0).listable);
     assert!(!sell::evaluate(max + 1, &est, 0).listable);
+
+    // pedido de compra: 1 centavo acima do maior pedido, só se ainda dá lucro e cabe no saldo
+    let book_at = |at: i64, top: i64, ask: Option<i64>| {
+        (
+            at,
+            Some(crate::steam::book::Book {
+                max_buy_cents: Some(top),
+                buy_orders: 5,
+                min_sell_cents: ask,
+            }),
+        )
+    };
+    let book = |top| book_at(NOW, top, None);
+    let top = max / 2;
+    h.lock().books.insert(MOON.into(), book(top));
+    let r = watch::list(&h).await.unwrap().remove(0);
+    let ev = sell::evaluate(top + 1, &est, 0);
+    assert!(ev.ev_profit_cents.unwrap() > 0);
+    assert_eq!(
+        (r.bid_cents, r.bid_profit_cents, r.book_at),
+        (Some(top + 1), Some(ev.sell.mid.profit_cents), Some(NOW))
+    );
+    h.lock().books.insert(MOON.into(), book(max));
+    let r = watch::list(&h).await.unwrap().remove(0);
+    assert_eq!((r.bid_cents, r.book_at), (None, Some(NOW)));
+    // o menor anúncio do próprio livro também limita: pedido igual a ele não é sugerido
+    h.lock()
+        .books
+        .insert(MOON.into(), book_at(NOW, top, Some(top + 1)));
+    assert_eq!(watch::list(&h).await.unwrap()[0].bid_cents, None);
+    // e entra na revenda: anúncio logo acima do pedido derruba o lucro (o histórico sozinho prometia mais)
+    h.lock()
+        .books
+        .insert(MOON.into(), book_at(NOW, top, Some(top + 2)));
+    assert_eq!(watch::list(&h).await.unwrap()[0].bid_cents, None);
+    // livro velho ou leitura que falhou: sem sugestão
+    let old = NOW - orders::STALE - 1;
+    h.lock().books.insert(MOON.into(), book_at(old, top, None));
+    assert_eq!(watch::list(&h).await.unwrap()[0].bid_cents, None);
+    h.lock().books.insert(MOON.into(), (NOW, None));
+    assert_eq!(watch::list(&h).await.unwrap()[0].bid_cents, None);
+    h.lock().books.insert(MOON.into(), book(top));
+    h.set_saldo(top, SaldoSource::Manual);
+    assert_eq!(watch::list(&h).await.unwrap()[0].bid_cents, None);
 }
 
 #[tokio::test]
@@ -867,4 +911,39 @@ async fn catalog_scan_is_marked_only_after_every_round() {
         assert!(steps < 2000);
     }
     assert!(marked().await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn orders_read_one_book_per_gap_oldest_common_first() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    let task = |name: &str, seeds: Vec<(u16, u16)>| Task {
+        id: format!("d:{name}"),
+        name: name.into(),
+        code: "G1".into(),
+        wear: None,
+        seeds,
+        score: 1.0,
+    };
+    h.lock().queue.set_tasks(vec![
+        task("A", vec![]),
+        task("B", vec![]),
+        task("R", vec![(1, 2)]),
+    ]);
+    let fresh = |at| (at, None);
+    // ligou agora: o primeiro livro espera a vaga
+    assert!(!orders::maybe_step(&h).await);
+    h.lock().book_at = NOW - 61;
+    h.lock().books.insert("A".into(), fresh(NOW - 3600));
+    h.lock().books.insert("B".into(), fresh(NOW - 1800));
+    assert!(orders::maybe_step(&h).await); // A, o mais velho (o servidor de teste não tem livro: falha)
+    assert_eq!(h.lock().book_at, NOW);
+    assert_eq!(h.lock().books["A"], (NOW, None)); // a falha manda A para o fim da fila
+    assert!(!orders::maybe_step(&h).await); // dentro da vaga
+    h.lock().book_at = NOW - 61;
+    assert!(orders::maybe_step(&h).await); // agora B
+    assert_eq!(h.lock().books["B"], (NOW, None));
+    h.lock().book_at = NOW - 61;
+    assert!(!orders::maybe_step(&h).await); // tudo novo; o raro nunca entra
 }

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod book;
 pub mod buy;
 pub mod client;
 pub mod history;

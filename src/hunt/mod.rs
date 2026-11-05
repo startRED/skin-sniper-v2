@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod detect;
+pub mod orders;
 pub mod scheduler;
 pub mod watch;
 
@@ -71,6 +72,10 @@ pub(crate) struct Shared {
     pub rivals: HashMap<String, (i64, Rivals)>,
     /// Desconto do histórico pelas vendas reais, `[desconto, raro]` (`web::calibration::correction`).
     pub correction: [f64; 2],
+    /// Topo do livro de pedidos por nome: (quando tentou, livro; `None` se a leitura falhou). `orders` atualiza; `watch` sugere.
+    pub books: HashMap<String, (i64, Option<crate::steam::book::Book>)>,
+    /// Última leitura de livro (0 = ainda não ligou).
+    pub book_at: i64,
 }
 
 pub struct Hunt {
@@ -137,6 +142,8 @@ impl Hunt {
                 floors: HashMap::new(),
                 rivals: HashMap::new(),
                 correction: [1.0; 2],
+                books: HashMap::new(),
+                book_at: 0,
             }),
         })
     }

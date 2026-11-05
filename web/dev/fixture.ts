@@ -127,7 +127,10 @@ function watchRows(): WatchRow[] {
       max_buy_cents: kind === 'raro' ? null : g == null ? -1 : floor - g,
       sales_per_day: perDay + 0.4, kind, group, last_checked_at: i === 5 ? null : nowS() - 8 - i * 23,
       mode: kind === 'raro' ? 'seed' : 'barato',
-      score: i % 3 === 0 ? 1.2 : 0, reason: i % 3 === 0 ? 'quase deu lucro 3 vezes' : 'testando alvo novo'
+      score: i % 3 === 0 ? 1.2 : 0, reason: i % 3 === 0 ? 'quase deu lucro 3 vezes' : 'testando alvo novo',
+      bid_cents: kind === 'desconto' && i % 4 === 1 ? floor - 60 : null,
+      bid_profit_cents: kind === 'desconto' && i % 4 === 1 ? 23 + i : null,
+      book_at: kind === 'desconto' ? nowS() - 300 - i * 40 : null
     };
   }).sort((a, b) => dist(a) - dist(b));
 }
