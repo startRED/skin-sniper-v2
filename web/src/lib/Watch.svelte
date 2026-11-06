@@ -29,8 +29,9 @@
   const bids = $derived(app.watch.filter((w) => w.bid_cents != null && app.now - w.book_at! <= 3600).sort((a, b) => b.bid_profit_cents! - a.bid_profit_cents!));
   const steam = (name: string) => `https://steamcommunity.com/market/listings/730/${encodeURIComponent(name)}`;
   // Quanto o menor anúncio precisa cair para dar lucro; null sem os dois números (max_buy ≤ 0 = nenhum preço dá lucro).
+  // Raro: null, porque o menor anúncio é o da página (qualquer padrão) e o teto é o do grupo raro.
   const gap = (w: WatchRow) =>
-    w.floor_cents != null && w.max_buy_cents != null && w.max_buy_cents > 0 ? w.floor_cents - w.max_buy_cents : null;
+    w.kind !== 'raro' && w.floor_cents != null && w.max_buy_cents != null && w.max_buy_cents > 0 ? w.floor_cents - w.max_buy_cents : null;
 </script>
 
 {#snippet list()}
