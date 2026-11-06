@@ -7,6 +7,7 @@ use super::scheduler::{Found, Task};
 use super::{Active, Hunt, learn};
 use crate::notify::{Alert, NotifyError};
 use crate::pricing::groups::group_of;
+use crate::pricing::premium::{self, Seal};
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
 use crate::steam::buy::brl;
 use crate::steam::client::Error as SteamError;
@@ -434,6 +435,58 @@ fn no_estimate_reason(e: &sell::NoEstimate) -> &'static str {
     }
 }
 
+/// Selo do raro: vendas fechadas do grupo (as do CSFloat guardadas e os anúncios da mesma skin no grupo que
+/// sumiram em até 48 h sem relistagem, múltiplo = preço ÷ `base_cents`) e anúncios do grupo parados há mais de 48 h.
+async fn seal_for(
+    h: &Hunt,
+    name: &str,
+    grp: &str,
+    seed: Option<u16>,
+    price_cents: i64,
+    base_cents: Option<i64>,
+    now: i64,
+) -> Seal {
+    const FAST: i64 = super::teacher::FAST;
+    let (name, grp) = (name.to_string(), grp.to_string());
+    let r = h
+        .db
+        .call(move |c| {
+            let mut sales: Vec<(Option<u16>, f64)> = c
+                .prepare("SELECT seed, multiple FROM csfloat_sales WHERE grp = ?1")?
+                .query_map([&grp], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            if let Some(b) = base_cents.filter(|&b| b > 0) {
+                let gone: Vec<(Option<u16>, i64)> = c
+                    .prepare(
+                        "SELECT seed, price_cents FROM observations WHERE grp = ?1 AND name = ?2 AND relisted = 0
+                         AND gone_at IS NOT NULL AND gone_at - first_seen <= ?3",
+                    )?
+                    .query_map(params![grp, name, FAST], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                sales.extend(gone.into_iter().map(|(s, p)| (s, p as f64 / b as f64)));
+            }
+            // ainda visto nas últimas 6 h: o registro não marca sumiço de consulta que deixou de rodar
+            let parked: u32 = c.query_row(
+                "SELECT count(*) FROM observations WHERE grp = ?1 AND gone_at IS NULL AND first_seen <= ?2
+                 AND last_seen >= ?3",
+                params![grp, now - FAST, now - 6 * 3600],
+                |r| r.get(0),
+            )?;
+            Ok((sales, parked))
+        })
+        .await;
+    let (sales, parked) = r.unwrap_or_else(|e| {
+        tracing::warn!("selo do raro sem vendas fechadas: {e:#}");
+        (vec![], 0)
+    });
+    premium::seal(
+        price_cents,
+        base_cents,
+        &premium::premium(seed, &sales),
+        parked,
+    )
+}
+
 /// Avalia um anúncio. `Ok` sem `found`: sem estimativa ou sem lucro (conclusivo). `Err`: falha de rede
 /// ao buscar histórico — o anúncio não é marcado como visto e volta a ser avaliado na próxima consulta.
 async fn evaluate_one(
@@ -481,6 +534,11 @@ async fn evaluate_one(
         mid_cents: ev.sell.mid.net_cents - l.price_cents,
         quick_cents: ev.sell.quick.net_cents - l.price_cents,
     });
+    // raro: preço médio comum da mesma skin, sem o prêmio do grupo (base do múltiplo e do selo)
+    let base_cents = group
+        .as_ref()
+        .and_then(|_| sell::estimate(&points, now, None, None).ok())
+        .map(|e| e.mid.price_cents);
     let ghost = super::teacher::ghost_worthy(l.price_cents, ev.sell.mid.profit_cents).then(|| {
         super::teacher::Ghost {
             listing_id: l.listing_id.clone(),
@@ -489,11 +547,7 @@ async fn evaluate_one(
             price_cents: l.price_cents,
             mid_price_cents: ev.sell.mid.price_cents,
             mid_net_cents: ev.sell.mid.net_cents,
-            // base do múltiplo sugerido: o mesmo histórico sem o prêmio do grupo
-            base_cents: group
-                .as_ref()
-                .and_then(|_| sell::estimate(&points, now, others_min, None).ok())
-                .map(|e| e.mid.price_cents),
+            base_cents,
             approved: ev.listable,
         }
     });
@@ -506,6 +560,12 @@ async fn evaluate_one(
             ghost,
         });
     }
+    let seal = match &group {
+        Some(g) => Some(Box::new(
+            seal_for(h, &l.name, &g.key, l.seed, l.price_cents, base_cents, now).await,
+        )),
+        None => None,
+    };
     let opp = Opportunity {
         id: l.listing_id.clone(),
         name: l.name.clone(),
@@ -537,6 +597,7 @@ async fn evaluate_one(
         evidence: est.evidence,
         seen_at: now,
         gone_at: None,
+        seal,
     };
     let detail = Some(opp.evidence.clone());
     Ok(Judged {
@@ -911,12 +972,31 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>) {
     crate::notify::desktop(
         &format!("{} de lucro · {}", brl(opp.sell.mid.profit_cents), opp.name),
         &format!(
-            "Compre por {} e venda por {}. Clique para abrir na Steam.",
+            "Compre por {} e venda por {}.{} Clique para abrir na Steam.",
             brl(opp.price_cents),
-            brl(opp.sell.mid.price_cents)
+            brl(opp.sell.mid.price_cents),
+            opp.seal
+                .as_ref()
+                .map(|s| format!(" Raro {}.", s.text))
+                .unwrap_or_default()
         ),
         &opp.steam_url,
     );
+    // raro: o selo e, se o prêmio dá folga, o preço para anunciar
+    let seal = opp
+        .seal
+        .as_ref()
+        .map(|s| match (s.open_cents, s.floor_cents) {
+            (Some(open), Some(floor)) if open > floor => {
+                format!(
+                    "Raro {} · anuncie a {}, desça até {}",
+                    s.text,
+                    brl(open),
+                    brl(floor)
+                )
+            }
+            _ => format!("Raro {}", s.text),
+        });
     let Some(tg) = h.telegram.clone() else {
         return;
     };
@@ -928,6 +1008,7 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>) {
         mid_profit_cents: opp.sell.mid.profit_cents,
         safe_profit_cents: opp.sell.quick.profit_cents,
         eta_hours: opp.sell.mid.eta_hours,
+        seal,
     };
     tokio::spawn(async move {
         match tg.notify(&alert, panel_url.as_deref()).await {

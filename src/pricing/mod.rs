@@ -5,4 +5,5 @@
 pub mod combo;
 pub mod fees;
 pub mod groups;
+pub mod premium;
 pub mod sell;

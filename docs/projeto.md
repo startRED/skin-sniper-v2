@@ -40,6 +40,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `csfloat.rs` | `/history/<nome>/sales` → múltiplos `price / reference.base_price` por venda |
 | `pricing/fees.rs` | taxa em centavos inteiros e inverso por busca binária |
 | `pricing/sell.rs` | três preços de venda, prazo, confiança |
+| `pricing/premium.rs` | prêmio do raro que fecha (seed → grupo → 1×) e o selo "comprovado" |
 | `pricing/groups.rs` | grupo raro de um anúncio (tier de pattern, fase Doppler, faixa de fade) a partir das tabelas |
 | `pricing/combo.rs` | melhor combinação de anúncios que cabe no saldo (mochila em centavos) |
 | `hunt/catalog.rs` | descoberta e seleção do que vigiar dado o saldo |
@@ -101,7 +102,15 @@ Opportunity = {
   profit_per_day_cents: number | null, // lucro estimado dividido pelo prazo total
   risk: "baixo" | "medio" | "alto" | null,
   evidence: string,              // frase curta: "392 vendas/dia nos últimos 7 dias"
-  seen_at: number
+  seen_at: number,
+  seal: Seal | null              // só raro: selo do prêmio (Aprendizado, item 5)
+}
+Seal = {
+  proven: boolean,               // "comprovado": ≥ 10 vendas fechadas e o pior quartil ainda passa na régua
+  sales: number, parked: number, // vendas fechadas usadas; anúncios do grupo parados há mais de 48 h
+  p25_profit_cents: number | null,
+  open_cents: number | null, floor_cents: number | null,  // anunciar a base × p75 e descer até base × prêmio
+  text: string                   // "ainda não comprovado: 4 de 10 vendas fechadas"
 }
 WatchRow = {
   name: string, icon_url: string,
@@ -255,6 +264,16 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    - O placar mostra: compras virtuais, avisos e quase-achados que venderiam em 48 h, real ÷ previsto (mediana, só
      comuns; abaixo de 1 = o app prevê alto), lucro virtual realizado dos avisos contra o previsto e raros que fecharam.
    - Prazos e régua são hipóteses de calibração. Tudo fica 60 dias.
+5. **Selo do raro (`pricing/premium.rs`).** Todo raro que vira aviso leva um selo; a regra do aviso não muda.
+   - Vendas fechadas do grupo: as do CSFloat guardadas (`csfloat_sales`) e os anúncios da mesma skin no grupo que
+     sumiram em até 48 h sem relistagem (múltiplo = preço ÷ preço médio comum da skin, sem prêmio).
+   - Prêmio = média geométrica encolhida seed → grupo → 1× com 5 vendas fictícias por nível; p25/p75 das vendas da
+     seed quando ela tem ≥ 10, senão das do grupo.
+   - "Comprovado" = ≥ 10 vendas fechadas e vender a `base × p25` ainda dá o lucro e a margem mínimos do aviso
+     (R$ 1,00 e 10 %). Senão, "ainda não comprovado" com o motivo (quantas vendas, ou quanto dá o pior quartil).
+   - Preço sugerido: anunciar a `base × p75` e descer até `base × prêmio`. Anúncios do grupo à venda há mais de
+     48 h (vistos nas últimas 6 h) aparecem como "parados".
+   - Sai no painel (etiqueta ao lado do grupo e linha nos detalhes), no aviso do Windows e no Telegram.
 
 ## Precificação (o coração)
 

@@ -136,6 +136,9 @@ pub struct Opportunity {
     /// coluna `gone_at`, não do JSON guardado.
     #[serde(default)]
     pub gone_at: Option<i64>,
+    /// Raro: selo "comprovado" / "ainda não comprovado" e o preço sugerido (`pricing::premium`).
+    #[serde(default)]
+    pub seal: Option<Box<crate::pricing::premium::Seal>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
