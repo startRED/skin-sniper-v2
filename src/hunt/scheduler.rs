@@ -675,14 +675,12 @@ async fn book_then_listings(
             match book::fetch_book(&h.steam, &task.name).await {
                 Ok(b) => {
                     let now = h.now();
-                    let lowest = b.min_sell_cents;
-                    let mut s = h.lock();
-                    // o livro lido também serve aos pedidos sugeridos (`orders`) e ao teto (concorrente)
-                    let before = s
-                        .books
-                        .insert(task.name.clone(), (now, Some(b)))
-                        .and_then(|(_, b)| b)
+                    let (lowest, second) = (b.min_sell_cents, b.second_ask());
+                    // o livro lido também serve aos pedidos sugeridos (`orders`), ao teto (concorrente) e ao registro
+                    let before = super::orders::remember_book(h, &task.name, now, Some(b))
+                        .await
                         .and_then(|b| b.min_sell_cents);
+                    let mut s = h.lock();
                     match lowest {
                         None => {
                             s.cycle.saved_listings += 1;
@@ -710,7 +708,7 @@ async fn book_then_listings(
                             );
                             return Ok(());
                         }
-                        Some(p) => lead = Some((p, max)),
+                        Some(p) => lead = Some((p, max, second)),
                     }
                 }
                 Err(e) => tracing::warn!("livro de {} falhou; lê os anúncios: {e}", task.name),
@@ -718,10 +716,11 @@ async fn book_then_listings(
         }
     }
     if h.steam.blocked(Endpoint::Listings) {
-        if let Some((p, max)) = lead {
+        if let Some((p, max, second)) = lead {
             tracing::info!(
                 preco = p,
                 teto = max,
+                segundo = ?second,
                 "livro: {} tem anúncio que cabe no teto, mas a leitura de anúncios está barrada pela Steam",
                 task.name
             );
@@ -758,10 +757,20 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
     }
     let page =
         listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &task.filters()).await?;
+    let now = h.now();
+    super::ledger::count_hour(h, now, "queries", 1).await;
+    match super::ledger::record(h, &super::ledger::query_key(task), &page, now).await {
+        Ok(r) if r != super::ledger::Recorded::default() => tracing::debug!(?r, "registro"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("registro de observações falhou: {e:#}"),
+    }
+    let mut near = 0;
     for t in &targets {
         let out = detect::process(h, t, &page).await?;
+        near += out.rewarded.near_hits;
         h.lock().queue.reward(&t.id, h.now(), out.rewarded);
     }
+    super::ledger::count_hour(h, now, "near", near).await;
     Ok(())
 }
 

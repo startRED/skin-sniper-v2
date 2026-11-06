@@ -620,6 +620,7 @@ mod tests {
     fn listing() -> Listing {
         Listing {
             listing_id: "5276355668".into(),
+            asset_id: "54226282359".into(),
             name: "Glock-18 | Moonrise (Field-Tested)".into(),
             price_cents: 588,
             seller_cents: 512,
