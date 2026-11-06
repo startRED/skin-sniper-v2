@@ -618,6 +618,15 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             s.cycle.record(false, Some(near(n, m)));
         }
         s.cycle.record(false, None);
+        s.cycle.refuse("sem_lucro");
+        s.cycle.refuse("poucas_vendas");
+        s.cycle.refuse("sem_lucro");
+        s.cycle.over_saldo.insert("x".into());
+        s.cycle.over_saldo.insert("x".into());
+        assert_eq!(
+            s.cycle.refused_text(),
+            "poucas_vendas=1 sem_lucro=2 acima_do_saldo=1"
+        );
         let names: Vec<_> = s.cycle.near.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, ["B", "C", "A"]); // o B repetido entra uma vez só
     }

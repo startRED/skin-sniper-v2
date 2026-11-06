@@ -15,7 +15,7 @@ use crate::steam::listings::{Listing, ListingsPage};
 use crate::web::api::{Confidence, Event, Kind, Opportunity, Risk, Sell, Tier};
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 const DAY: i64 = 86_400;
 /// Uma página vazia pode ser transitória (conhecimento 1.3): só vale como "sumiram" na segunda seguida.
@@ -43,6 +43,10 @@ pub(crate) struct Cycle {
     passed: u32,
     pub(crate) near: Vec<Near>,
     last: Option<String>,
+    /// Recusas por motivo, para auditar o que ficou de fora (só vai para o log).
+    refused: BTreeMap<&'static str, u32>,
+    /// Anúncios acima do saldo: nem são avaliados; um id conta uma vez por ciclo.
+    pub(crate) over_saldo: HashSet<String>,
 }
 
 fn profit_text(c: i64) -> String {
@@ -63,6 +67,22 @@ impl Cycle {
             self.near.sort_by_key(|n| std::cmp::Reverse(n.mid_cents));
             self.near.truncate(NEAR_KEEP);
         }
+    }
+
+    pub(crate) fn refuse(&mut self, why: &'static str) {
+        *self.refused.entry(why).or_default() += 1;
+    }
+
+    /// "sem_lucro=12 poucas_vendas=3 acima_do_saldo=40", para o log.
+    pub(crate) fn refused_text(&self) -> String {
+        let over = self.over_saldo.len() as u32;
+        self.refused
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .chain((over > 0).then_some(("acima_do_saldo", over)))
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn text(&self, secs: i64) -> String {
@@ -109,6 +129,7 @@ pub(crate) fn roll_cycle(h: &Hunt) {
         avaliados = c.evaluated,
         passaram = c.passed,
         consultas_anuncios_economizadas = c.saved_listings,
+        recusas = %c.refused_text(),
         "{text}"
     );
     for n in &c.near {
@@ -309,6 +330,18 @@ struct Judged {
     /// Virou (ou segue) oportunidade; o bool é o `notify` da avaliação.
     found: Option<(Opportunity, bool)>,
     near: Option<Near>,
+    /// Motivo da recusa quando não virou oportunidade.
+    refused: Option<&'static str>,
+}
+
+fn no_estimate_reason(e: &sell::NoEstimate) -> &'static str {
+    match e {
+        sell::NoEstimate::NoData => "sem_historico",
+        sell::NoEstimate::TooFewSales { .. } => "poucas_vendas",
+        sell::NoEstimate::FewSaleDays { .. } => "poucos_dias_de_venda",
+        sell::NoEstimate::Implausible => "implausivel",
+        sell::NoEstimate::NoQuickPrice => "concorrente_mais_barato",
+    }
 }
 
 /// Avalia um anúncio. `Ok` sem `found`: sem estimativa ou sem lucro (conclusivo). `Err`: falha de rede
@@ -329,11 +362,15 @@ async fn evaluate_one(
         Some(g) => Some(rare_evidence(h, &l.name, &g.key).await),
         None => None,
     };
-    let Ok(mut est) = sell::estimate(&points, now, others_min, rare) else {
-        return Ok(Judged {
-            found: None,
-            near: None,
-        });
+    let mut est = match sell::estimate(&points, now, others_min, rare) {
+        Ok(est) => est,
+        Err(e) => {
+            return Ok(Judged {
+                found: None,
+                near: None,
+                refused: Some(no_estimate_reason(&e)),
+            });
+        }
     };
     if correction < 1.0 {
         est.evidence += &format!(
@@ -349,7 +386,11 @@ async fn evaluate_one(
         quick_cents: ev.sell.quick.net_cents - l.price_cents,
     });
     if !ev.listable {
-        return Ok(Judged { found: None, near });
+        return Ok(Judged {
+            found: None,
+            near,
+            refused: Some("sem_lucro"),
+        });
     }
     let opp = Opportunity {
         id: l.listing_id.clone(),
@@ -386,6 +427,7 @@ async fn evaluate_one(
     Ok(Judged {
         found: Some((opp, ev.notify)),
         near,
+        refused: None,
     })
 }
 
@@ -514,6 +556,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         let was_known = known.contains(&l.listing_id);
         let active = h.lock().active.get(&l.listing_id).map(|a| a.opp.clone());
         if l.price_cents > saldo && active.is_none() {
+            h.lock().cycle.over_saldo.insert(l.listing_id.clone());
             continue; // não cabe agora; se o saldo subir, ainda é novo
         }
         // Concorrência = outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns): um comum
@@ -562,6 +605,9 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             }
             s.evaluated
                 .insert(l.listing_id.clone(), (l.price_cents, hist_now, others_min));
+            if let Some(why) = judged.refused {
+                s.cycle.refuse(why);
+            }
             s.cycle.record(judged.found.is_some(), judged.near);
         }
         if !was_known {
