@@ -10,7 +10,8 @@ O usuário abre o painel, vê o saldo (lido da Steam ou digitado) e uma lista vi
 real depois das taxas, que cabem no saldo. Ele ordena por lucro ou margem e compra com um clique. O Skin
 Sniper escolhe sozinho o que caçar. Leve no PC: um binário Rust, um banco SQLite que se limpa sozinho.
 
-Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-compra, facas e luvas.
+Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-compra, facas e luvas. Auto-compra e confirmação sem celular: plano futuro em
+`docs/superpowers/plans/2026-11-06-auto-compra.md`.
 
 ## Arquitetura
 
