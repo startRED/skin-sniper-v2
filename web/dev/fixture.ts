@@ -75,6 +75,8 @@ let settings: Settings = {
   panel_url: 'http://192.168.0.10:8788', sound: true, notify_min_profit_cents: 100
 };
 let lastQuery = nowS();
+// Estado da caça de exemplo (ex.: bloqueio da Steam), trocado por /api/__dev/settings-state.
+let huntExample: Partial<State['hunt']> = {};
 let keyExamples: State['keys'] | null = null;
 let qrExample: { state: 'waiting' | 'done' | 'expired' | 'error'; account?: string; detail?: string } = { state: 'waiting' };
 
@@ -110,7 +112,7 @@ function combo(): State['combo'] {
 function state(): State {
   return {
     saldo_cents: saldoSource === 'none' ? 0 : saldoCents, saldo_source: saldoSource,
-    hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, message: '20 anúncios conferidos em 1 min; nenhum deu lucro, o mais perto dava R$ 0,78 de prejuízo (exemplo do modo dev)' },
+    hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, last_ok_at: lastQuery, message: '20 anúncios conferidos em 1 min; nenhum deu lucro, o mais perto dava R$ 0,78 de prejuízo (exemplo do modo dev)', ...huntExample },
     combo: combo(),
     keys: keyExamples ?? {
       steam: { set: !!settings.steam_login_secure, ok: !!settings.steam_login_secure, detail: settings.steam_login_secure ? 'Conta exemplo_erick' : null },
@@ -195,6 +197,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     const example = await readJson(req);
     if ('keys' in example) keyExamples = example.keys;
     if ('qr' in example) qrExample = example.qr;
+    if ('hunt' in example) huntExample = example.hunt;
     emit('state', state());
     return send(res, 200, { ok: true });
   }

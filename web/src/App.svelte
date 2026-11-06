@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { app, load, lostRows, readingSaldo, start } from './lib/store.svelte';
+  import { app, load, lostRows, readingSaldo, start, steamBlocked } from './lib/store.svelte';
+  import { ago, clock } from './lib/format';
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
   import OppTable from './lib/OppTable.svelte';
@@ -15,6 +16,7 @@
   const noSaldo = $derived(app.state?.saldo_source === 'none');
   const noSteam = $derived(app.state != null && !app.state.keys.steam.set);
   const reading = $derived(readingSaldo());
+  const blocked = $derived(steamBlocked());
 </script>
 
 <TopBar />
@@ -22,6 +24,16 @@
 {#if app.conn === 'down'}
   <div class="banner" role="status">
     Sem conexão com o Skin Sniper. Estamos tentando de novo — enquanto isso a lista abaixo pode estar desatualizada e não dá para comprar.
+  </div>
+{/if}
+
+{#if blocked && app.state}
+  <div class="warn block" role="status">
+    <p><b>A caça está parada{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}: a Steam bloqueou as consultas deste IP.</b>
+      Ela limita quantas consultas cada IP faz ao mercado e, passado o limite, barra por algumas horas. Não é erro do app nem da
+      sua conta, e reiniciar não libera.</p>
+    <p>O app tenta de novo sozinho (próxima tentativa às {clock(app.state.hunt.paused_until!)}) e volta a caçar assim que a Steam
+      liberar. Nada se perde.{#if noSaldo} Enquanto isso o saldo não dá para ler: se quiser, digite-o lá em cima.{/if}</p>
   </div>
 {/if}
 
@@ -87,6 +99,9 @@
   main { padding: 16px 24px 80px; max-width: 1760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
   .banner { background: var(--red-bg); color: var(--red); padding: 8px 24px; border-bottom: 1px solid var(--red); }
   .warn { background: var(--amber-bg); color: var(--amber); padding: 8px 24px; border-bottom: 1px solid var(--amber); }
+  .block { display: flex; flex-direction: column; gap: 4px; padding-block: 10px; }
+  .block p { max-width: 110ch; }
+  .block b { color: var(--ink); }
   .title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
   h2 { font-size: 15px; }
   .lost { font-size: 14px; margin: 20px 0 8px; }

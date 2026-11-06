@@ -277,6 +277,7 @@ impl Hunt {
                 queries_per_min: f64::from(stats.queries_per_min),
                 last_query_at: stats.last_query_at,
                 paused_until: paused,
+                last_ok_at: stats.last_ok_at,
                 message: if paused.is_some() {
                     Some("a Steam pediu calma (429); caça em pausa".into())
                 } else {

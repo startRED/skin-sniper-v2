@@ -178,6 +178,15 @@ pub struct Stats {
     pub last_query_at: Option<i64>,
     pub paused_until: Option<i64>,
     pub gap_ms: u64,
+    /// Última resposta que não foi 429: diz há quanto tempo a Steam barra a caça.
+    pub last_ok_at: Option<i64>,
+}
+
+/// Respostas por saída desde a última leitura (`take_calls`): `ok` é tudo que não foi 429.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Calls {
+    pub ok: u32,
+    pub limited: u32,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -196,6 +205,7 @@ pub(crate) struct Limiter {
     /// Piso aprendido no 1º 429 da última série e a hora do último 429 (ver `FLOOR_STEP`).
     floor_at_429: Duration,
     floor_since: Option<Instant>,
+    last_ok: Option<Instant>,
 }
 
 impl Limiter {
@@ -211,6 +221,7 @@ impl Limiter {
             recent: VecDeque::new(),
             floor_at_429: MIN_GAP,
             floor_since: None,
+            last_ok: None,
         }
     }
 
@@ -279,6 +290,7 @@ impl Limiter {
 
     /// Resposta que não foi 429: o degrau da pausa volta ao início se o último 429 já tem 60 min.
     pub(crate) fn on_ok(&mut self, now: Instant) {
+        self.last_ok = Some(now);
         if self
             .last_429
             .is_none_or(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
@@ -310,6 +322,7 @@ impl Limiter {
             last_query_at: self.last_query.map(unix_of),
             paused_until: self.paused_until.filter(|p| *p > now).map(unix_of),
             gap_ms: self.gap.as_millis() as u64,
+            last_ok_at: self.last_ok.map(unix_of),
         }
     }
 }
@@ -378,6 +391,8 @@ struct Inner {
     alt_limiter: Limiter,
     /// Saída extra recusou ou falhou na rede: fica de lado até aqui.
     alt_down_until: Option<Instant>,
+    /// [principal, extra], para o balanço de 10 min no log.
+    calls: [Calls; 2],
 }
 
 pub struct SteamClient {
@@ -454,6 +469,7 @@ impl SteamClient {
                 on_pace: None,
                 anon_reads_until: None,
                 alt_limiter: Limiter::new(Instant::now()),
+                calls: [Calls::default(); 2],
                 alt_down_until: None,
             }),
         })
@@ -556,11 +572,17 @@ impl SteamClient {
             let a = g.alt_limiter.stats(now);
             s.queries_per_min += a.queries_per_min;
             s.last_query_at = s.last_query_at.max(a.last_query_at);
+            s.last_ok_at = s.last_ok_at.max(a.last_ok_at);
             if g.alt_down_until.is_none_or(|t| now >= t) {
                 s.paused_until = s.paused_until.zip(a.paused_until).map(|(m, x)| m.min(x));
             }
         }
         s
+    }
+
+    /// Respostas de cada saída desde a última chamada; zera a contagem.
+    pub fn take_calls(&self) -> [Calls; 2] {
+        std::mem::take(&mut self.inner.lock().unwrap().calls)
     }
 
     /// Avisa o gancho de ritmo ainda sob o lock: a ordem dos avisos é a ordem dos 429 (o gancho não pode
@@ -572,7 +594,7 @@ impl SteamClient {
     }
 
     /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms|fim
-    /// das leituras sem login Unix|último encurtamento Unix`). Sem pausa ativa, o 1º campo é a hora do último 429: ao subir, a
+    /// das leituras sem login Unix|último encurtamento Unix|piso ms|último 429 Unix|última resposta sem 429 Unix`). Sem pausa ativa, o 1º campo é a hora do último 429: ao subir, a
     /// escalada só zera 60 min depois dele.
     fn saved_pace(g: &mut Inner, now: Instant) -> String {
         let s = g.limiter.stats(now);
@@ -589,8 +611,11 @@ impl SteamClient {
         let floor_since = g.limiter.floor_since.map_or(0, |t| {
             unix_in(Duration::ZERO) - now.saturating_duration_since(t).as_secs() as i64
         });
+        let last_ok = g.limiter.last_ok.map_or(0, |t| {
+            unix_in(Duration::ZERO) - now.saturating_duration_since(t).as_secs() as i64
+        });
         format!(
-            "{}|{}|{}|{anon}|{adjusted}|{}|{floor_since}",
+            "{}|{}|{}|{anon}|{adjusted}|{}|{floor_since}|{last_ok}",
             s.paused_until.or(last_429).unwrap_or(0),
             s.gap_ms,
             g.limiter.pause_len.as_millis(),
@@ -612,6 +637,7 @@ impl SteamClient {
         let adjusted = parts.next().and_then(|r| r.ok()).unwrap_or(until);
         let floor = parts.next().and_then(|r| r.ok());
         let floor_since = parts.next().and_then(|r| r.ok());
+        let last_ok = parts.next().and_then(|r| r.ok()).filter(|t| *t > 0);
         let now = Instant::now();
         let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
         let g = &mut *self.inner.lock().unwrap();
@@ -621,6 +647,10 @@ impl SteamClient {
                 Some(now + Duration::from_secs(anon_left as u64).min(ANON_AFTER_429));
         }
         let l = &mut g.limiter;
+        if let Some(t) = last_ok {
+            let ago = (unix_in(Duration::ZERO) - t).max(0) as u64;
+            l.last_ok = now.checked_sub(Duration::from_secs(ago));
+        }
         if let (Some(f), Some(t)) = (floor, floor_since.filter(|t| *t > 0)) {
             let ago = (unix_in(Duration::ZERO) - t).max(0) as u64;
             l.floor_at_429 = ms(f).clamp(MIN_GAP, FLOOR_MAX);
@@ -879,11 +909,10 @@ impl SteamClient {
         match alt.execute(request).await {
             Ok(r) if r.status() == StatusCode::TOO_MANY_REQUESTS => {
                 let retry = retry_after(&r);
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .alt_limiter
-                    .on_429(Instant::now(), retry);
+                let mut g = self.inner.lock().unwrap();
+                g.calls[1].limited += 1;
+                g.alt_limiter.on_429(Instant::now(), retry);
+                drop(g);
                 tracing::warn!(endpoint = ?ep, "Steam: 429 na saída extra; ela pausa e a principal segue");
                 None
             }
@@ -937,6 +966,7 @@ impl SteamClient {
         if status == StatusCode::TOO_MANY_REQUESTS {
             let retry = retry_after(&resp);
             let mut g = self.inner.lock().unwrap();
+            g.calls[0].limited += 1; // o 429 da extra não chega aqui
             if sent_by.is_some()
                 && matches!(ep, Endpoint::Listings | Endpoint::History | Endpoint::Book)
             {
@@ -972,6 +1002,7 @@ impl SteamClient {
         let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
         {
             let mut g = self.inner.lock().unwrap();
+            g.calls[usize::from(via_alt)].ok += 1;
             if via_alt {
                 g.alt_limiter.on_ok(now);
             } else {
@@ -1332,6 +1363,37 @@ mod tests {
         let later = t0() + Duration::from_secs(120) + PAUSE_RESET_AFTER;
         l.on_429(later, None);
         assert_eq!(l.paused_until.unwrap().duration_since(later).as_secs(), 60);
+    }
+
+    #[tokio::test]
+    async fn last_answer_and_call_counts_for_the_panel_and_the_log() {
+        let app = Router::new()
+            .route("/ok", get(|| async { "{}" }))
+            .route("/busy", get(|| async { (AxStatus::TOO_MANY_REQUESTS, "") }));
+        let c = fast(&serve(app).await);
+        let saved = Arc::new(Mutex::new(None));
+        let hook = saved.clone();
+        c.on_pace_change(move |v| *hook.lock().unwrap() = Some(v));
+        assert_eq!(c.stats().last_ok_at, None);
+        c.get_json(Endpoint::History, "/ok", &[]).await.unwrap();
+        let ok_at = c.stats().last_ok_at.expect("resposta boa marca a hora");
+        assert!((ok_at - unix_in(Duration::ZERO)).abs() <= 1);
+        let last_ok = |c: &SteamClient| c.inner.lock().unwrap().limiter.last_ok;
+        let ok_instant = last_ok(&c);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let r = c.get_json(Endpoint::Listings, "/busy", &[]).await;
+        assert!(matches!(r, Err(Error::RateLimited { .. })));
+        assert_eq!(last_ok(&c), ok_instant); // 429 não conta como resposta
+        assert_eq!(
+            c.take_calls(),
+            [Calls { ok: 1, limited: 1 }, Calls::default()]
+        );
+        assert_eq!(c.take_calls(), [Calls::default(); 2]); // ler zera
+        // reiniciar no meio do bloqueio ainda sabe desde quando a Steam não responde
+        let again = SteamClient::new().unwrap();
+        again.restore_pace(&saved.lock().unwrap().clone().unwrap());
+        let restored = again.stats().last_ok_at.unwrap();
+        assert!((restored - ok_at).abs() <= 1); // segundos inteiros nos dois lados
     }
 
     #[test]
