@@ -465,6 +465,145 @@ pub(crate) fn summary(c: &Connection) -> rusqlite::Result<Summary> {
     Ok(s)
 }
 
+/// Boletim de uma semana (`GET /api/learning`): consultas, achados e quase da caça; avisos rotulados em 48 h e
+/// quantos venderiam; avisos comuns com rótulo final e o lucro virtual deles.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Week {
+    pub queries: i64,
+    pub finds: i64,
+    pub near: i64,
+    pub alerts: i64,
+    pub alerts_closed: i64,
+    pub labeled: i64,
+    pub profit_cents: i64,
+}
+
+/// Semana `[from, to)`.
+pub(crate) fn week(c: &Connection, from: i64, to: i64) -> rusqlite::Result<Week> {
+    let (queries, finds, near) = c.query_row(
+        "SELECT coalesce(sum(queries), 0), coalesce(sum(opportunities), 0), coalesce(sum(near), 0)
+         FROM hourly_activity WHERE hour_utc >= ?1 AND hour_utc < ?2",
+        params![from.div_euclid(HOUR), to.div_euclid(HOUR)],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let (alerts, alerts_closed) = c.query_row(
+        "SELECT count(*), coalesce(sum(fast_closed = 1), 0) FROM ghosts
+         WHERE approved = 1 AND fast_at >= ?1 AND fast_at < ?2",
+        params![from, to],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (labeled, profit_cents) = c.query_row(
+        "SELECT count(*), coalesce(sum(profit_cents), 0) FROM ghosts
+         WHERE approved = 1 AND grp IS NULL AND status = 'rotulado' AND labeled_at >= ?1 AND labeled_at < ?2",
+        params![from, to],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(Week {
+        queries,
+        finds,
+        near,
+        alerts,
+        alerts_closed,
+        labeled,
+        profit_cents,
+    })
+}
+
+/// Fator do professor em uso no comum (1 = sem desconto).
+pub(crate) fn refit_factor(c: &Connection) -> rusqlite::Result<f64> {
+    let v: Option<String> = c
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [REFIT_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.as_deref()
+        .and_then(|v| v.split(' ').next()?.parse().ok())
+        .unwrap_or(1.0))
+}
+
+/// Recalibração (Fase 4): fator e dia de Brasília da última conta, `"<fator> <dia>"` em `settings`.
+const REFIT_KEY: &str = "refit_common";
+pub(crate) const REFIT_FLOOR: f64 = 0.80;
+const REFIT_STEP: f64 = 0.02;
+const REFIT_MIN_LABELS: i64 = 30;
+const REFIT_MIN_DAYS: i64 = 7;
+
+/// Fator novo do professor para o comum: alvo = fator aplicado × (real ÷ previsto) mediano das 48 h na última
+/// semana, em [0,80; 1,00] (só desconta), andando no máximo 2 % por dia. Sem ≥ 7 dias de rótulos rápidos e ≥ 30
+/// rótulos com mediana na semana, fica como está.
+pub(crate) fn refit(prev: f64, applied: f64, ratio: Option<f64>, labels: i64, days: i64) -> f64 {
+    let Some(r) = ratio.filter(|_| labels >= REFIT_MIN_LABELS && days >= REFIT_MIN_DAYS) else {
+        return prev;
+    };
+    let next = (applied * r)
+        .clamp(REFIT_FLOOR, 1.0)
+        .clamp(prev - REFIT_STEP, prev + REFIT_STEP);
+    (next * 1000.0).round() / 1000.0
+}
+
+/// Uma vez por dia de Brasília: recalcula o fator do comum e o põe em uso (também retoma o salvo ao subir).
+async fn refit_step(h: &Hunt, now: i64) -> anyhow::Result<()> {
+    let saved = super::catalog::get_setting(&h.db, REFIT_KEY).await?;
+    let (prev, day) = saved
+        .as_deref()
+        .and_then(|v| {
+            let (f, d) = v.split_once(' ')?;
+            Some((f.parse::<f64>().ok()?, d.parse::<i64>().ok()?))
+        })
+        .unwrap_or((1.0, 0));
+    let today = crate::web::learning::brt_day(now);
+    if day == today {
+        set_refit(h, prev);
+        return Ok(());
+    }
+    let ((ratio, labels), first) =
+        h.db.call(move |c| {
+            let first: Option<i64> = c.query_row(
+                "SELECT MIN(fast_at) FROM ghosts WHERE grp IS NULL AND fast_median_cents > 0",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok((fast_ratio(c, now - 7 * DAY)?, first))
+        })
+        .await?;
+    let days = first.map_or(0, |f| (now - f) / DAY);
+    let applied = h.lock().correction[0].min(prev);
+    let next = refit(prev, applied, ratio, labels, days);
+    if next != prev {
+        let why = format!(
+            "real ÷ previsto {:.3} em {labels} rótulos de 48 h (7 dias); fator aplicado {applied:.3}",
+            ratio.unwrap_or(1.0)
+        );
+        tracing::info!(
+            antes = prev,
+            depois = next,
+            "professor recalibrou o comum: {why}"
+        );
+        h.db.call(move |c| {
+            c.execute(
+                "INSERT INTO refit_log(at, key, old, new, why) VALUES (?1, 'comum', ?2, ?3, ?4)",
+                params![now, prev, next, why],
+            )
+            .map(|_| ())
+        })
+        .await?;
+    }
+    super::catalog::set_setting(&h.db, REFIT_KEY, format!("{next} {today}")).await?;
+    set_refit(h, next);
+    Ok(())
+}
+
+fn set_refit(h: &Hunt, f: f64) {
+    let mut s = h.lock();
+    if s.refit != f {
+        s.refit = f;
+        // previsões mudaram: cada anúncio volta a ser avaliado na próxima consulta
+        s.evaluated.clear();
+    }
+}
+
 /// Uma volta do professor, se é hora. Não fala com a Steam: só lê e escreve o banco.
 pub async fn maybe_step(h: &Hunt) {
     let now = h.now();
@@ -492,6 +631,9 @@ pub async fn maybe_step(h: &Hunt) {
             h.lock().label_books = books;
         }
         Err(e) => tracing::warn!("professor falhou: {e:#}"),
+    }
+    if let Err(e) = refit_step(h, now).await {
+        tracing::warn!("professor: recalibração falhou: {e:#}");
     }
 }
 
@@ -738,6 +880,24 @@ mod tests {
         assert_eq!(n, 1);
     }
 
+    #[test]
+    fn refit_waits_for_labels_and_limits_step() {
+        // pouco rótulo ou pouco tempo: não mexe
+        assert_eq!(refit(1.0, 1.0, Some(0.85), 29, 10), 1.0);
+        assert_eq!(refit(1.0, 1.0, Some(0.85), 40, 6), 1.0);
+        assert_eq!(refit(1.0, 1.0, None, 40, 10), 1.0);
+        // o mercado pagou 15 % abaixo: desce 2 % por dia até o alvo
+        assert_eq!(refit(1.0, 1.0, Some(0.85), 40, 10), 0.98);
+        assert_eq!(refit(0.98, 0.98, Some(0.87), 40, 11), 0.96);
+        // o alvo é o fator aplicado × real ÷ previsto: já descontado e batendo, fica
+        assert_eq!(refit(0.9, 0.9, Some(1.0), 40, 20), 0.9);
+        // nunca abaixo de 0,80, nunca acima de 1,00
+        assert_eq!(refit(0.81, 0.81, Some(0.5), 40, 30), 0.8);
+        assert_eq!(refit(0.99, 0.99, Some(1.3), 40, 30), 1.0);
+        // as vendas do Erick já descontam mais: o alvo parte do fator aplicado
+        assert_eq!(refit(1.0, 0.9, Some(1.0), 40, 10), 0.98);
+    }
+
     #[tokio::test]
     async fn summary_splits_alerts_from_near_misses() {
         let (db, _dir) = temp_db();
@@ -772,5 +932,31 @@ mod tests {
                 ..Summary::default()
             }
         );
+        // boletim: só o aviso conta; a semana é [de, até)
+        exec(
+            &db,
+            "INSERT INTO hourly_activity(hour_utc, queries, near, opportunities) VALUES (?1, 10, 2, 1)",
+            vec![v(T / HOUR)],
+        )
+        .await;
+        let w = db.call(|c| week(c, T, T + 11 * DAY)).await.unwrap();
+        assert_eq!(
+            w,
+            Week {
+                queries: 10,
+                finds: 1,
+                near: 2,
+                alerts: 1,
+                alerts_closed: 1,
+                labeled: 1,
+                profit_cents: won,
+            }
+        );
+        let empty = db
+            .call(|c| week(c, T + 11 * DAY, T + 18 * DAY))
+            .await
+            .unwrap();
+        assert_eq!(empty, Week::default());
+        assert_eq!(db.call(|c| refit_factor(c)).await.unwrap(), 1.0);
     }
 }

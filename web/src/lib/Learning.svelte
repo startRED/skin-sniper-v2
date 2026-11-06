@@ -25,6 +25,15 @@
   const min = (m: number | null) => (m == null ? '—' : m < 1 ? '< 1 min' : m < 120 ? `${Math.round(m)} min` : `${(m / 60).toFixed(1).replace('.', ',')} h`);
   const label = (d: string) => d.split('-').reverse().slice(0, 2).join('/');
   const t = $derived(data?.teacher ?? null);
+  const hv = $derived(data?.harvest ?? null);
+  const wk = $derived(data?.weeks ?? null);
+  const POLICY = {
+    shadow: 'em teste silencioso: o modo atual escolhe, o modo colheita só mede',
+    ucb: 'hoje no modo atual (dia de comparação)',
+    harvest: 'hoje no modo colheita: consulta onde mais achado se acumulou'
+  } as const;
+  const share = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : '—');
+  const life = (s: number) => (s < 120 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
   const of = (a: number, b: number) => (b ? `${a} de ${b}` : '—');
   const ratio = (r: number | null) => (r == null ? '—' : `${r.toFixed(2).replace('.', ',')}×`);
   const days = $derived((data?.days ?? []).filter((d, i) => i === 0 || d.queries + d.books + d.new_listings > 0));
@@ -49,6 +58,27 @@
         <div title="Vendendo depois dos 7 dias de trava, pelo menor entre o histórico e o livro"><span class="muted">Lucro virtual (7 dias)</span><b class:up={t.profit_cents > 0}>{t.final_alerts ? signed(t.profit_cents) : '—'}</b><small class="muted">{t.final_alerts ? `${of(t.final_alerts_won, t.final_alerts)} com lucro · previsto ${money(t.predicted_cents)}` : 'primeiro resultado no 10º dia'}</small></div>
         {#if t.rare_labeled}<div><span class="muted">Raros que fecharam</span><b>{of(t.rare_closed, t.rare_labeled)}</b><small class="muted">em 14 dias</small></div>{/if}
       </div>
+    {/if}
+    {#if hv || wk}
+      <ul class="notes muted">
+        {#if hv}
+          <li>
+            <b>Agenda</b> {POLICY[hv.policy]}.
+            Um achado dura ~{life(hv.life_s)} {hv.lives ? `(medido em ${hv.lives} sumiços)` : '(padrão, ainda sem medida)'}.
+            {#if hv.picks}As duas escolheriam o mesmo alvo em {share(hv.agree, hv.picks)} das vezes.{/if}
+            {#if hv.ucb_rate != null && hv.harvest_rate != null}Comparação: atual {(hv.ucb_rate * 100).toFixed(1).replace('.', ',')} · colheita {(hv.harvest_rate * 100).toFixed(1).replace('.', ',')} achados e quase por 100 consultas.{/if}
+          </li>
+        {/if}
+        {#if data && data.refit < 1}
+          <li><b>Preço do comum</b> descontado {Math.round((1 - data.refit) * 100)}% pelo professor (o mercado pagou abaixo do previsto).</li>
+        {/if}
+        {#if wk}
+          <li>
+            <b>Semana</b> {wk[0].finds} {wk[0].finds === 1 ? 'achado' : 'achados'}, {wk[0].near} quase, {wk[0].queries} consultas{#if wk[0].alerts}; avisos que venderiam em 48 h: {wk[0].alerts_closed} de {wk[0].alerts}{/if}{#if wk[0].labeled}; lucro virtual {signed(wk[0].profit_cents)} em {wk[0].labeled}{/if}.
+            {#if wk[1].queries}Semana anterior: {wk[1].finds} achados, {wk[1].near} quase, {wk[1].queries} consultas{#if wk[1].labeled}; lucro virtual {signed(wk[1].profit_cents)}{/if}.{/if}
+          </li>
+        {/if}
+      </ul>
     {/if}
     {#if days.length}
       <div class="table" role="table" aria-label="Placar do aprendizado por dia">
@@ -84,6 +114,8 @@
   .body { padding: 0 0 8px; }
   .sub { margin: 0 16px 10px; max-width: 110ch; }
   .amber { color: var(--amber); margin: 0 16px 8px; }
+  .notes { margin: 0 16px 12px; padding-left: 18px; max-width: 110ch; display: grid; gap: 4px; }
+  .notes b { color: var(--ink); font-weight: 600; }
   .teacher { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 16px; margin: 0 16px 12px; }
   .teacher div { display: flex; flex-direction: column; gap: 2px; }
   .teacher span, .teacher small { font-size: 12px; }

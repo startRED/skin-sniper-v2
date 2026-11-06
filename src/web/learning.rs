@@ -5,7 +5,7 @@ use super::AppState;
 use super::api::ApiError;
 use crate::db::now_unix;
 use axum::{Json, extract::State};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -56,6 +56,19 @@ pub struct Learning {
     /// Compras virtuais e o que o mercado disse delas.
     #[serde(default)]
     pub teacher: crate::hunt::teacher::Summary,
+    /// Colheita: política do dia e medidas (`None` até a primeira volta).
+    #[serde(default)]
+    pub harvest: Option<crate::hunt::harvest::Info>,
+    /// Fator do professor no preço do comum (1 = sem desconto).
+    #[serde(default = "one")]
+    pub refit: f64,
+    /// Boletim: últimos 7 dias e os 7 anteriores.
+    #[serde(default)]
+    pub weeks: [crate::hunt::teacher::Week; 2],
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 fn median(v: &mut [f64]) -> Option<f64> {
@@ -162,10 +175,23 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                 .collect::<rusqlite::Result<_>>()?;
             let since: Option<i64> =
                 c.query_row("SELECT MIN(first_seen) FROM observations", [], |r| r.get(0))?;
+            let harvest: Option<String> = c
+                .query_row(
+                    "SELECT value FROM settings WHERE key = ?1",
+                    [crate::hunt::harvest::INFO_KEY],
+                    |r| r.get(0),
+                )
+                .optional()?;
             Ok(Learning {
                 days: scorecard(now, &hours, &new, &gone),
                 since,
                 teacher: crate::hunt::teacher::summary(c)?,
+                harvest: harvest.and_then(|v| serde_json::from_str(&v).ok()),
+                refit: crate::hunt::teacher::refit_factor(c)?,
+                weeks: [
+                    crate::hunt::teacher::week(c, now - 7 * DAY, now)?,
+                    crate::hunt::teacher::week(c, now - 14 * DAY, now - 7 * DAY)?,
+                ],
             })
         })
         .await?;

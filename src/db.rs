@@ -133,6 +133,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE refit_log (at INTEGER NOT NULL, key TEXT NOT NULL, old REAL, new REAL, why TEXT NOT NULL);
     CREATE INDEX book_snapshots_name ON book_snapshots(name, at);
     "#,
+    // Mina de ouro, Fase 3: exposição da colheita por braço (`hunt::harvest`).
+    r#"
+    ALTER TABLE arm_stats ADD COLUMN exposure REAL NOT NULL DEFAULT 0;
+    ALTER TABLE arm_stats ADD COLUMN last_at INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -436,7 +441,8 @@ mod tests {
             .unwrap();
         for (id, at) in [("arm-old", now - 15 * DAY), ("arm-new", now - DAY)] {
             conn.execute(
-                "INSERT INTO arm_stats VALUES (?1, 1, 1, 1, 0, 0, 0, 0, 0, ?2)",
+                "INSERT INTO arm_stats(id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at)
+                 VALUES (?1, 1, 1, 1, 0, 0, 0, 0, 0, ?2)",
                 (id, at),
             )
             .unwrap();

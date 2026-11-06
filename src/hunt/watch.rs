@@ -77,9 +77,10 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
         })
         .await?;
 
-    let (correction, books, saldo) = {
+    let correction = h.corrections();
+    let (books, saldo) = {
         let s = h.lock();
-        (s.correction, s.books.clone(), s.saldo)
+        (s.books.clone(), s.saldo)
     };
     let mut rows: Vec<WatchRow> = tasks
         .iter()
