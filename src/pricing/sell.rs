@@ -33,8 +33,9 @@ pub const MAX_PRICE_CENTS: i64 = 10_000_000;
 /// Múltiplo raro acima disto é dado ruim (venda com adesivo/erro), não prêmio de pattern.
 pub const MAX_RARE_MULTIPLE: f64 = 100.0;
 
-pub const MIN_LIST_PROFIT_CENTS: i64 = 20;
-pub const MIN_LIST_MARGIN_PCT: f64 = 5.0;
+/// Régua da lista (pedido do Erick, 06/11): R$ 0,30 por uma semana travada não vale o risco.
+pub const MIN_LIST_PROFIT_CENTS: i64 = 100;
+pub const MIN_LIST_MARGIN_PCT: f64 = 10.0;
 
 /// Ponto do histórico da Steam: mediana paga naquele balde e quantas compras entraram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,7 +511,7 @@ pub struct Evaluation {
     pub margin_pct: f64,
     /// Lucro > 0 mesmo no preço rápido.
     pub safe: bool,
-    /// Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 %.
+    /// Entra na lista: lucro no `mid` ≥ R$ 1,00, margem ≥ 10 % e lucro esperado (com risco) não negativo.
     pub listable: bool,
     /// Vale avisar: entra na lista, tem lucro esperado positivo e `mid` chega ao mínimo. Não exige `safe`:
     /// o lucro esperado já pesa o risco, e raro quase nunca é `safe` (a venda rápida ignora o prêmio).
@@ -541,9 +542,6 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
     // preço de compra ≤ 0 é entrada inválida: nada é seguro nem listável
     let valid = price_cents > 0;
     let safe = valid && sell.quick.profit_cents > 0;
-    let listable = valid
-        && sell.mid.profit_cents >= MIN_LIST_PROFIT_CENTS
-        && margin_pct >= MIN_LIST_MARGIN_PCT;
     let total: f64 = est.probabilities.iter().sum();
     let ev_profit_cents = est.week_move.filter(|_| total > 0.0).map(|week| {
         let expected = [
@@ -557,6 +555,11 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         .sum::<f64>();
         (expected - price_cents as f64 * week.min(1.0)).round() as i64
     });
+    // lucro esperado negativo (risco da semana maior que o ganho) não entra; sem medida, não barra
+    let listable = valid
+        && sell.mid.profit_cents >= MIN_LIST_PROFIT_CENTS
+        && margin_pct >= MIN_LIST_MARGIN_PCT
+        && ev_profit_cents.is_none_or(|profit| profit >= 0);
     let notify = listable
         && sell.mid.profit_cents >= notify_min_cents
         && ev_profit_cents.is_some_and(|profit| profit > 0);
@@ -1078,7 +1081,8 @@ mod tests {
         let ev = evaluate(10_000, &estimate, 100);
         assert_eq!(ev.sell.mid.profit_cents, 500);
         assert_eq!(ev.ev_profit_cents, Some(-1023));
-        assert!(ev.listable && ev.safe && !ev.notify);
+        // lucro esperado negativo: o risco da semana come o ganho, não entra na lista
+        assert!(!ev.listable && ev.safe && !ev.notify);
         estimate.week_move = None;
         assert!(!evaluate(10_000, &estimate, 100).notify);
     }
@@ -1097,18 +1101,23 @@ mod tests {
 
     #[test]
     fn evaluate_borders() {
-        // lucro no mid exatamente 20 e margem ≥ 5 %: lista
-        let net = seller_gets(480); // 419; margem de 20 centavos sobre 399 = 5,01 %
-        let ev = evaluate(net - 20, &est(480, 480, 480), 20);
-        assert_eq!(ev.sell.mid.profit_cents, 20);
+        // lucro no mid exatamente R$ 1,00 e margem exatamente 10 %: lista
+        let mid = crate::pricing::fees::buyer_pays(1100);
+        assert_eq!(seller_gets(mid), 1100);
+        let ev = evaluate(1000, &est(mid, mid, mid), 100);
+        assert_eq!(ev.sell.mid.profit_cents, 100);
         assert!(ev.listable && ev.safe && ev.notify);
-        // lucro 19: não lista
-        let ev = evaluate(net - 19, &est(480, 480, 480), 0);
+        // margem 9,99 %: não lista
+        assert!(!evaluate(1001, &est(mid, mid, mid), 0).listable);
+        // lucro 99 com margem folgada: não lista
+        let small = crate::pricing::fees::buyer_pays(599);
+        let ev = evaluate(500, &est(small, small, small), 0);
+        assert_eq!(ev.sell.mid.profit_cents, 99);
         assert!(!ev.listable && !ev.notify);
-        // lucro ≥ 20 mas margem < 5 %: preço alto
+        // lucro ≥ R$ 1,00 mas margem < 10 %: preço alto
         let big = 100_000;
         let ev = evaluate(big, &est(big, 120_000, 120_000), 0);
-        assert!(ev.sell.mid.profit_cents >= 20 && ev.margin_pct < 5.0 && !ev.listable);
+        assert!(ev.sell.mid.profit_cents >= 100 && ev.margin_pct < 10.0 && !ev.listable);
         // lucra no mid, perde no quick: não é safe, mas avisa porque o lucro esperado é positivo
         let ev = evaluate(560, &est(500, 1107, 1400), 100);
         assert!(ev.listable && !ev.safe && ev.notify);

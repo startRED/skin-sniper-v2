@@ -37,12 +37,26 @@ fn fixture(name: &str) -> Value {
 
 fn listings_body() -> Value {
     let mut v = fixture("steam_listings_moonrise_sorted_price.json");
-    let l = &mut v["data"]["listings"];
-    l[0]["unPrice"] = json!(348);
-    l[0]["unFee"] = json!(52);
-    l[1]["unPrice"] = json!(609);
-    l[1]["unFee"] = json!(91);
+    let l = v["data"]["listings"].as_array_mut().unwrap();
+    // preços em dobro (como o histórico): a R$ 6 o Moonrise não chega à régua de R$ 1,00 de lucro
+    for x in l.iter_mut() {
+        for k in ["unPrice", "unFee"] {
+            x[k] = json!(x[k].as_i64().unwrap() * 2);
+        }
+    }
+    l[0]["unPrice"] = json!(696);
+    l[0]["unFee"] = json!(104);
+    l[1]["unPrice"] = json!(870);
+    l[1]["unFee"] = json!(130);
     l[1]["asset"]["asset_properties"][0]["int_value"] = json!("59");
+    v
+}
+
+fn history_body() -> Value {
+    let mut v = fixture("steam_pricehistory_moonrise_ft.json");
+    for p in v["data"]["prices"].as_array_mut().unwrap() {
+        p["price_median"] = json!(p["price_median"].as_f64().unwrap() * 2.0);
+    }
     v
 }
 
@@ -50,7 +64,7 @@ fn search_body() -> Value {
     let mut v = fixture("steam_search_render_pistol_p1900.json");
     v["results"][0]["hash_name"] = json!(MOON);
     v["results"][0]["name"] = json!(MOON);
-    v["results"][0]["sell_price"] = json!(100);
+    v["results"][0]["sell_price"] = json!(200);
     v
 }
 
@@ -75,7 +89,7 @@ struct Bodies {
 async fn serve() -> (String, Arc<Bodies>) {
     let b = Arc::new(Bodies {
         listings: Mutex::new(listings_body()),
-        history: fixture("steam_pricehistory_moonrise_ft.json"),
+        history: history_body(),
         search: Mutex::new(search_body()),
         listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
@@ -189,7 +203,7 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     assert_eq!(h.lock().ratio.map(|r| r.0), Some(4.0));
 
     let (cheap, t1) = (&found[0], &found[1]);
-    assert_eq!((cheap.id.as_str(), cheap.price_cents), (ID_CHEAP, 400));
+    assert_eq!((cheap.id.as_str(), cheap.price_cents), (ID_CHEAP, 800));
     assert_eq!(cheap.kind, Kind::Desconto);
     assert_eq!(cheap.group, None);
     assert_eq!(cheap.wear.as_deref(), Some("Field-Tested"));
@@ -202,32 +216,32 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         "{}",
         t1.evidence
     );
-    // números conferidos à mão: mediana ~R$ 5,9 com queda de 2 %; 5,78 → líquido 5,03 (taxa 15 %)
+    // números conferidos à mão: mediana ~R$ 11,8 com queda de 2 %; 11,57 → líquido 10,07 (taxa 15 %)
     let tiers = |o: &Opportunity| {
         [&o.sell.quick, &o.sell.mid, &o.sell.high]
             .map(|t| (t.price_cents, t.net_cents, t.profit_cents))
     };
     assert_eq!(
         tiers(cheap),
-        [(561, 489, 89), (578, 503, 103), (591, 515, 115)]
+        [(1124, 979, 179), (1157, 1007, 207), (1184, 1030, 230)]
     );
-    assert_eq!((cheap.margin_pct, cheap.safe), (25.75, true));
+    assert_eq!((cheap.margin_pct, cheap.safe), (25.875, true));
     assert_eq!(cheap.confidence, Confidence::Alta);
     assert_eq!(
         cheap.evidence,
         "339 vendas/dia nos últimos 7 dias · preço em queda, descontado 2%"
     );
-    // a venda rápida não conta com o prêmio do CSFloat: sem ele o T1 a R$ 7,00 perde, então não é seguro
+    // a venda rápida não conta com o prêmio do CSFloat: sem ele o T1 a R$ 10,00 perde, então não é seguro
     assert_eq!(
         tiers(t1),
-        [(561, 489, -211), (887, 772, 72), (911, 793, 93)]
+        [(1124, 979, -21), (1776, 1545, 545), (1826, 1589, 589)]
     );
-    assert!((t1.margin_pct - 10.2857).abs() < 1e-3 && !t1.safe);
+    assert!((t1.margin_pct - 54.5).abs() < 1e-3 && !t1.safe);
     assert_eq!(t1.confidence, Confidence::Media);
     for o in &found {
         assert_eq!(o.name, MOON);
         assert!(o.steam_url.contains(&format!("detail={}", o.id)));
-        assert!(o.sell.mid.profit_cents >= 20 && o.margin_pct >= 5.0);
+        assert!(o.sell.mid.profit_cents >= 100 && o.margin_pct >= 10.0);
         assert!(o.sell.quick.price_cents <= o.sell.mid.price_cents);
         assert!(o.sell.mid.price_cents <= o.sell.high.price_cents);
     }
@@ -246,26 +260,28 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     let l: Listing = serde_json::from_str(&lj).unwrap();
     assert_eq!(
         (l.listing_id.as_str(), l.price_cents, l.seller_cents),
-        (ID_CHEAP, 400, 348)
+        (ID_CHEAP, 800, 696)
     );
     assert!(task.starts_with("d:") || task.starts_with("r:"));
 
-    // combo só com o seguro: o T1 depende do prêmio, fica na lista mas fora da compra sugerida
+    // combo pelo lucro esperado com risco: os dois cabem no saldo e os dois têm lucro esperado positivo
     let st = h.state();
-    assert_eq!(st.combo.cost_cents, 400);
-    assert_eq!(st.combo.ids, vec![ID_CHEAP.to_string()]);
+    assert_eq!(st.combo.cost_cents, 1800);
+    let mut ids = st.combo.ids.clone();
+    ids.sort();
+    assert_eq!(ids, vec![ID_CHEAP.to_string(), ID_T1.to_string()]);
     assert!(st.hunt.watching >= 10, "watching {}", st.hunt.watching);
 
-    // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 0,20 e 5 %) e ritmo
+    // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 1,00 e 10 %) e ritmo
     let watch = watch::list(&h).await.unwrap();
     assert_eq!(watch.len(), st.hunt.watching as usize);
     // o Moonrise (aqui raro por seed) aparece com o piso visto e o teto do prêmio do grupo: 3 vendas do
-    // CSFloat → mid R$ 8,87 → líquido 7,72 → compraria até 7,35 (5 % de margem)
+    // CSFloat → mid R$ 17,76 → líquido 15,45 → compraria até 14,04 (10 % de margem)
     let raro = watch
         .iter()
-        .find(|r| r.kind == Kind::Raro && r.floor_cents == Some(700))
-        .unwrap_or_else(|| panic!("piso R$ 7,00 visto na faixa 58-59: {watch:#?}"));
-    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(735)));
+        .find(|r| r.kind == Kind::Raro && r.floor_cents == Some(1000))
+        .unwrap_or_else(|| panic!("piso R$ 10,00 visto na faixa 58-59: {watch:#?}"));
+    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(1404)));
     assert_eq!(raro.last_checked_at, Some(NOW));
     // mais perto de compensar primeiro
     let gaps: Vec<i64> = watch
@@ -303,7 +319,7 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_CHEAP));
-    assert!(h.state().combo.ids.is_empty());
+    assert_eq!(h.state().combo.ids, vec![ID_T1.to_string()]);
     let gone_at: Option<i64> = db
         .call(|c| {
             c.query_row(
@@ -347,8 +363,8 @@ async fn cheaper_competitor_reevaluates_known_opportunity() {
     {
         let mut b = bodies.listings.lock().unwrap();
         let other = &mut b["data"]["listings"][2];
-        other["unPrice"] = json!(348);
-        other["unFee"] = json!(52);
+        other["unPrice"] = json!(696);
+        other["unFee"] = json!(104);
     }
     let mut gone = None;
     for _ in 0..400 {
@@ -403,7 +419,7 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
     let mut gone = None;
     // R$ 9,50 fica acima do médio (R$ 8,87): nada muda. R$ 8,00 limita o médio a R$ 7,99, líquido abaixo dos
     // R$ 7,00 pagos, e o T1 deixa de ser oportunidade.
-    for price in [950, 800] {
+    for price in [1900, 1250] {
         rival.price_cents = price;
         detect::process(&h, &rare(vec![(lo, hi)]), &only(rival.clone()))
             .await
@@ -417,9 +433,9 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
                 gone = Some(id);
             }
         }
-        if price == 950 {
+        if price == 1900 {
             assert_eq!(gone, None);
-            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, 887);
+            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, 1776);
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_T1));
@@ -448,13 +464,13 @@ async fn search_skips_expensive_and_deduplicates_affordable_listings() {
         s.floors.clear();
         s.cycle.saved_listings = 0;
     }
-    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(10000);
+    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(20000);
     let before = bodies.listing_queries.load(Ordering::Relaxed);
     scheduler::run_task(&h, &task).await.unwrap();
     assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), before);
     assert_eq!(h.lock().cycle.saved_listings, 2);
 
-    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(100);
+    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(200);
     scheduler::run_task(&h, &task).await.unwrap();
     assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), before + 1);
     let s = h.lock();

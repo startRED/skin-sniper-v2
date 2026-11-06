@@ -66,8 +66,8 @@ impl Mode {
 /// Uma consulta recorrente: `QueryListingsForItem` do código, com desgaste e/ou faixa de seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Task {
-    /// `d:<market_hash_name>` (mais barato) ou `r:<código>:<desgaste>`
-    /// (raro: uma tarefa por skin × desgaste).
+    /// `d:<market_hash_name>` (mais barato) ou `r:<código>`
+    /// (raro: uma tarefa por skin, todos os desgastes).
     pub id: String,
     /// `market_hash_name` com o desgaste, para log e para filtrar a resposta.
     pub name: String,

@@ -13,7 +13,7 @@ use rusqlite::OptionalExtension;
 
 const DAY: i64 = 86_400;
 
-/// Maior preço de compra que ainda entra na lista (lucro ≥ R$ 0,20 e margem ≥ 5 % no preço médio).
+/// Maior preço de compra que ainda entra na lista (lucro ≥ R$ 1,00 e margem ≥ 10 % no preço médio).
 fn max_buy(net_mid: i64) -> i64 {
     let by_margin = (net_mid as f64 * 100.0 / (100.0 + MIN_LIST_MARGIN_PCT)).floor() as i64;
     by_margin.min(net_mid - MIN_LIST_PROFIT_CENTS)

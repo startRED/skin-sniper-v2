@@ -6,7 +6,7 @@
 //! 2. razão BRL/USD medida entre um anúncio em BRL e o preço USD do mesmo item (nunca fixa no código);
 //! 3. `QueryPriceHistory` dos candidatos com piso ≤ saldo (cache de 6 h);
 //! 4. seleção por nota = vendas/dia × lucro possível × (1 + acertos), mais uma consulta de grupo raro por
-//!    skin com tabela × desgaste. A nota só escolhe quem
+//!    skin com tabela (todos os desgastes numa consulta). A nota só escolhe quem
 //!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
 //!    caber no saldo.
 //!
@@ -147,7 +147,7 @@ pub fn scan_start(round: u32, day: i64, total: Option<u32>) -> Option<u32> {
     (pages > 0).then(|| lo + day.rem_euclid(i64::from(pages)) as u32 * 10)
 }
 
-/// Lucro mínimo para entrar na lista a esse preço de compra: R$ 0,20 e 5 % (as mesmas regras de `sell::evaluate`).
+/// Lucro mínimo para entrar na lista a esse preço de compra: R$ 1,00 e 10 % (as mesmas regras de `sell::evaluate`).
 pub fn min_profit(price_cents: i64) -> i64 {
     let by_margin = (price_cents as f64 * MIN_LIST_MARGIN_PCT / 100.0).ceil() as i64;
     MIN_LIST_PROFIT_CENTS.max(by_margin)
@@ -225,7 +225,7 @@ pub struct Ctx<'a> {
 }
 
 /// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 1 venda/dia e lucro possível ≥ mínimo, por nota
-/// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela × desgaste cujo piso cabe no saldo (até
+/// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela (todos os desgastes) cujo piso cabe no saldo (até
 /// `RARE_MAX_TASKS`, os que mais vendem primeiro), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
 pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
@@ -261,25 +261,38 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     common.truncate(WATCH_MAX);
     let total: f64 = common.iter().map(|c| c.1.score).sum();
     let mut tasks: Vec<Task> = common.into_iter().map(|c| c.1).collect();
-    // Raros: skin com tabela × desgaste, uma vez só (itens repetidos do catálogo não duplicam).
-    let mut by_wear: BTreeMap<(&str, u8), (i64, &str, f64)> = BTreeMap::new();
+    // Raros: uma tarefa por skin com tabela (código G), sem filtro de desgaste: a mesma consulta traz todos os
+    // desgastes, StatTrak e Souvenir da faixa de seed, então cada faixa é revista ~4× mais vezes no mesmo ritmo.
+    // Nome = o desgaste que mais vende (painel e CSFloat); piso = o menor dos desgastes; vendas = a soma.
+    let mut by_code: BTreeMap<&str, (i64, &str, f64, f64)> = BTreeMap::new();
+    let mut seen_names: HashSet<&str> = HashSet::new();
     for i in items {
-        let (Some(code), Some(wear)) = (i.code.as_deref(), wear_of(&i.name)) else {
+        let Some(code) = i.code.as_deref() else {
             continue;
         };
         let f = ratio_floor(i).unwrap_or(0);
         let plain = !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir");
-        if plain && f <= c.saldo && !seed_ranges(&i.name).is_empty() {
+        if plain
+            && wear_of(&i.name).is_some()
+            && f <= c.saldo
+            && seen_names.insert(i.name.as_str())
+            && !seed_ranges(&i.name).is_empty()
+        {
             let spd = i.sales_per_day.unwrap_or(MIN_SALES_PER_DAY);
-            by_wear
-                .entry((code, wear))
-                .or_insert((f, i.name.as_str(), spd));
+            let e = by_code
+                .entry(code)
+                .or_insert((f, i.name.as_str(), spd, 0.0));
+            e.0 = e.0.min(f);
+            if spd > e.2 {
+                (e.1, e.2) = (i.name.as_str(), spd);
+            }
+            e.3 += spd;
         }
     }
-    let mut rare: Vec<(f64, i64, Task, f64)> = by_wear
+    let mut rare: Vec<(f64, i64, Task, f64)> = by_code
         .into_iter()
-        .filter_map(|((code, wear), (f, name, spd))| {
-            let id = format!("r:{code}:{wear}");
+        .filter_map(|(code, (f, name, _, spd))| {
+            let id = format!("r:{code}");
             let seeds = seed_ranges(name);
             let seen = observed(c.floors, &id, c.now);
             // todas as faixas conferidas, todas com anúncio e o menor não cabe: nada a caçar aqui agora
@@ -291,7 +304,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
                     id,
                     name: name.to_string(),
                     code: code.to_string(),
-                    wear: Some(wear),
+                    wear: None,
                     seeds,
                     score: 0.0,
                 };
@@ -956,9 +969,21 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|i| Item {
-                name: i["name"].as_str().unwrap().into(),
-                code: i["code"].as_str().map(Into::into),
+            .map(|i| {
+                let name = i["name"].as_str().unwrap();
+                // a Steam dá um código G por skin (todos os desgastes, StatTrak e Souvenir); o fixture traz um por
+                // nome, então o teste agrupa pela skin-base
+                let base = name
+                    .trim_start_matches("StatTrak™ ")
+                    .trim_start_matches("Souvenir ")
+                    .split(" (")
+                    .next()
+                    .unwrap();
+                (name, i["code"].as_str().map(|_| format!("G:{base}")), i)
+            })
+            .map(|(name, code, i)| Item {
+                name: name.into(),
+                code,
                 floor_usd_cents: i["floor_usd_cents"].as_i64(),
                 rank: i["rank"].as_i64().unwrap(),
                 sales_per_day: i["sales_per_day"].as_f64(),
@@ -971,17 +996,20 @@ mod tests {
 
     #[test]
     fn minimum_floor_comes_from_the_fee_formula() {
-        // abaixo do mínimo nem a taxa de 1 + 1 centavo deixa R$ 0,20 de lucro; acima, deixa
+        // abaixo do mínimo uma venda 30 % acima não deixa R$ 1,00 e 10 % depois da taxa; acima, deixa
         let min = min_discount_floor();
-        assert!((140..=200).contains(&min), "{min}");
+        assert!((700..=800).contains(&min), "{min}");
         let ok = |p: i64| seller_gets(p * (100 + MAX_UPLIFT_PCT) / 100) - p >= min_profit(p);
         assert!(ok(min) && !ok(min - 1));
         // preço de R$ 0,19 com dispersão de 50 %: vende a R$ 0,38 e a taxa leva quase tudo
         assert!(possible_profit(19, 0.5) < MIN_LIST_PROFIT_CENTS);
-        // R$ 10 com 20 % de dispersão (venda a R$ 12,50) sobra mais que o mínimo
+        // R$ 10 com 20 % de dispersão (venda a R$ 12,50) não chega a R$ 1,00; R$ 20 com 30 % (venda a R$ 28,57) chega
         assert_eq!(possible_profit(1000, 0.2), 1088 - 1000);
-        assert_eq!(min_profit(1000), 50);
-        assert_eq!(min_profit(100), 20);
+        assert!(possible_profit(1000, 0.2) < min_profit(1000));
+        assert!(possible_profit(2000, 0.3) >= min_profit(2000));
+        assert_eq!(min_profit(1000), 100);
+        assert_eq!(min_profit(2000), 200);
+        assert_eq!(min_profit(100), 100);
     }
 
     #[test]
@@ -1041,37 +1069,38 @@ mod tests {
             "acima do saldo"
         );
         assert!(names.contains("AWP | Duality (Field-Tested)"));
-        // raros: uma tarefa por skin × desgaste que cabe, sem repetir e sem os caros
+        // raros: uma tarefa por skin que cabe (todos os desgastes na mesma consulta), sem repetir e sem os caros
         let ids: Vec<&str> = rare.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            rare.iter()
+                .all(|t| t.wear.is_none() && t.id == format!("r:{}", t.code)),
+            "{ids:?}"
+        );
         assert_eq!(
             ids.len(),
             HashSet::<&&str>::from_iter(ids.iter()).len(),
             "repetido: {ids:?}"
         );
         let rn: Vec<&str> = rare.iter().map(|t| t.name.as_str()).collect();
+        let has = |skin: &str| rn.iter().filter(|n| n.starts_with(skin)).count();
         for want in [
-            "Glock-18 | Moonrise (Field-Tested)",
-            "Glock-18 | Moonrise (Well-Worn)",
-            "Glock-18 | Moonrise (Battle-Scarred)",
-            "Desert Eagle | Heat Treated (Field-Tested)",
-            "Five-SeveN | Case Hardened (Field-Tested)",
+            "Glock-18 | Moonrise (",
+            "Desert Eagle | Heat Treated (",
+            "Five-SeveN | Case Hardened (",
         ] {
-            assert!(rn.contains(&want), "faltou {want}: {rn:?}");
+            assert_eq!(has(want), 1, "{want}: {rn:?}");
         }
-        for no in [
-            "Glock-18 | Fade (Factory New)",
-            "AK-47 | Case Hardened (Field-Tested)",
-        ] {
-            assert!(!rn.contains(&no), "não cabe no saldo: {no}");
+        for no in ["Glock-18 | Fade (", "AK-47 | Case Hardened ("] {
+            assert_eq!(has(no), 0, "não cabe no saldo: {no}");
         }
         assert!(rare.iter().all(|t| !t.name.contains("StatTrak")));
         let moon = rare
             .iter()
-            .find(|t| t.name == "Glock-18 | Moonrise (Field-Tested)")
+            .find(|t| t.name.starts_with("Glock-18 | Moonrise ("))
             .unwrap();
         assert_eq!(
             (moon.wear, moon.seeds.len()),
-            (Some(2), seed_ranges(&moon.name).len())
+            (None, seed_ranges(&moon.name).len())
         );
     }
 
@@ -1094,12 +1123,15 @@ mod tests {
             .filter(|t| t.rare())
             .map(|t| t.name)
             .collect();
-        // o corte em RARE_MAX_TASKS fica com o começo desta ordem. Heat Treated FT vem do fixture com 241/dia;
-        // sem venda medida conta 1/dia; o de 0,2/dia vai para o fim
+        // o corte em RARE_MAX_TASKS fica com o começo desta ordem (vendas somadas dos desgastes); o nome é o
+        // desgaste que mais vende: o Moonrise de 0,2/dia no BS não puxa a tarefa para o fim
         assert_eq!(rare[0], "Glock-18 | Moonrise (Field-Tested)");
         assert_eq!(rare[1], "Desert Eagle | Heat Treated (Field-Tested)");
-        assert_eq!(rare[2], "Five-SeveN | Case Hardened (Field-Tested)");
-        assert_eq!(rare.last().unwrap(), "Glock-18 | Moonrise (Battle-Scarred)");
+        assert!(
+            !rare
+                .iter()
+                .any(|n| n == "Glock-18 | Moonrise (Battle-Scarred)")
+        );
     }
 
     #[test]
@@ -1110,7 +1142,7 @@ mod tests {
         let id_of = |tasks: &[Task]| {
             tasks
                 .iter()
-                .find(|t| t.rare() && t.name == heat)
+                .find(|t| t.rare() && t.name.starts_with("Desert Eagle | Heat Treated ("))
                 .map(|t| t.id.clone())
         };
         let id = id_of(&select(&items, &ctx(saldo, &hit, &HashMap::new()))).unwrap();
@@ -1123,15 +1155,15 @@ mod tests {
         // uma faixa ainda sem consulta (ou vazia): continua, mas com peso menor que um raro ainda não visto
         floors.remove(&format!("{id}#0-0"));
         let tasks = select(&items, &ctx(saldo, &hit, &floors));
-        let score = |name: &str| {
+        let score = |skin: &str| {
             tasks
                 .iter()
-                .find(|t| t.rare() && t.name == name)
+                .find(|t| t.rare() && t.name.starts_with(skin))
                 .unwrap()
                 .score
         };
         assert!(id_of(&tasks).is_some());
-        assert!(score(heat) < score("Glock-18 | Moonrise (Field-Tested)") / 2.0);
+        assert!(score("Desert Eagle | Heat Treated (") < score("Glock-18 | Moonrise (") / 2.0);
         floors.insert(format!("{id}#0-0"), (None, 1_793_769_000));
         assert!(id_of(&select(&items, &ctx(saldo, &hit, &floors))).is_some());
         // uma faixa barata: continua
