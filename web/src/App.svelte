@@ -7,6 +7,7 @@
   import OppTable from './lib/OppTable.svelte';
   import Watch from './lib/Watch.svelte';
   import Purchases from './lib/Purchases.svelte';
+  import Learning from './lib/Learning.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
 
   onMount(start);
@@ -98,6 +99,8 @@
     </section>
 
     <Purchases />
+
+    <Learning />
   {/if}
 </main>
 

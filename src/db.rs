@@ -60,7 +60,7 @@ const MIGRATIONS: &[&str] = &[
         first_at INTEGER NOT NULL, reward_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
     "#,
-    // Auditoria: cada avaliação (aprovada ou recusada, com o motivo) e o anúncio como veio; só as últimas
+    // Auditoria: cada avaliação (aprovada ou recusada, com o motivo) e o anúncio como veio; 60 dias, no máximo
     // `detect::EVALUATIONS_KEEP`.
     r#"
     CREATE TABLE evaluations (
@@ -88,7 +88,34 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX IF NOT EXISTS evaluations_reason ON evaluations(reason, at);
     "#,
+    // Mina de ouro, Fase 0: registro de observações (`hunt::ledger`), do livro de ofertas e placar por hora.
+    r#"
+    CREATE TABLE observations (
+        listing_id TEXT PRIMARY KEY, asset_id TEXT, name TEXT NOT NULL, query TEXT NOT NULL, grp TEXT,
+        price_cents INTEGER NOT NULL, seed INTEGER, "float" REAL, paint_index INTEGER,
+        first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, age_max INTEGER, cheapest INTEGER NOT NULL,
+        gone_at INTEGER, relist_of TEXT, relisted INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX observations_query ON observations(query, gone_at);
+    CREATE INDEX observations_asset ON observations(asset_id);
+    CREATE INDEX observations_last ON observations(last_seen);
+    CREATE INDEX observations_first ON observations(first_seen);
+    CREATE INDEX observations_grp ON observations(grp, gone_at);
+    CREATE INDEX observations_name ON observations(name, gone_at);
+    CREATE TABLE book_snapshots (
+        name TEXT NOT NULL, at INTEGER NOT NULL, max_buy_cents INTEGER, buy_orders INTEGER NOT NULL,
+        sell_orders INTEGER NOT NULL, sell_levels TEXT NOT NULL, PRIMARY KEY (name, at)
+    );
+    CREATE INDEX book_snapshots_at ON book_snapshots(at);
+    ALTER TABLE hourly_activity ADD COLUMN queries INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE hourly_activity ADD COLUMN near INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE hourly_activity ADD COLUMN books INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS evaluations_at ON evaluations(at);
+    "#,
 ];
+
+/// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
+pub const LEARN_KEEP_DAYS: i64 = 60;
 
 pub fn now_unix() -> i64 {
     SystemTime::now()
@@ -147,7 +174,8 @@ pub struct Retained {
 }
 
 /// price_points > 31 dias, listings_seen > 3 dias, oportunidades encerradas há > 7 dias, notas da agenda sem uso
-/// há > 14 dias (e no máximo `ARM_STATS_MAX`, as mais recentes).
+/// há > 14 dias (e no máximo `ARM_STATS_MAX`, as mais recentes); o aprendizado (registro, livro, avaliações, placar)
+/// por `LEARN_KEEP_DAYS`.
 pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
     let r = Retained {
         price_points: conn.execute("DELETE FROM price_points WHERE ts < ?1", [now - 31 * DAY])?,
@@ -165,10 +193,14 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
             rusqlite::params![now - 14 * DAY, ARM_STATS_MAX],
         )?,
     };
+    let learn = now - LEARN_KEEP_DAYS * DAY;
     conn.execute(
         "DELETE FROM hourly_activity WHERE hour_utc < ?1",
-        [(now - 30 * DAY).div_euclid(3600)],
+        [learn.div_euclid(3600)],
     )?;
+    conn.execute("DELETE FROM observations WHERE last_seen < ?1", [learn])?;
+    conn.execute("DELETE FROM book_snapshots WHERE at < ?1", [learn])?;
+    conn.execute("DELETE FROM evaluations WHERE at < ?1", [learn])?;
     conn.execute(
         "DELETE FROM activity_seen WHERE last_seen < ?1",
         [now - 3 * DAY],
@@ -347,15 +379,28 @@ mod tests {
             .unwrap();
         }
         conn.execute(
-            "INSERT INTO hourly_activity VALUES (?1, 1, 0)",
-            [(now - 31 * DAY).div_euclid(3600)],
+            "INSERT INTO hourly_activity(hour_utc, listings, opportunities) VALUES (?1, 1, 0)",
+            [(now - 61 * DAY).div_euclid(3600)],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO hourly_activity VALUES (?1, 2, 1)",
-            [(now - 29 * DAY).div_euclid(3600)],
+            "INSERT INTO hourly_activity(hour_utc, listings, opportunities) VALUES (?1, 2, 1)",
+            [(now - 59 * DAY).div_euclid(3600)],
         )
         .unwrap();
+        for (id, at) in [("obs-old", now - 61 * DAY), ("obs-new", now - 59 * DAY)] {
+            conn.execute(
+                "INSERT INTO observations(listing_id, name, query, price_cents, first_seen, last_seen, cheapest)
+                 VALUES (?1, 'x', 'q', 1, ?2, ?2, 0)",
+                (id, at),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO book_snapshots VALUES (?1, ?2, NULL, 0, 0, '[]')",
+                (id, at),
+            )
+            .unwrap();
+        }
         conn.execute(
             "INSERT INTO activity_seen VALUES ('old', ?1)",
             [now - 4 * DAY],
@@ -392,5 +437,11 @@ mod tests {
             .query_row("SELECT count(*) FROM activity_seen", [], |r| r.get(0))
             .unwrap();
         assert_eq!(seen, 1);
+        for t in ["observations", "book_snapshots"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1, "{t}: só a de 59 dias fica");
+        }
     }
 }

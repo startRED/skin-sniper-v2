@@ -2,7 +2,7 @@
 // Todos os números são inventados para desenvolver a tela. Nada aqui vem da Steam.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
-import type { History, Opportunity, Purchase, Sell, Settings, State, Tier, WatchRow } from '../src/lib/types';
+import type { History, Learning, Opportunity, Purchase, Sell, Settings, State, Tier, WatchRow } from '../src/lib/types';
 
 export const FIXTURE_MARK = '__SKIN_SNIPER_FIXTURE__';
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -142,6 +142,20 @@ function watchRows(): WatchRow[] {
   }).sort((a, b) => dist(a) - dist(b));
 }
 
+// Placar de exemplo: 3 dias de registro (o resto vazio, como logo depois de instalar).
+function learning(): Learning {
+  const days = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date((nowS() - 3 * 3600 - i * 86400) * 1000).toISOString().slice(0, 10);
+    const on = i < 3;
+    return {
+      day: d, queries: on ? 4200 - i * 300 : 0, books: on ? 1300 : 0, new_listings: on ? 610 - i * 40 : 0, aged: on ? 380 : 0,
+      age_median_min: on ? 4.5 + i : null, sales: on ? 240 : 0, relists: on ? 9 : 0, life_median_min: on ? 95 + i * 10 : null,
+      near: on ? 31 : 0, finds: on ? (i === 1 ? 2 : 0) : 0
+    };
+  });
+  return { days, since: nowS() - 2.4 * 86400 };
+}
+
 function history(o: Opportunity): History {
   let x = Number(o.id) % 9973;
   const rnd = () => ((x = (x * 16807) % 2147483647) / 2147483647);
@@ -204,6 +218,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (p === '/api/opportunities') return send(res, 200, [...opps, ...lost]);
   if (p === '/api/watch') return send(res, 200, watchRows());
   if (p === '/api/purchases') return send(res, 200, purchases);
+  if (p === '/api/learning') return send(res, 200, learning());
   if (p === '/api/settings' && m === 'GET') return send(res, 200, settings);
   if (p === '/api/settings' && m === 'PUT') {
     const patch = await readJson(req);

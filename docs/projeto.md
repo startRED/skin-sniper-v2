@@ -33,7 +33,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `steam/client.rs` | HTTP único da Steam: cookie da sessão, limitador adaptativo, breakers por endpoint |
 | `steam/listings.rs` | código G, `QueryListingsForItem` (com `propertyFilters`), parse de `asset_properties` |
 | `steam/history.rs` | `QueryPriceHistory` → pontos `(ts, mediana_centavos, compras)` |
-| `steam/book.rs` | `/market/orderbook` `Load` → maior pedido de compra e quantos pedidos abertos |
+| `steam/book.rs` | `/market/orderbook` `Load` → maior pedido de compra, quantos pedidos abertos e os 5 primeiros degraus de venda |
 | `steam/search.rs` | `search/render` para descoberta de catálogo (USD → BRL por razão medida) |
 | `steam/session.rs` | valida o `steamLoginSecure`, obtém `sessionid`, lê saldo da carteira |
 | `steam/buy.rs` | `buylisting` com o fluxo `need_confirmation` |
@@ -45,6 +45,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `hunt/catalog.rs` | descoberta e seleção do que vigiar dado o saldo |
 | `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador |
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
+| `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
 | `web/` | rotas, SSE, guarda de Host, arquivos embutidos |
 
@@ -65,6 +66,7 @@ GET  /api/purchases        -> Purchase[]
 POST /api/purchases/:id/sold {sold_cents: int}      -> Purchase (valor pago pelo comprador, com taxas)
 GET  /api/calibration      -> Calibration
 GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
+GET  /api/learning         -> Learning              (placar do aprendizado, 14 dias de Brasília)
 GET  /api/settings         -> Settings              (chaves mascaradas)
 PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga)
 GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id} | "state" State | "purchase" Purchase
@@ -121,6 +123,9 @@ Purchase = { id, name, icon_url, price_cents, status: "pending" | "need_confirma
 Calibration = { families: [{ family: string, kind: "desconto" | "raro", n: number,
                               mean_error_pct: number, bias_pct: number }],
                 hours: [{ hour: 0..23, listings: number, opportunities: number }] }
+Learning = { days: LearningDay[], since: number | null }   // do dia mais recente; since = 1º anúncio do registro
+LearningDay = { day: "AAAA-MM-DD", queries, books, new_listings, aged, age_median_min: number | null,
+                sales, relists, life_median_min: number | null, near, finds }
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
              telegram_chat_id: string|null, panel_url: string|null, sound: boolean,
              notify_min_profit_cents: number }      // segredos chegam mascarados: "••••gLO9"
@@ -201,6 +206,29 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    ensina a agenda como um anúncio que não passou. O teto desses dois filtros não conta o menor anúncio do livro como
    concorrente: ele é o próprio candidato, e derrubaria o teto abaixo de si mesmo. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
+
+## Aprendizado (mina de ouro)
+
+Desenho: `docs/superpowers/specs/2026-11-06-mina-de-ouro-design.md`; plano: `docs/superpowers/plans/2026-11-06-mina-de-ouro.md`.
+Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibração, não medidas.
+
+1. **Registro de observações (`observations`, `hunt/ledger.rs`).** Toda página de anúncios lida grava cada anúncio
+   uma vez por consulta exata (código, desgaste, filtro): `listing_id`, `asset_id` (o item), skin, preço, seed, float,
+   paint, grupo raro, primeiro e último instante visto e se era o mais barato da skin na página.
+   - **Idade máxima:** anúncio novo cujo preço a consulta anterior da mesma chave cobria nasceu entre as duas:
+     `age_max` = intervalo entre elas. Sem cobertura (preço acima da página anterior, ou 1ª consulta), fica vazio.
+   - **Sumiço:** só com página não vazia; some quem não está nela e tem preço coberto (sem `more`, todos; com
+     `more`, abaixo de 98 % do maior preço da página, porque a Steam inverte ~1 % na borda). Reaparecer desfaz.
+   - **Relistagem:** o mesmo `asset_id` em outro anúncio com o antigo vivo ou sumido há ≤ 24 h marca o antigo
+     `relisted` (não é venda) e o novo `relist_of`.
+   - Retenção de 60 dias (`db::LEARN_KEEP_DAYS`), como `evaluations` (antes, as últimas 10 000; agora teto de
+     300 000 linhas), `book_snapshots` e o placar por hora.
+2. **Registro do livro (`book_snapshots`).** Cada leitura do livro de ofertas (pedidos sugeridos ou triagem do
+   comum) guarda o maior pedido de compra, os números de pedidos e anúncios e os 5 primeiros degraus de venda
+   `[preço, quantidade]`, só quando maior pedido, número de anúncios ou degraus mudaram.
+3. **Placar (`GET /api/learning`, seção "Aprendizado" do painel).** Por dia de Brasília, 14 dias: leituras de
+   anúncios e do livro (`hourly_activity.queries`/`books`), anúncios novos e a idade mediana dos de idade conhecida,
+   os que sumiram sem relistagem e quanto duraram (mediana), relistados, quase-achados e achados.
 
 ## Precificação (o coração)
 

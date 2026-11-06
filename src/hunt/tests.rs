@@ -1010,6 +1010,8 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
                 max_buy_cents: Some(top),
                 buy_orders: 5,
                 min_sell_cents: ask,
+                sell_orders: i64::from(ask.is_some()),
+                sell_levels: ask.map(|a| vec![(a, 1)]).unwrap_or_default(),
             }),
         )
     };
@@ -1315,4 +1317,178 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
             .iter()
             .any(|t| t.seeds.iter().any(|&(lo, hi)| (lo..=hi).contains(&269)))
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Registro de observações (mina de ouro, Fase 0)
+
+/// Página com anúncios do Moonrise da captura real, renomeados: `(id, item, preço)`.
+fn ledger_page(rows: &[(&str, &str, i64)], more: bool) -> crate::steam::listings::ListingsPage {
+    let base = crate::steam::listings::parse_page(
+        &fixture("steam_listings_moonrise_sorted_price.json")["data"],
+        0,
+    )
+    .unwrap();
+    let mut page = base.clone();
+    page.more = more;
+    page.listings = rows
+        .iter()
+        .map(|&(id, asset, price)| {
+            let mut l = base.listings[0].clone();
+            (l.listing_id, l.asset_id, l.price_cents) = (id.into(), asset.into(), price);
+            l
+        })
+        .collect();
+    page
+}
+
+async fn obs(db: &Db, id: &str) -> (Option<i64>, i64, Option<i64>, Option<String>, bool) {
+    let id = id.to_string();
+    db.call(move |c| {
+        c.query_row(
+            "SELECT gone_at, relisted, age_max, relist_of, cheapest FROM observations WHERE listing_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn ledger_marks_gone_only_when_covered() {
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against("http://127.0.0.1:9", db.clone());
+    let t0 = NOW;
+    let all = [
+        ("L0", "A0", 100),
+        ("L1", "A1", 200),
+        ("L2", "A2", 300),
+        ("L3", "A3", 400),
+        ("L4", "A4", 500),
+    ];
+    let r = ledger::record(&h, "q", &ledger_page(&all, true), t0)
+        .await
+        .unwrap();
+    assert_eq!((r.new, r.aged, r.gone), (5, 0, 0));
+    assert!(obs(&db, "L0").await.4, "o mais barato da página");
+    assert!(!obs(&db, "L1").await.4);
+    // L0 (R$ 1) sumiu e a página ainda cobre o preço dele
+    let r = ledger::record(&h, "q", &ledger_page(&all[1..], true), t0 + 60)
+        .await
+        .unwrap();
+    assert_eq!(r.gone, 1);
+    assert_eq!(obs(&db, "L0").await.0, Some(t0 + 60));
+    // L4 está no maior preço da página anterior: com `more`, a página nova (até R$ 4) não o cobre
+    let r = ledger::record(&h, "q", &ledger_page(&all[1..4], true), t0 + 120)
+        .await
+        .unwrap();
+    assert_eq!(r.gone, 0);
+    // página vazia nunca prova sumiço
+    let r = ledger::record(&h, "q", &ledger_page(&[], false), t0 + 180)
+        .await
+        .unwrap();
+    assert_eq!(r, ledger::Recorded::default());
+    assert_eq!(obs(&db, "L2").await.0, None);
+    // outra consulta não prova nada sobre esta
+    let r = ledger::record(&h, "outra", &ledger_page(&all[1..2], false), t0 + 200)
+        .await
+        .unwrap();
+    assert_eq!((r.new, r.gone), (0, 0));
+    // sem `more` a página cobre tudo: L2, L3 e L4 sumiram
+    let r = ledger::record(&h, "q", &ledger_page(&all[1..2], false), t0 + 240)
+        .await
+        .unwrap();
+    assert_eq!(r.gone, 3);
+    // e quem volta (inversão de ordem, leitura parcial) está vivo de novo
+    ledger::record(&h, "q", &ledger_page(&all[1..3], false), t0 + 300)
+        .await
+        .unwrap();
+    assert_eq!(obs(&db, "L2").await.0, None);
+}
+
+#[tokio::test]
+async fn ledger_relist_by_asset_is_not_a_sale_and_age_comes_from_the_cover() {
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against("http://127.0.0.1:9", db.clone());
+    let t0 = NOW;
+    ledger::record(
+        &h,
+        "q",
+        &ledger_page(&[("L0", "A0", 100), ("L1", "A1", 200)], true),
+        t0,
+    )
+    .await
+    .unwrap();
+    // o mesmo item A0 volta mais barato em outro anúncio: relistagem; um novo coberto pela consulta anterior
+    // (R$ 1,50 < 98 % de R$ 2,00) tem idade ≤ 2 min; um acima do que ela cobria, idade desconhecida
+    let p2 = [
+        ("L1", "A1", 200),
+        ("L9", "A0", 90),
+        ("L5", "A5", 150),
+        ("L6", "A6", 300),
+    ];
+    let r = ledger::record(&h, "q", &ledger_page(&p2, false), t0 + 120)
+        .await
+        .unwrap();
+    assert_eq!((r.new, r.aged, r.relisted, r.gone), (3, 2, 1, 0));
+    let (gone, relisted, ..) = obs(&db, "L0").await;
+    assert_eq!((gone, relisted), (Some(t0 + 120), 1));
+    let (_, _, age, of, _) = obs(&db, "L9").await;
+    assert_eq!((age, of.as_deref()), (Some(120), Some("L0")));
+    assert_eq!(obs(&db, "L5").await.2, Some(120));
+    assert_eq!(obs(&db, "L6").await.2, None);
+    // item que volta depois de 24 h sumido já conta como venda: não vira relistagem
+    ledger::record(&h, "q", &ledger_page(&[("L6", "A6", 300)], false), t0 + 180)
+        .await
+        .unwrap();
+    let late = t0 + 180 + ledger::RELIST_WINDOW + 1;
+    let r = ledger::record(
+        &h,
+        "q",
+        &ledger_page(&[("L7", "A5", 150), ("L6", "A6", 300)], false),
+        late,
+    )
+    .await
+    .unwrap();
+    assert_eq!((r.new, r.relisted), (1, 0));
+    assert_eq!(obs(&db, "L5").await.1, 0);
+}
+
+#[tokio::test]
+async fn book_snapshot_only_on_change() {
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against("http://127.0.0.1:9", db.clone());
+    let b = crate::steam::book::parse_book(&fixture("steam_orderbook_negev_2026-11.json")["data"])
+        .unwrap();
+    assert_eq!(
+        orders::remember_book(&h, MOON, NOW, Some(b.clone())).await,
+        None
+    );
+    // mesmo topo (só a contagem de pedidos de compra mudou): não grava de novo
+    let more_bids = crate::steam::book::Book {
+        buy_orders: b.buy_orders + 3,
+        ..b.clone()
+    };
+    assert!(
+        orders::remember_book(&h, MOON, NOW + 60, Some(more_bids))
+            .await
+            .is_some()
+    );
+    // falha de leitura não grava e não apaga o que já se sabia
+    orders::remember_book(&h, MOON, NOW + 90, None).await;
+    let mut sold = b.clone();
+    sold.sell_levels[0].1 = 1; // um dos dois anúncios de R$ 1,67 vendeu
+    orders::remember_book(&h, MOON, NOW + 120, Some(sold)).await;
+    let rows: Vec<(i64, String)> = db
+        .call(|c| {
+            c.prepare("SELECT at, sell_levels FROM book_snapshots ORDER BY at")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1].0, NOW + 120);
+    assert!(rows[1].1.starts_with("[[167,1],[170,1]"), "{}", rows[1].1);
 }
