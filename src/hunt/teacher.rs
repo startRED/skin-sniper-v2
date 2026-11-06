@@ -952,6 +952,10 @@ mod tests {
                 profit_cents: won,
             }
         );
+        // a hora em curso conta (ela começou dentro da semana)
+        let start = (T / HOUR + 1) * HOUR;
+        let partial = db.call(move |c| week(c, T, start + 1)).await.unwrap();
+        assert_eq!(partial.queries, 10);
         let empty = db
             .call(|c| week(c, T + 11 * DAY, T + 18 * DAY))
             .await
