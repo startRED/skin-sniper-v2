@@ -340,9 +340,21 @@ async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Ve
 async fn cheaper_competitor_reevaluates_known_opportunity() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
-    let (h, mut rx) = hunt_against(&base, db);
+    let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     assert_eq!(run_until_two(&h, &mut rx).await.len(), 2);
+    let approved: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(DISTINCT listing_id) FROM evaluations
+                 WHERE reason = 'aprovada' AND mid_profit_cents > 0 AND detail IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(approved, 2);
     // outro comum baixa para R$ 4,00: o barato (mesmo preço, mesmo histórico) só vende a R$ 3,99 e perde
     {
         let mut b = bodies.listings.lock().unwrap();
@@ -555,6 +567,19 @@ async fn hourly_listings_include_above_balance_without_counting_repeats() {
         .await
         .unwrap();
     assert_eq!((listings, opportunities), (expected, 0));
+    // auditoria: cada anúncio acima do saldo entra uma vez no ciclo, com o que o anúncio trazia
+    let (rows, with_seed): (i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*), count(seed) FROM evaluations WHERE reason = 'acima_do_saldo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows, expected);
+    assert!(with_seed > 0);
 }
 
 #[tokio::test]
@@ -618,6 +643,15 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             s.cycle.record(false, Some(near(n, m)));
         }
         s.cycle.record(false, None);
+        s.cycle.refuse("sem_lucro");
+        s.cycle.refuse("poucas_vendas");
+        s.cycle.refuse("sem_lucro");
+        s.cycle.over_saldo.insert("x".into());
+        s.cycle.over_saldo.insert("x".into());
+        assert_eq!(
+            s.cycle.refused_text(),
+            "poucas_vendas=1 sem_lucro=2 acima_do_saldo=1"
+        );
         let names: Vec<_> = s.cycle.near.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, ["B", "C", "A"]); // o B repetido entra uma vez só
     }
