@@ -81,3 +81,18 @@ export type WatchRow = {
   bid_profit_cents: number | null; // lucro no preço médio se o pedido encher
   book_at: number | null;
 };
+// GET /api/learning: placar do aprendizado, um dia de Brasília por linha (do mais recente).
+export type LearningDay = {
+  day: string;
+  queries: number;
+  books: number;
+  new_listings: number;
+  aged: number;
+  age_median_min: number | null;
+  sales: number;
+  relists: number;
+  life_median_min: number | null;
+  near: number;
+  finds: number;
+};
+export type Learning = { days: LearningDay[]; since: number | null };

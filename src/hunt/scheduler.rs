@@ -688,14 +688,12 @@ async fn book_then_listings(
             match book::fetch_book(&h.steam, &task.name).await {
                 Ok(b) => {
                     let now = h.now();
-                    let lowest = b.min_sell_cents;
-                    let mut s = h.lock();
-                    // o livro lido também serve aos pedidos sugeridos (`orders`) e ao teto (concorrente)
-                    let before = s
-                        .books
-                        .insert(task.name.clone(), (now, Some(b)))
-                        .and_then(|(_, b)| b)
+                    let (lowest, second) = (b.min_sell_cents, b.second_ask());
+                    // o livro lido também serve aos pedidos sugeridos (`orders`), ao teto (concorrente) e ao registro
+                    let before = super::orders::remember_book(h, &task.name, now, Some(b))
+                        .await
                         .and_then(|b| b.min_sell_cents);
+                    let mut s = h.lock();
                     match lowest {
                         None => {
                             s.cycle.saved_listings += 1;
@@ -723,7 +721,7 @@ async fn book_then_listings(
                             );
                             return Ok(());
                         }
-                        Some(p) => lead = Some((p, max)),
+                        Some(p) => lead = Some((p, max, second)),
                     }
                 }
                 Err(e) => tracing::warn!("livro de {} falhou; lê os anúncios: {e}", task.name),
@@ -731,10 +729,11 @@ async fn book_then_listings(
         }
     }
     if h.steam.blocked(Endpoint::Listings) && h.steam.blocked(Endpoint::Legacy) {
-        if let Some((p, max)) = lead {
+        if let Some((p, max, second)) = lead {
             tracing::info!(
                 preco = p,
                 teto = max,
+                segundo = ?second,
                 "livro: {} tem anúncio que cabe no teto, mas a leitura de anúncios está barrada pela Steam",
                 task.name
             );
@@ -769,7 +768,7 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             }
         }
     }
-    let (page, named_only) = if task.rare() {
+    let (mut page, mut named_only) = if task.rare() {
         (
             listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &task.filters())
                 .await?,
@@ -778,25 +777,42 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
     } else {
         listings::query_listings_named(&h.steam, &task.name, &task.code, 0, task.wear).await?
     };
-    for t in targets
-        .iter()
-        .filter(|t| !named_only || t.name == task.name)
-    {
-        let out = detect::process(h, t, &page).await?;
-        h.lock().queue.reward(&t.id, h.now(), out.rewarded);
-    }
-    if named_only {
-        let mut seen = HashSet::from([task.name.as_str()]);
-        for t in &targets {
-            if seen.insert(t.name.as_str()) {
-                let (page, _) =
-                    listings::query_listings_named(&h.steam, &t.name, &t.code, 0, t.wear).await?;
-                for target in targets.iter().filter(|other| other.name == t.name) {
-                    let out = detect::process(h, target, &page).await?;
-                    h.lock().queue.reward(&target.id, h.now(), out.rewarded);
-                }
-            }
+    let mut queried = task;
+    let mut seen = HashSet::new();
+    loop {
+        let now = h.now();
+        let mut key = super::ledger::query_key(queried);
+        if named_only {
+            // A página por nome não prova sumiço nem idade na consulta nativa que cobre todas as versões.
+            key.push_str(&format!("|legacy:{}", queried.name));
         }
+        super::ledger::count_hour(h, now, "queries", 1).await;
+        match super::ledger::record(h, &key, &page, now).await {
+            Ok(r) if r != super::ledger::Recorded::default() => tracing::debug!(?r, "registro"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("registro de observações falhou: {e:#}"),
+        }
+        let mut near = 0;
+        for t in targets
+            .iter()
+            .filter(|t| !named_only || t.name == queried.name)
+        {
+            let out = detect::process(h, t, &page).await?;
+            near += out.rewarded.near_hits;
+            h.lock().queue.reward(&t.id, h.now(), out.rewarded);
+        }
+        super::ledger::count_hour(h, now, "near", near).await;
+        if !named_only {
+            break;
+        }
+        seen.insert(queried.name.as_str());
+        let Some(next) = targets.iter().find(|t| !seen.contains(t.name.as_str())) else {
+            break;
+        };
+        queried = next;
+        (page, named_only) =
+            listings::query_listings_named(&h.steam, &queried.name, &queried.code, 0, queried.wear)
+                .await?;
     }
     Ok(())
 }

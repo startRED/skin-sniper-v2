@@ -68,7 +68,10 @@ async fn manual_sales_and_calibration_use_saved_predictions() {
         .call(move |c| {
             c.execute("INSERT INTO purchases VALUES ('42', ?1, 1)", [&p])?;
             let hour = crate::db::now_unix().div_euclid(3600);
-            c.execute("INSERT INTO hourly_activity VALUES (?1, 3, 1)", [hour])?;
+            c.execute(
+                "INSERT INTO hourly_activity(hour_utc, listings, opportunities) VALUES (?1, 3, 1)",
+                [hour],
+            )?;
             Ok(())
         })
         .await

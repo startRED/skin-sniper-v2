@@ -25,8 +25,9 @@ const CYCLE_SECS: i64 = 600;
 const NEAR_KEEP: usize = 3;
 /// shortcut: o mapa de avaliados só esvazia quando enche; subir se a reavaliação em massa pesar.
 const EVALUATED_MAX: usize = 50_000;
-/// Avaliações guardadas em `evaluations` para auditoria; as mais velhas saem.
-pub(crate) const EVALUATIONS_KEEP: i64 = 10_000;
+/// Teto de avaliações guardadas em `evaluations` (a retenção normal é de 60 dias, `db::LEARN_KEEP_DAYS`);
+/// ~0,5 kB cada, então o teto segura o banco perto de 150 MB se a caça avaliar muito mais que o medido.
+pub(crate) const EVALUATIONS_KEEP: i64 = 300_000;
 
 /// Anúncio que chegou perto de virar oportunidade (lucro pode ser negativo).
 #[derive(Debug, Clone, PartialEq)]

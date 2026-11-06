@@ -7,6 +7,7 @@
 pub mod catalog;
 pub mod detect;
 mod learn;
+pub mod ledger;
 pub mod orders;
 pub mod patterns;
 pub mod scheduler;
@@ -85,6 +86,8 @@ pub(crate) struct Shared {
     pub learn_seen: HashMap<String, i64>,
     /// Escala τ da proximidade (fração do preço): medida nas avaliações (`learn`), padrão enquanto faltam dados.
     pub closeness_scale: f64,
+    /// Registro (`ledger`): por chave de consulta, quando foi a última e até que preço ela cobria (`None` = tudo).
+    pub ledger_prev: HashMap<String, (i64, Option<i64>)>,
 }
 
 /// Livro de ofertas "respondendo" = resposta boa há menos de 3 min (uma leitura a cada 6 s quando os anúncios estão barrados).
@@ -160,6 +163,7 @@ impl Hunt {
                 learn_at: 0,
                 learn_seen: HashMap::new(),
                 closeness_scale: learn::DEFAULT_SCALE,
+                ledger_prev: HashMap::new(),
             }),
         })
     }

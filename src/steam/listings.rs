@@ -280,6 +280,9 @@ pub struct Accessory {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Listing {
     pub listing_id: String,
+    /// `asset.assetid`: o item em si. Volta igual quando o vendedor tira e põe de novo à venda (relistagem).
+    #[serde(default)]
+    pub asset_id: String,
     /// `market_hash_name`.
     pub name: String,
     /// O que o comprador paga = `unPrice + unFee`, em centavos.
@@ -391,13 +394,16 @@ fn parse_listing(r: &Value) -> Result<Listing> {
     let asset = r
         .get("asset")
         .ok_or_else(|| bad(format!("{listing_id}: sem asset")))?;
-    let has_assetid = asset
+    let asset_id = asset
         .get("assetid")
         .or_else(|| asset.get("id"))
-        .is_some_and(|v| !v.is_null());
-    if !has_assetid {
-        return Err(bad(format!("{listing_id}: sem assetid")));
-    }
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad(format!("{listing_id}: sem assetid")))?;
     let seller = r.get("unPrice").and_then(Value::as_i64).unwrap_or(0);
     // Taxa ausente, nula ou não inteira invalida o anúncio: assumir 0 inventaria um total menor.
     let fee = r
@@ -464,6 +470,7 @@ fn parse_listing(r: &Value) -> Result<Listing> {
 
     Ok(Listing {
         listing_id: listing_id.to_string(),
+        asset_id,
         name,
         price_cents: seller + fee,
         seller_cents: seller,
@@ -644,6 +651,17 @@ mod tests {
                     && !u.contains("propid")
             );
         }
+    }
+
+    #[test]
+    fn asset_id_comes_from_the_asset() {
+        let p = parse_page(&fixture("steam_listings_moonrise_sorted_price.json"), 0).unwrap();
+        assert_eq!(p.listings[0].asset_id, "54226282359");
+        // anúncio guardado antes do campo existir (opportunities.listing_json) continua legível
+        let mut old = serde_json::to_value(&p.listings[0]).unwrap();
+        old.as_object_mut().unwrap().remove("asset_id");
+        let back: Listing = serde_json::from_value(old).unwrap();
+        assert_eq!(back.asset_id, "");
     }
 
     #[test]
