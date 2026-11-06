@@ -370,12 +370,21 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         .unwrap_or_else(|| panic!("piso R$ 10,00 visto na faixa 58-59: {watch:#?}"));
     assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(1404)));
     assert_eq!(raro.last_checked_at, Some(NOW));
-    // mais perto de compensar primeiro
+    // mais perto de compensar primeiro; raro fica fora da conta (piso de qualquer padrão × teto do grupo)
+    // e vai para o fim, mesmo com piso abaixo do teto como este Moonrise
     let gaps: Vec<i64> = watch
         .iter()
+        .filter(|r| r.kind != Kind::Raro)
         .filter_map(|r| r.floor_cents.zip(r.max_buy_cents).map(|(f, m)| f - m))
         .collect();
     assert!(gaps.windows(2).all(|w| w[0] <= w[1]), "{gaps:?}");
+    let first_raro = watch.iter().position(|r| r.kind == Kind::Raro).unwrap();
+    assert!(
+        watch[first_raro..]
+            .iter()
+            .all(|r| r.kind == Kind::Raro || r.floor_cents.zip(r.max_buy_cents).is_none()),
+        "{watch:#?}"
+    );
 
     // anúncio já visto não vira evento de novo, por mais voltas que a caça dê
     for _ in 0..60 {
