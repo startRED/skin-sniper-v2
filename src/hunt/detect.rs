@@ -25,6 +25,8 @@ const CYCLE_SECS: i64 = 600;
 const NEAR_KEEP: usize = 3;
 /// shortcut: o mapa de avaliados só esvazia quando enche; subir se a reavaliação em massa pesar.
 const EVALUATED_MAX: usize = 50_000;
+/// Avaliações guardadas em `evaluations` para auditoria; as mais velhas saem.
+pub(crate) const EVALUATIONS_KEEP: i64 = 10_000;
 
 /// Anúncio que chegou perto de virar oportunidade (lucro pode ser negativo).
 #[derive(Debug, Clone, PartialEq)]
@@ -332,6 +334,79 @@ struct Judged {
     near: Option<Near>,
     /// Motivo da recusa quando não virou oportunidade.
     refused: Option<&'static str>,
+    /// O porquê em texto: a evidência da estimativa ou o erro dela.
+    detail: Option<String>,
+}
+
+/// Uma linha de `evaluations`: o anúncio como veio e o que o radar decidiu.
+struct EvalRow {
+    listing_id: String,
+    name: String,
+    price_cents: i64,
+    float: Option<f64>,
+    seed: Option<i64>,
+    paint_index: Option<i64>,
+    group: Option<String>,
+    stickers: String,
+    keychains: String,
+    inspect_url: Option<String>,
+    steam_url: String,
+    others_min: Option<i64>,
+    mid_profit: Option<i64>,
+    quick_profit: Option<i64>,
+    reason: &'static str,
+    detail: Option<String>,
+}
+
+impl EvalRow {
+    fn new(task: &Task, l: &Listing, others_min: Option<i64>, reason: &'static str) -> EvalRow {
+        EvalRow {
+            listing_id: l.listing_id.clone(),
+            name: l.name.clone(),
+            price_cents: l.price_cents,
+            float: l.float,
+            seed: l.seed.map(i64::from),
+            paint_index: l.paint_index.map(i64::from),
+            group: group_of(&l.name, l.seed.map(u32::from), l.paint_index).map(|g| g.label),
+            stickers: serde_json::to_string(&l.stickers).unwrap_or_default(),
+            keychains: serde_json::to_string(&l.keychains).unwrap_or_default(),
+            inspect_url: l.inspect_url.clone(),
+            steam_url: steam_url(&task.code, l),
+            others_min,
+            mid_profit: None,
+            quick_profit: None,
+            reason,
+            detail: None,
+        }
+    }
+}
+
+async fn store_evaluations(h: &Hunt, rows: Vec<EvalRow>, now: i64) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    h.db.call(move |c| {
+        let tx = c.transaction()?;
+        for r in rows {
+            tx.execute(
+                "INSERT INTO evaluations(at, listing_id, name, price_cents, \"float\", seed, paint_index,
+                    rare_group, stickers_json, keychains_json, inspect_url, steam_url, others_min_cents,
+                    mid_profit_cents, quick_profit_cents, reason, detail)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    now, r.listing_id, r.name, r.price_cents, r.float, r.seed, r.paint_index, r.group,
+                    r.stickers, r.keychains, r.inspect_url, r.steam_url, r.others_min, r.mid_profit,
+                    r.quick_profit, r.reason, r.detail
+                ],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM evaluations WHERE id <= (SELECT MAX(id) FROM evaluations) - ?1",
+            [EVALUATIONS_KEEP],
+        )?;
+        tx.commit()
+    })
+    .await
 }
 
 fn no_estimate_reason(e: &sell::NoEstimate) -> &'static str {
@@ -369,6 +444,7 @@ async fn evaluate_one(
                 found: None,
                 near: None,
                 refused: Some(no_estimate_reason(&e)),
+                detail: Some(format!("{e:?}")),
             });
         }
     };
@@ -390,6 +466,7 @@ async fn evaluate_one(
             found: None,
             near,
             refused: Some("sem_lucro"),
+            detail: Some(est.evidence),
         });
     }
     let opp = Opportunity {
@@ -424,10 +501,12 @@ async fn evaluate_one(
         seen_at: now,
         gone_at: None,
     };
+    let detail = Some(opp.evidence.clone());
     Ok(Judged {
         found: Some((opp, ev.notify)),
         near,
         refused: None,
+        detail,
     })
 }
 
@@ -552,11 +631,15 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         .copied()
         .filter(|l| known.contains(&l.listing_id))
         .collect();
+    let mut audit: Vec<EvalRow> = Vec::new();
     for l in relevant.iter().copied() {
         let was_known = known.contains(&l.listing_id);
         let active = h.lock().active.get(&l.listing_id).map(|a| a.opp.clone());
         if l.price_cents > saldo && active.is_none() {
-            h.lock().cycle.over_saldo.insert(l.listing_id.clone());
+            // Guarda uma vez por ciclo: o mesmo anúncio volta em toda consulta da tarefa.
+            if h.lock().cycle.over_saldo.insert(l.listing_id.clone()) {
+                audit.push(EvalRow::new(task, l, None, "acima_do_saldo"));
+            }
             continue; // não cabe agora; se o saldo subir, ainda é novo
         }
         // Concorrência = outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns): um comum
@@ -588,6 +671,11 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                 continue;
             }
         };
+        let mut row = EvalRow::new(task, l, others_min, judged.refused.unwrap_or("aprovada"));
+        row.mid_profit = judged.near.as_ref().map(|n| n.mid_cents);
+        row.quick_profit = judged.near.as_ref().map(|n| n.quick_cents);
+        row.detail = judged.detail.clone();
+        audit.push(row);
         let hist_now = history_at(h, &l.name).await?.unwrap_or(0);
         {
             if let Some(c) = judged
@@ -636,6 +724,9 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         }
     }
     store_seen(h, &seen, now).await?;
+    if let Err(error) = store_evaluations(h, audit, now).await {
+        tracing::warn!(%error, "falha ao guardar avaliações para auditoria");
+    }
 
     for (opp, _) in out.found.iter().filter(|(_, notify)| *notify) {
         send_alert(h, opp, view.panel_url.clone());

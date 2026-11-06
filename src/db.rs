@@ -60,6 +60,18 @@ const MIGRATIONS: &[&str] = &[
         first_at INTEGER NOT NULL, reward_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
     "#,
+    // Auditoria: cada avaliação (aprovada ou recusada, com o motivo) e o anúncio como veio; só as últimas
+    // `detect::EVALUATIONS_KEEP`.
+    r#"
+    CREATE TABLE evaluations (
+        id INTEGER PRIMARY KEY, at INTEGER NOT NULL, listing_id TEXT NOT NULL, name TEXT NOT NULL,
+        price_cents INTEGER NOT NULL, "float" REAL, seed INTEGER, paint_index INTEGER, rare_group TEXT,
+        stickers_json TEXT, keychains_json TEXT, inspect_url TEXT, steam_url TEXT NOT NULL,
+        others_min_cents INTEGER, mid_profit_cents INTEGER, quick_profit_cents INTEGER,
+        reason TEXT NOT NULL, detail TEXT
+    );
+    CREATE INDEX evaluations_reason ON evaluations(reason, at);
+    "#,
 ];
 
 pub fn now_unix() -> i64 {
