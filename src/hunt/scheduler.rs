@@ -445,6 +445,8 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             }
         }
     }
+    // patterns: só o CSFloat, não gasta a vez da Steam
+    super::patterns::maybe_step(h).await;
     if super::orders::maybe_step(h).await {
         return Tick::Book;
     }

@@ -1038,3 +1038,72 @@ async fn orders_read_one_book_per_gap_oldest_common_first() {
     h.lock().book_at = NOW - 61;
     assert!(!orders::maybe_step(&h).await); // tudo novo; o raro nunca entra
 }
+
+#[tokio::test]
+async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
+    const ID_LEARNED: &str = "341565526995940199"; // seed 269: fora das tabelas do Moonrise
+    let (base, bodies) = serve().await;
+    {
+        let mut b = bodies.listings.lock().unwrap();
+        let l = &mut b["data"]["listings"][14];
+        l["unPrice"] = json!(1044);
+        l["unFee"] = json!(156);
+    }
+    let (db, _dir) = temp_db();
+    // três vendas guardadas pelo coletor (dois desgastes): sobrevivem a reinício pelo banco
+    db.call(|c| {
+        for (name, ratio, at) in [
+            (MOON, 2.0, 1),
+            (MOON, 2.4, 2),
+            ("Glock-18 | Moonrise (Minimal Wear)", 2.2, 3),
+        ] {
+            c.execute(
+                "INSERT INTO learned_sales(name, seed, ratio, sold_at) VALUES (?1, 269, ?2, ?3)",
+                rusqlite::params![name, ratio, at],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.load().await.unwrap();
+    assert_eq!(
+        patterns::active(&h.lock().learned, "Glock-18 | Moonrise"),
+        vec![269]
+    );
+    h.set_saldo(3608, SaldoSource::Manual);
+    let mut hit = None;
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Opportunity(o) = ev
+                && o.id == ID_LEARNED
+            {
+                hit = Some(o);
+            }
+        }
+        if hit.is_some() {
+            break;
+        }
+    }
+    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; o pattern aprendido vendeu a 2,0–2,4×
+    let o = hit.expect("pattern aprendido vira oportunidade");
+    assert_eq!(
+        (o.kind, o.group.as_deref()),
+        (Kind::Raro, Some("Pattern #269"))
+    );
+    assert!(
+        o.evidence.contains("grupo raro: 3 vendas"),
+        "{}",
+        o.evidence
+    );
+    assert!(o.sell.mid.profit_cents >= 100, "{:?}", o.sell);
+    // e o seed entra na busca rara do Moonrise
+    let tasks = h.lock().queue.tasks();
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.seeds.iter().any(|&(lo, hi)| (lo..=hi).contains(&269)))
+    );
+}

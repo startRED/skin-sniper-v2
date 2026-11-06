@@ -13,11 +13,12 @@
 //! shortcut: a varredura cobre `SCAN_ROUNDS` páginas do topo e `TAIL_ROUNDS` amostras da cauda por categoria,
 //! não o catálogo inteiro (cada página custa uma consulta e há milhares); subir se faltarem candidatos para o saldo.
 
+use super::patterns::{self, Learned};
 use super::scheduler::Task;
 use super::{Hunt, detect};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
-use crate::pricing::groups::{float_band, seed_ranges, table_skins};
+use crate::pricing::groups::{float_band, ranges, seed_ranges, skin_base, table_skins};
 use crate::pricing::sell::{
     MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
 };
@@ -213,6 +214,12 @@ pub fn score(sales_per_day: f64, possible_profit_cents: i64) -> f64 {
     sales_per_day.min(SCORE_SALES_CAP) * (possible_profit_cents.max(0) + 1) as f64 / 100.0
 }
 
+/// Faixas de seed da busca rara: tier 1 / topo das tabelas mais os patterns aprendidos com prova.
+fn rare_ranges(name: &str, learned: &Learned) -> Vec<(u16, u16)> {
+    let table = seed_ranges(name).into_iter().flat_map(|(lo, hi)| lo..=hi);
+    ranges(table.chain(patterns::active(learned, skin_base(name))))
+}
+
 /// Mudou mais de 20 % (ou não havia saldo antes).
 pub fn saldo_moved(old: i64, new: i64) -> bool {
     old <= 0 || (new - old).abs() * 100 > old * 20
@@ -226,6 +233,8 @@ pub struct Ctx<'a> {
     pub hits: &'a HashMap<String, u32>,
     /// `Shared::floors`: pisos vistos nas consultas.
     pub floors: &'a HashMap<String, (Option<i64>, i64)>,
+    /// Patterns aprendidos: seeds com prova entram na busca rara da skin junto com os da tabela.
+    pub learned: &'a Learned,
 }
 
 /// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 1 venda/dia e lucro possível ≥ mínimo, por nota
@@ -281,7 +290,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
             && wear_of(&i.name).is_some()
             && f <= c.saldo
             && seen_names.insert(i.name.as_str())
-            && !seed_ranges(&i.name).is_empty()
+            && !rare_ranges(&i.name, c.learned).is_empty()
         {
             let spd = i.sales_per_day.unwrap_or(MIN_SALES_PER_DAY);
             let e = by_code
@@ -298,7 +307,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         .into_iter()
         .filter_map(|(code, (f, name, _, spd))| {
             let id = format!("r:{code}");
-            let seeds = seed_ranges(name);
+            let seeds = rare_ranges(name, c.learned);
             let seen = observed(c.floors, &id, c.now);
             // todas as faixas conferidas, todas com anúncio e o menor não cabe: nada a caçar aqui agora
             let out = seen.fresh >= seeds.len()
@@ -802,9 +811,9 @@ pub async fn maybe_reselect(h: &Hunt) -> Result<()> {
 
 pub async fn reselect_now(h: &Hunt) -> Result<()> {
     let now = h.now();
-    let (saldo, ratio, floors) = {
+    let (saldo, ratio, floors, learned) = {
         let s = h.lock();
-        (s.saldo, s.ratio, s.floors.clone())
+        (s.saldo, s.ratio, s.floors.clone(), s.learned.clone())
     };
     let Some((ratio, _)) = ratio else {
         return Ok(());
@@ -817,6 +826,7 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         now,
         hits: &hits,
         floors: &floors,
+        learned: &learned,
     };
     let tasks = select(&items, &ctx);
     let (n, removed) = {
@@ -994,7 +1004,57 @@ mod tests {
             now: 1_793_770_000,
             hits,
             floors,
+            learned: &NO_LEARNED,
         }
+    }
+
+    static NO_LEARNED: std::sync::LazyLock<Learned> = std::sync::LazyLock::new(Learned::new);
+
+    #[test]
+    fn learned_seeds_join_the_table_ranges_and_bring_new_skins() {
+        let (items, saldo) = catalog_fixture();
+        let hit = NO_HITS();
+        let floors = HashMap::new();
+        let mut learned = Learned::new();
+        // Moonrise: seed 500 com prova soma às faixas da tabela; seed com 2 vendas ainda não
+        learned
+            .entry("Glock-18 | Moonrise".into())
+            .or_default()
+            .extend([(500, vec![3.0, 4.0, 5.0]), (501, vec![3.0, 4.0])]);
+        // skin comum sem tabela ganha busca rara pelo seed aprendido
+        let plain = items
+            .iter()
+            .find(|i| i.name == "AWP | Duality (Field-Tested)")
+            .unwrap();
+        learned
+            .entry("AWP | Duality".into())
+            .or_default()
+            .insert(77, vec![2.5, 3.0, 2.2]);
+        let c = Ctx {
+            learned: &learned,
+            ..ctx(saldo, &hit, &floors)
+        };
+        let tasks = select(&items, &c);
+        let moon = tasks
+            .iter()
+            .find(|t| !t.seeds.is_empty() && t.name.starts_with("Glock-18 | Moonrise ("))
+            .unwrap();
+        let has = |t: &Task, s: u16| t.seeds.iter().any(|&(lo, hi)| (lo..=hi).contains(&s));
+        assert!(
+            has(moon, 500) && has(moon, 59) && !has(moon, 501),
+            "{:?}",
+            moon.seeds
+        );
+        let awp = tasks
+            .iter()
+            .find(|t| !t.seeds.is_empty() && t.code == plain.code.clone().unwrap())
+            .expect("AWP Duality com seed aprendido vira busca rara");
+        assert_eq!(awp.seeds, vec![(77, 77)]);
+        assert!(
+            select(&items, &ctx(saldo, &hit, &floors))
+                .iter()
+                .all(|t| t.seeds.is_empty() || t.code != plain.code.clone().unwrap())
+        );
     }
 
     /// Catálogo do dia 04/11/2026 (ver `_source` no arquivo) e o saldo que o Erick tinha.

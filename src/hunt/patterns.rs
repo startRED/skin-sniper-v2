@@ -1,0 +1,240 @@
+//! Patterns aprendidos: as tabelas embutidas só têm 4 skins de pattern (mais blue gem e fade), e nas vendas do
+//! CSFloat de 06/11 apareceram seeds caros fora delas (MP7 Amberline 890 duas vezes a 5–10×, M4A4 Etch Lord 158 a
+//! 18×). Um coletor lê as vendas de uma skin do catálogo a cada `GAP` e guarda as vendas sem adesivo, fora das
+//! tabelas e do float de elite, que saíram a `MIN_RATIO` × a mediana da skin ou mais. Um seed vira alvo e grupo
+//! raro quando junta `RARE_MIN_SALES` vendas assim (somando os desgastes): a mesma prova que o T1 exige. As razões
+//! guardadas são o prêmio do grupo. Os limites (2×, 60 dias) são hipóteses, não calibração.
+
+use super::Hunt;
+use crate::csfloat::CsfloatSale;
+use crate::pricing::groups::{Group, group_of, skin_base};
+use crate::pricing::sell::{MAX_RARE_MULTIPLE, RARE_MIN_SALES};
+use anyhow::Result;
+use rusqlite::params;
+use std::collections::{BTreeMap, HashMap};
+
+/// shortcut: uma skin a cada 2 min (~720 por dia, dentro da cota do CSFloat); subir se a cota sobrar.
+const GAP: i64 = 120;
+/// A mesma skin só é relida depois disso.
+const REFETCH: i64 = 24 * 3600;
+/// Venda a esta razão da mediana da skin ou mais conta como prêmio de pattern.
+pub const MIN_RATIO: f64 = 2.0;
+/// Menos vendas limpas que isso não dão uma mediana confiável.
+const MIN_CLEAN_SALES: usize = 10;
+/// Skins com menos vendas por dia quase não têm anúncio novo para caçar.
+const MIN_SALES_PER_DAY: f64 = 5.0;
+
+/// Skin-base → seed → razões (preço ÷ mediana da skin) das vendas que ensinaram.
+pub type Learned = HashMap<String, BTreeMap<u16, Vec<f64>>>;
+
+/// Vendas da skin que pagaram prêmio de pattern ainda desconhecido: `(seed, razão, sold_at)`.
+pub fn premium_sales(name: &str, sales: &[CsfloatSale]) -> Vec<(u16, f64, i64)> {
+    let clean: Vec<&CsfloatSale> = sales
+        .iter()
+        .filter(|s| !s.has_stickers && s.multiple.is_finite() && s.multiple > 0.0)
+        .collect();
+    if clean.len() < MIN_CLEAN_SALES {
+        return vec![];
+    }
+    let mut m: Vec<f64> = clean.iter().map(|s| s.multiple).collect();
+    m.sort_by(f64::total_cmp);
+    let median = m[m.len() / 2];
+    clean
+        .iter()
+        .filter_map(|s| {
+            let seed = s.seed?;
+            // tabela e float de elite já têm grupo próprio
+            if group_of(name, Some(seed.into()), s.paint_index, s.float).is_some() {
+                return None;
+            }
+            let r = s.multiple / median;
+            (MIN_RATIO..=MAX_RARE_MULTIPLE)
+                .contains(&r)
+                .then_some((seed, r, s.sold_at))
+        })
+        .collect()
+}
+
+/// Seeds aprendidos com prova suficiente para a skin.
+pub fn active(l: &Learned, base: &str) -> Vec<u16> {
+    l.get(base).map_or(vec![], |m| {
+        m.iter()
+            .filter(|(_, v)| v.len() >= RARE_MIN_SALES)
+            .map(|(s, _)| *s)
+            .collect()
+    })
+}
+
+/// Grupo aprendido do anúncio e o prêmio dele (as razões guardadas).
+pub fn group(l: &Learned, name: &str, seed: Option<u16>) -> Option<(Group, Vec<f64>)> {
+    let base = skin_base(name);
+    let seed = seed?;
+    let v = l.get(base)?.get(&seed)?;
+    (v.len() >= RARE_MIN_SALES).then(|| {
+        (
+            Group {
+                key: format!("learned:{base}:{seed}"),
+                label: format!("Pattern #{seed}"),
+            },
+            v.clone(),
+        )
+    })
+}
+
+pub async fn load(h: &Hunt) -> Result<()> {
+    let rows: Vec<(String, u16, f64)> =
+        h.db.call(|c| {
+            c.prepare("SELECT name, seed, ratio FROM learned_sales")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .await?;
+    let mut l = Learned::new();
+    for (name, seed, ratio) in rows {
+        l.entry(skin_base(&name).to_string())
+            .or_default()
+            .entry(seed)
+            .or_default()
+            .push(ratio);
+    }
+    h.lock().learned = l;
+    Ok(())
+}
+
+/// Lê as vendas da próxima skin do catálogo, se é hora. Não gasta consulta da Steam: só o CSFloat.
+pub async fn maybe_step(h: &Hunt) {
+    let now = h.now();
+    let (saldo, seen) = {
+        let mut s = h.lock();
+        // a primeira leitura só depois de `GAP` ligado: a caça começa antes
+        if s.learn_at == 0 {
+            s.learn_at = now;
+        }
+        if now - s.learn_at < GAP {
+            return;
+        }
+        s.learn_at = now;
+        (s.saldo, s.learn_seen.clone())
+    };
+    let names: Vec<String> = match h
+        .db
+        .call(move |c| {
+            c.prepare(
+                "SELECT name FROM items WHERE floor_cents <= ?1 AND sales_per_day >= ?2 AND name LIKE '%|%(%)'
+                 AND name NOT LIKE '★%' ORDER BY sales_per_day DESC",
+            )?
+            .query_map(params![saldo, MIN_SALES_PER_DAY], |r| r.get(0))?
+            .collect()
+        })
+        .await
+    {
+        Ok(n) => n,
+        Err(e) => return tracing::warn!("patterns: catálogo ilegível: {e}"),
+    };
+    let Some(name) = names
+        .into_iter()
+        .find(|n| seen.get(n).is_none_or(|at| now - at >= REFETCH))
+    else {
+        return;
+    };
+    h.lock().learn_seen.insert(name.clone(), now);
+    let sales = match h.csfloat.sales(&name).await {
+        Ok(s) => s,
+        Err(e) => return tracing::warn!("patterns: CSFloat falhou para {name}: {e}"),
+    };
+    let found = premium_sales(&name, &sales);
+    h.lock().csfloat_cache.insert(name.clone(), (now, sales));
+    if found.is_empty() {
+        return;
+    }
+    let before = active(&h.lock().learned, skin_base(&name)).len();
+    let n = name.clone();
+    if let Err(e) = h
+        .db
+        .call(move |c| {
+            let tx = c.transaction()?;
+            for (seed, ratio, at) in found {
+                tx.execute(
+                    "INSERT OR IGNORE INTO learned_sales(name, seed, ratio, sold_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![n, seed, ratio, at],
+                )?;
+            }
+            tx.commit()
+        })
+        .await
+    {
+        return tracing::warn!("patterns: gravar falhou: {e}");
+    }
+    if let Err(e) = load(h).await {
+        return tracing::warn!("patterns: reler falhou: {e}");
+    }
+    let now_active = active(&h.lock().learned, skin_base(&name));
+    if now_active.len() > before {
+        tracing::info!(skin = skin_base(&name), seeds = ?now_active, "pattern aprendido");
+        // a seleção põe o seed novo na agenda na próxima volta
+        h.lock().selected = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sale(seed: u16, multiple: f64, stickers: bool) -> CsfloatSale {
+        CsfloatSale {
+            price_usd_cents: (multiple * 100.0) as i64,
+            base_price_usd_cents: 100,
+            multiple,
+            seed: Some(seed),
+            float: Some(0.3),
+            paint_index: None,
+            sold_at: 1_793_000_000 + i64::from(seed),
+            has_stickers: stickers,
+            sticker_overpay_cents: 0,
+        }
+    }
+
+    #[test]
+    fn premium_sales_pick_unknown_seeds_far_above_the_median() {
+        const MP7: &str = "MP7 | Amberline (Minimal Wear)";
+        let mut v: Vec<CsfloatSale> = (1..=12).map(|i| sale(i, 1.0, false)).collect();
+        v.push(sale(890, 9.75, false));
+        v.push(sale(891, 1.9, false)); // abaixo de 2×
+        v.push(sale(892, 8.0, true)); // adesivo: o prêmio pode ser dele
+        v.push(sale(893, 500.0, false)); // dado ruim
+        let got = premium_sales(MP7, &v);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0, got[0].1), (890, 9.75));
+        // amostra pequena: sem mediana confiável
+        assert!(premium_sales(MP7, &v[..5]).is_empty());
+        // seed de tabela (T1 do Moonrise) já tem grupo: não é aprendido
+        let mut m: Vec<CsfloatSale> = (1..=12).map(|i| sale(i, 1.0, false)).collect();
+        m.push(sale(59, 5.0, false));
+        assert!(premium_sales("Glock-18 | Moonrise (Field-Tested)", &m).is_empty());
+    }
+
+    #[test]
+    fn seed_needs_three_sales_across_wears_to_become_a_group() {
+        let mut l = Learned::new();
+        l.entry("MP7 | Amberline".into())
+            .or_default()
+            .insert(890, vec![9.75, 5.48]);
+        let mw = "MP7 | Amberline (Minimal Wear)";
+        assert!(active(&l, "MP7 | Amberline").is_empty());
+        assert_eq!(group(&l, mw, Some(890)), None);
+        l.get_mut("MP7 | Amberline")
+            .unwrap()
+            .get_mut(&890)
+            .unwrap()
+            .push(3.0);
+        assert_eq!(active(&l, "MP7 | Amberline"), vec![890]);
+        // vale para o StatTrak e outro desgaste da mesma skin
+        let (g, prem) = group(&l, "StatTrak™ MP7 | Amberline (Field-Tested)", Some(890)).unwrap();
+        assert_eq!(
+            (g.key.as_str(), g.label.as_str(), prem.len()),
+            ("learned:MP7 | Amberline:890", "Pattern #890", 3)
+        );
+        assert_eq!(group(&l, mw, Some(1)), None);
+        assert_eq!(group(&l, mw, None), None);
+    }
+}

@@ -247,6 +247,12 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
                 .map(|i| i as u16),
         );
     }
+    ranges(seeds)
+}
+
+/// Seeds em faixas `(de, até)` inclusivas, juntando as consecutivas, ordenadas.
+pub fn ranges(seeds: impl IntoIterator<Item = u16>) -> Vec<(u16, u16)> {
+    let seeds: BTreeSet<u16> = seeds.into_iter().collect();
     let mut out: Vec<(u16, u16)> = Vec::new();
     for s in seeds {
         match out.last_mut() {
@@ -255,6 +261,11 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
         }
     }
     out
+}
+
+/// "StatTrak™ Glock-18 | Moonrise (Field-Tested)" → "Glock-18 | Moonrise".
+pub fn skin_base(market_hash_name: &str) -> &str {
+    split_name(market_hash_name).0
 }
 
 /// Skins (sem desgaste) de todas as tabelas que o mercado de armas pode ter: cspatterns, blue gem e fade.

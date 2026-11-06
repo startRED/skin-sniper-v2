@@ -60,6 +60,13 @@ const MIGRATIONS: &[&str] = &[
         first_at INTEGER NOT NULL, reward_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
     "#,
+    // Patterns aprendidos: venda do CSFloat de um seed fora das tabelas que saiu bem acima da mediana da skin.
+    r#"
+    CREATE TABLE learned_sales (
+        name TEXT NOT NULL, seed INTEGER NOT NULL, ratio REAL NOT NULL, sold_at INTEGER NOT NULL,
+        PRIMARY KEY (name, seed, sold_at)
+    );
+    "#,
 ];
 
 pub fn now_unix() -> i64 {
@@ -144,6 +151,10 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
     conn.execute(
         "DELETE FROM activity_seen WHERE last_seen < ?1",
         [now - 3 * DAY],
+    )?;
+    conn.execute(
+        "DELETE FROM learned_sales WHERE sold_at < ?1",
+        [now - 60 * DAY],
     )?;
     conn.execute_batch("PRAGMA incremental_vacuum;")?;
     Ok(r)

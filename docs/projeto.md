@@ -188,6 +188,15 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   CSFloat): os 10 % melhores saíram de 1,3× a 2,8× a mediana em várias skins (XM1014 Zombie Offensive FN 2,8×, USP-S
   Tropical Breeze FN 2,3×, M4A1-S Solitude MW 1,7×); no Moonrise FT as duas vendas da faixa saíram a ~1,0×. Os 10 %
   são recorte de hipótese, não calibração.
+- Pattern aprendido (`src/hunt/patterns.rs`): as tabelas só cobrem 4 skins de pattern, e nas vendas do CSFloat de
+  06/11 apareceram seeds caros fora delas (MP7 Amberline 890 a 5–10×, M4A4 Etch Lord 158 a 18×). Um coletor lê as
+  vendas do CSFloat de uma skin do catálogo a cada 2 min (a de mais vendas/dia com piso ≤ saldo, ≥ 5 vendas/dia, cada
+  skin no máximo 1×/24 h; não gasta consulta da Steam). Com ≥ 10 vendas limpas, guarda em `learned_sales` cada venda
+  sem adesivo, fora de tabela e float de elite, que saiu entre 2× e o teto do múltiplo raro sobre a mediana da skin.
+  Com 3 vendas assim do mesmo seed (somando desgastes e StatTrak, últimos 60 dias) o seed vira grupo
+  `learned:<skin>:<seed>` ("Pattern #seed"), o prêmio são as razões guardadas, e entra nas faixas de seed da busca
+  rara da skin junto com as da tabela. Os limites (2×, 3 vendas, 60 dias) são hipóteses, não calibração; demora
+  dias para juntar prova.
 - Raro: o grupo do anúncio (tier, fase, faixa de fade, float de elite) busca vendas do CSFloat do mesmo grupo
   (`price / reference.base_price`). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
   prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:

@@ -86,6 +86,10 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
                 .or_else(|| {
                     t.float
                         .and_then(|(lo, _)| group_of(&t.name, None, None, Some(lo)))
+                })
+                .or_else(|| {
+                    let seed = t.seeds.first().map(|r| r.0);
+                    super::patterns::group(&h.lock().learned, &t.name, seed).map(|(g, _)| g)
                 });
             let (icon, spd, mut pts) = match f {
                 Some((_, i, s, p)) => (i, s, p),

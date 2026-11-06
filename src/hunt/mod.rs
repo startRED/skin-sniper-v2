@@ -7,6 +7,7 @@
 pub mod catalog;
 pub mod detect;
 pub mod orders;
+pub mod patterns;
 pub mod scheduler;
 pub mod watch;
 
@@ -76,6 +77,11 @@ pub(crate) struct Shared {
     pub books: HashMap<String, (i64, Option<crate::steam::book::Book>)>,
     /// Última leitura de livro (0 = ainda não ligou).
     pub book_at: i64,
+    /// Patterns aprendidos das vendas do CSFloat (`patterns`).
+    pub learned: patterns::Learned,
+    /// Última leitura do coletor de patterns (0 = ainda não ligou) e quando cada skin foi lida.
+    pub learn_at: i64,
+    pub learn_seen: HashMap<String, i64>,
 }
 
 pub struct Hunt {
@@ -144,6 +150,9 @@ impl Hunt {
                 correction: [1.0; 2],
                 books: HashMap::new(),
                 book_at: 0,
+                learned: patterns::Learned::new(),
+                learn_at: 0,
+                learn_seen: HashMap::new(),
             }),
         })
     }
@@ -189,6 +198,7 @@ impl Hunt {
         scheduler::load_stats(self).await?;
         self.refresh_correction().await?;
         scheduler::load_pace(self).await?;
+        patterns::load(self).await?;
         {
             let mut s = self.lock();
             for (json, task) in rows {

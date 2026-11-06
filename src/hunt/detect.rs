@@ -322,12 +322,16 @@ async fn evaluate_one(
 ) -> Result<Judged> {
     let now = h.now();
     let mut points = points_for(h, &l.name, now).await?;
-    let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index, l.float);
+    let learned = super::patterns::group(&h.lock().learned, &l.name, l.seed);
+    let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index, l.float)
+        .or_else(|| learned.as_ref().map(|(g, _)| g.clone()));
     let correction = h.correction(group.is_some());
     sell::discount(&mut points, correction);
-    let rare = match &group {
-        Some(g) => Some(rare_evidence(h, &l.name, &g.key).await),
-        None => None,
+    let rare = match (&group, learned) {
+        // pattern aprendido: o prêmio são as vendas que ensinaram (todos os desgastes), não as desta página
+        (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
+        (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await),
+        (None, _) => None,
     };
     let Ok(mut est) = sell::estimate(&points, now, others_min, rare) else {
         return Ok(Judged {
@@ -401,8 +405,11 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     let mut out = Outcome::default();
     let floor = relevant.iter().map(|l| l.price_cents).min();
     h.lock().floors.insert(task.floor_key(), (floor, now));
+    let learned = h.lock().learned.clone();
     let key = |x: &Listing| {
-        group_of(&x.name, x.seed.map(u32::from), x.paint_index, x.float).map(|g| g.key)
+        group_of(&x.name, x.seed.map(u32::from), x.paint_index, x.float)
+            .or_else(|| super::patterns::group(&learned, &x.name, x.seed).map(|(g, _)| g))
+            .map(|g| g.key)
     };
     // Raro: o menor anúncio de cada (nome, grupo) nas outras faixas, vistas há menos de FLOOR_TTL.
     // shortcut: o concorrente novo de uma faixa só pesa na oportunidade de outra quando a dela é consultada de
