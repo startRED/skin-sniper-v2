@@ -164,9 +164,14 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
             }
         })
         .collect();
-    // mais perto de compensar primeiro (piso − teto menor = mais perto); sem os dois números, por último
+    // mais perto de compensar primeiro (piso − teto menor = mais perto); sem os dois números, por último.
+    // Raro fica sem distância: o piso é o da página (qualquer padrão) e o teto é o do grupo raro.
     rows.sort_by(|a, b| {
-        let gap = |r: &WatchRow| r.floor_cents.zip(r.max_buy_cents).map(|(f, m)| f - m);
+        let gap = |r: &WatchRow| {
+            (r.kind != Kind::Raro)
+                .then(|| r.floor_cents.zip(r.max_buy_cents).map(|(f, m)| f - m))
+                .flatten()
+        };
         gap(a)
             .unwrap_or(i64::MAX)
             .cmp(&gap(b).unwrap_or(i64::MAX))
