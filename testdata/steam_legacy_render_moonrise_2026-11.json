@@ -1,0 +1,383 @@
+{
+  "success": true,
+  "start": 0,
+  "pagesize": 20,
+  "total_count": 2162,
+  "listinginfo": {
+    "5074569024067185966": {
+      "listingid": "5074569024067185966",
+      "price": 331,
+      "fee": 49,
+      "publisher_fee_app": 730,
+      "publisher_fee_percent": "0.100000001490116119",
+      "currencyid": 2006,
+      "steam_fee": 16,
+      "publisher_fee": 33,
+      "converted_price": 461,
+      "converted_fee": 69,
+      "converted_currencyid": 2007,
+      "converted_steam_fee": 23,
+      "converted_publisher_fee": 46,
+      "converted_price_per_unit": 461,
+      "converted_fee_per_unit": 69,
+      "converted_steam_fee_per_unit": 23,
+      "converted_publisher_fee_per_unit": 46,
+      "asset": {
+        "currency": 0,
+        "appid": 730,
+        "contextid": "2",
+        "id": "54241046707",
+        "amount": "1",
+        "market_actions": [
+          {
+            "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+            "name": "Inspect in Game..."
+          }
+        ]
+      }
+    },
+    "2525631498443839123": {
+      "listingid": "2525631498443839123",
+      "price": 609,
+      "fee": 90,
+      "publisher_fee_app": 730,
+      "publisher_fee_percent": "0.100000001490116119",
+      "currencyid": 2023,
+      "steam_fee": 30,
+      "publisher_fee": 60,
+      "converted_price": 494,
+      "converted_fee": 73,
+      "converted_currencyid": 2007,
+      "converted_steam_fee": 24,
+      "converted_publisher_fee": 49,
+      "converted_price_per_unit": 494,
+      "converted_fee_per_unit": 73,
+      "converted_steam_fee_per_unit": 24,
+      "converted_publisher_fee_per_unit": 49,
+      "asset": {
+        "currency": 0,
+        "appid": 730,
+        "contextid": "2",
+        "id": "36401807573",
+        "amount": "1",
+        "market_actions": [
+          {
+            "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+            "name": "Inspect in Game..."
+          }
+        ]
+      }
+    },
+    "1435382979473103830": {
+      "listingid": "1435382979473103830",
+      "price": 610,
+      "fee": 91,
+      "publisher_fee_app": 730,
+      "publisher_fee_percent": "0.100000001490116119",
+      "currencyid": 2023,
+      "steam_fee": 30,
+      "publisher_fee": 61,
+      "converted_price": 495,
+      "converted_fee": 73,
+      "converted_currencyid": 2007,
+      "converted_steam_fee": 24,
+      "converted_publisher_fee": 49,
+      "converted_price_per_unit": 495,
+      "converted_fee_per_unit": 73,
+      "converted_steam_fee_per_unit": 24,
+      "converted_publisher_fee_per_unit": 49,
+      "asset": {
+        "currency": 0,
+        "appid": 730,
+        "contextid": "2",
+        "id": "54368914606",
+        "amount": "1",
+        "market_actions": [
+          {
+            "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+            "name": "Inspect in Game..."
+          }
+        ]
+      }
+    }
+  },
+  "assets": {
+    "730": {
+      "2": {
+        "54241046707": {
+          "currency": 0,
+          "appid": 730,
+          "contextid": "2",
+          "id": "54241046707",
+          "classid": "7993035943",
+          "instanceid": "188530139",
+          "amount": "1",
+          "status": 10,
+          "original_amount": "1",
+          "unowned_id": "54241046707",
+          "unowned_contextid": "16",
+          "background_color": "342c42",
+          "icon_url": "i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL2kpnj9h1a7s2pZKtuK8_CVliF0-x3vt5kQCa9qhsipTiXpYL8JSLSMxgnApJwF-ALsxXpm4W1N7zr4lCK2Y1FzXmoiS5PvCpvsbwFAKBwrKfVkUifZu_LJHFP",
+          "descriptions": [
+            {
+              "type": "html",
+              "value": "Exterior: Field-Tested",
+              "name": "exterior_wear"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            },
+            {
+              "type": "html",
+              "value": "The Glock 18 is a serviceable first-round pistol that works best against unarmored opponents and is capable of firing three-round bursts. A randomized city landscape in the foreground gives way to a full moon and purple night sky.\n\n<i>Look for the North Star</i>",
+              "name": "description"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            },
+            {
+              "type": "html",
+              "value": "The Clutch Collection",
+              "color": "9da1a9",
+              "name": "itemset_name"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            }
+          ],
+          "tradable": 1,
+          "actions": [
+            {
+              "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+              "name": "Inspect in Game..."
+            }
+          ],
+          "name": "Glock-18 | Moonrise",
+          "name_color": "8847ff",
+          "type": "Restricted Pistol",
+          "market_name": "Glock-18 | Moonrise (Field-Tested)",
+          "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+          "market_actions": [
+            {
+              "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+              "name": "Inspect in Game..."
+            }
+          ],
+          "commodity": 0,
+          "market_tradable_restriction": 7,
+          "market_marketable_restriction": 7,
+          "marketable": 1,
+          "sealed": 0,
+          "market_bucket_group_name": "Glock-18 | Moonrise",
+          "market_bucket_group_id": "G180420B6053004",
+          "sealed_type": 0,
+          "market_name_inside_group": "Field-Tested",
+          "market_bucket_id": "180420B605300438A4E1F5F503",
+          "asset_properties": [
+            {
+              "propertyid": 1,
+              "int_value": "773"
+            },
+            {
+              "propertyid": 2,
+              "float_value": "0.306838929653167725"
+            },
+            {
+              "propertyid": 6,
+              "string_value": "1F0FACFE8D97D51E071B3FA91A371B2F1B27E1ACEBEB1C5F9A1977126F17AE834FDF"
+            }
+          ],
+          "app_icon": "https://shared.akamai.steamstatic.com/community_assets/images/apps/730/8dbc71957312bbd3baea65848b545be9eae2a355.jpg"
+        },
+        "36401807573": {
+          "currency": 0,
+          "appid": 730,
+          "contextid": "2",
+          "id": "36401807573",
+          "classid": "7993035943",
+          "instanceid": "188530139",
+          "amount": "1",
+          "status": 10,
+          "original_amount": "1",
+          "unowned_id": "36401807573",
+          "unowned_contextid": "16",
+          "background_color": "342c42",
+          "icon_url": "i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL2kpnj9h1a7s2pZKtuK8_CVliF0-x3vt5kQCa9qhsipTiXpYL8JSLSMxgnApJwF-ALsxXpm4W1N7zr4lCK2Y1FzXmoiS5PvCpvsbwFAKBwrKfVkUifZu_LJHFP",
+          "descriptions": [
+            {
+              "type": "html",
+              "value": "Exterior: Field-Tested",
+              "name": "exterior_wear"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            },
+            {
+              "type": "html",
+              "value": "The Glock 18 is a serviceable first-round pistol that works best against unarmored opponents and is capable of firing three-round bursts. A randomized city landscape in the foreground gives way to a full moon and purple night sky.\n\n<i>Look for the North Star</i>",
+              "name": "description"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            },
+            {
+              "type": "html",
+              "value": "The Clutch Collection",
+              "color": "9da1a9",
+              "name": "itemset_name"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            }
+          ],
+          "tradable": 1,
+          "actions": [
+            {
+              "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+              "name": "Inspect in Game..."
+            }
+          ],
+          "name": "Glock-18 | Moonrise",
+          "name_color": "8847ff",
+          "type": "Restricted Pistol",
+          "market_name": "Glock-18 | Moonrise (Field-Tested)",
+          "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+          "market_actions": [
+            {
+              "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+              "name": "Inspect in Game..."
+            }
+          ],
+          "commodity": 0,
+          "market_tradable_restriction": 7,
+          "market_marketable_restriction": 7,
+          "marketable": 1,
+          "sealed": 0,
+          "market_bucket_group_name": "Glock-18 | Moonrise",
+          "market_bucket_group_id": "G180420B6053004",
+          "sealed_type": 0,
+          "market_name_inside_group": "Field-Tested",
+          "market_bucket_id": "180420B605300438A4E1F5F503",
+          "asset_properties": [
+            {
+              "propertyid": 1,
+              "int_value": "12"
+            },
+            {
+              "propertyid": 2,
+              "float_value": "0.178578093647956848"
+            },
+            {
+              "propertyid": 6,
+              "string_value": "6676B3E7B8ABE1677E6246D0634E6256625ECBDCBD9765266A0E7A166E567E3CA1"
+            }
+          ],
+          "app_icon": "https://shared.akamai.steamstatic.com/community_assets/images/apps/730/8dbc71957312bbd3baea65848b545be9eae2a355.jpg"
+        },
+        "54368914606": {
+          "currency": 0,
+          "appid": 730,
+          "contextid": "2",
+          "id": "54368914606",
+          "classid": "7993035943",
+          "instanceid": "9150904866",
+          "amount": "1",
+          "status": 10,
+          "original_amount": "1",
+          "unowned_id": "54368914606",
+          "unowned_contextid": "16",
+          "background_color": "342c42",
+          "icon_url": "i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL2kpnj9h1a7s2pZKtuK8_CVliF0-x3vt5kQCa9qhsipTiXpYL8JSLSMxgnApJwF-ALsxXpm4W1N7zr4lCK2Y1FzXmoiS5PvCpvsbwFAKBwrKfVkUifZu_LJHFP",
+          "descriptions": [
+            {
+              "type": "html",
+              "value": "Exterior: Field-Tested",
+              "name": "exterior_wear"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            },
+            {
+              "type": "html",
+              "value": "The Glock 18 is a serviceable first-round pistol that works best against unarmored opponents and is capable of firing three-round bursts. A randomized city landscape in the foreground gives way to a full moon and purple night sky.\n\n<i>Look for the North Star</i>",
+              "name": "description"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            },
+            {
+              "type": "html",
+              "value": "The Clutch Collection",
+              "color": "9da1a9",
+              "name": "itemset_name"
+            },
+            {
+              "type": "html",
+              "value": " ",
+              "name": "blank"
+            }
+          ],
+          "tradable": 1,
+          "actions": [
+            {
+              "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+              "name": "Inspect in Game..."
+            }
+          ],
+          "name": "Glock-18 | Moonrise",
+          "name_color": "8847ff",
+          "type": "Restricted Pistol",
+          "market_name": "Glock-18 | Moonrise (Field-Tested)",
+          "market_hash_name": "Glock-18 | Moonrise (Field-Tested)",
+          "market_actions": [
+            {
+              "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+              "name": "Inspect in Game..."
+            }
+          ],
+          "commodity": 0,
+          "market_tradable_restriction": 7,
+          "market_marketable_restriction": 7,
+          "marketable": 1,
+          "sealed": 0,
+          "market_bucket_group_name": "Glock-18 | Moonrise",
+          "market_bucket_group_id": "G180420B6053004",
+          "sealed_type": 0,
+          "market_name_inside_group": "Field-Tested",
+          "market_bucket_id": "180420B605300438A4E1F5F503",
+          "asset_properties": [
+            {
+              "propertyid": 1,
+              "int_value": "969"
+            },
+            {
+              "propertyid": 2,
+              "float_value": "0.242253541946411133"
+            },
+            {
+              "propertyid": 6,
+              "string_value": "4555EBDCCA808F445D4165F3406D4175417D95E7A5B646058C422DC6C5C5C549354DF6B94F45"
+            }
+          ],
+          "app_icon": "https://shared.akamai.steamstatic.com/community_assets/images/apps/730/8dbc71957312bbd3baea65848b545be9eae2a355.jpg"
+        }
+      }
+    }
+  }
+}

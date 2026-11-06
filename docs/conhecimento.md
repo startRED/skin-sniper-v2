@@ -13,14 +13,16 @@ Glossário: *ask* = preço pedido num anúncio; *venda paga* = transação fecha
 
 ## 1. Endpoints que funcionam em 2026
 
-### 1.1 O que morreu
+### 1.1 Interface antiga e opção de sair do beta
 
 - `GET /market/listings/730/<nome>/render/?format=json` responde **200 `text/html`** com a página React
-  inteira (~2 MB), não JSON. Isso vale pelo nome e pelo código G. (`S/docs/ref/steam-market-api.md:7-10`,
-  `S/internal/steam/steam.go:49-52`)
-- O endpoint JSON clássico `/market/pricehistory/` **nunca foi usado** pelo projeto (grep sem nenhum
-  resultado em `S/`). Se ele exige login em 2026: **HIPÓTESE**, não medido. O histórico pago vem da página SSR
-  (ver 1.6).
+  inteira (~2 MB), não JSON, **sem selecionar a interface antiga**. (`S/docs/ref/steam-market-api.md:7-10`,
+  `S/internal/steam/steam.go:49-52`) Atualização medida em 06/11: com o cookie público `bMarketOptOut=1`,
+  o nome completo e `/render/?currency=7`, a resposta é JSON com anúncios, seed e float mesmo enquanto
+  `/market/actions` devolve 429. Contrato e capturas: `pesquisa-web.md`, seção 10.
+- O endpoint clássico `/market/pricehistory/` foi medido em 06/11: sem login respondeu 400; com a sessão
+  do app e a opção antiga respondeu 200 com pontos em BRL, identificados por `price_prefix="R$"`.
+  Contrato e limitações: `pesquisa-web.md`, seção 10. A página SSR continua como conhecimento de referência (1.6).
 
 ### 1.2 Código do item `G...` (pré-requisito de toda listagem)
 

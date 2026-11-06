@@ -1103,7 +1103,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_requests_go_through_the_global_limiter_and_429_backoff() {
+    async fn login_requests_respect_control_backoff_without_pausing_market_reads() {
         let (db, _dir) = temp_db();
         let steam = test_client();
         let login = Login::with_base(
@@ -1113,8 +1113,12 @@ mod tests {
         );
         assert!(login.start_qr().await.is_err());
         assert!(steam.stats().last_query_at.is_some(), "contou no limitador");
-        assert!(steam.stats().paused_until.is_some(), "429 pausou tudo");
-        // com tudo pausado, a segunda tentativa nem sai: o limitador devolve o erro de pausa na hora
+        assert!(steam.blocked(Endpoint::Auth), "429 pausa autenticação");
+        assert!(
+            !steam.blocked(Endpoint::Listings),
+            "login não pausa os anúncios"
+        );
+        // A segunda tentativa de login nem sai: o limitador de controle falha na hora.
         let sent = steam.sent();
         let second = tokio::time::timeout(Duration::from_millis(500), login.start_qr()).await;
         assert!(second.expect("não segura quem chamou").is_err());

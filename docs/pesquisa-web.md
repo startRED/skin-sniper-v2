@@ -7,7 +7,7 @@ Data da pesquisa: 2026-11-03. Fontes com URL e data (publicação ou acesso). "S
 ## 0. Resumo do que muda o desenho
 
 1. **O mercado novo (beta desde 12–13/05/2026) entrega float e seed por anúncio, sem serviço de inspect e sem login.** A ação `QueryListingsForItem` devolve `asset.asset_properties` com `propertyid 1 = Pattern Template` (seed), `2 = Wear Rating` (float), `6 = Item Certificate` (hex do inspect). Também aceita **filtro no servidor por faixa de seed e de float** e ordenação por propriedade. (Sonda local; seção 1.)
-2. **`/market/listings/730/<nome>/render` morreu na prática:** responde `302` para a página nova por código G (`/market/listings/730/G180420B6053004?...`). Ninguém na web documenta isso ainda; as libs Python de out/2026 ainda tentam `/render` (seção 1.1).
+2. **`/market/listings/730/<nome>/render` sem optar pela interface antiga** responde `302` para a página nova por código G (`/market/listings/730/G180420B6053004?...`). Atualização de 06/11: a opção oficial de sair do beta recupera o JSON; medição e contrato na seção 10.
 3. **Compra:** `POST /market/buylisting/<listingid>` continua, agora com `confirmation`, `tradefee_tax` e campos de cobrança. Desde ~09/07/2025 o Steam pode exigir confirmação (`need_confirmation` → confirmar no app → reenviar com `confirmation=<id>`). Clique único só funciona se o Erick confirmar no celular ou se o app tiver o `identity_secret` (seção 3).
 4. **Item comprado no Mercado fica 7 dias sem poder ser revendido nem trocado** (`market_marketable_restriction: 7`, `market_tradable_restriction: 7` na própria descrição do anúncio). Com R$36, isso trava o capital por uma semana a cada flip (seção 3.4).
 5. **O prêmio de padrão raro em Moonrise é pequeno de verdade.** Nas vendas reais do CSFloat (29/10 a 03/11/2026), seeds T1 da Moonrise FT saíram por US$1,05–1,50, contra preço-base de US$0,73 (cerca de 1,4–2x). Blogs falam em "a partir de US$100" (seção 5).
@@ -221,3 +221,26 @@ Nenhum usa o mercado novo. Lições:
 - Renovação: `GenerateAccessTokenForApp` só funciona com refresh token de **MobileApp** (WebBrowser dá AccessDenied, doc da biblioteca, 2025-04-30); o `aud` do token mobile é `["web","mobile"]`, então vale como cookie no steamcommunity.com. Por isso o QR é pedido como MobileApp. A rota WebBrowser (`login.steampowered.com/jwt/finalizelogin` + `settoken` em cada domínio) existe, mas exige várias chamadas por renovação.
 - **HIPÓTESE (não medida):** que o cookie vindo de token mobile também seja aceito em `buylisting`; e que o QR vale ~5 min (a Steam não documenta).
 - **Verificação de elegibilidade (log real, 2026-11-04):** com login válido, `GET /market/` responde 302 para `/market/eligibilitycheck/`, que seta o cookie `webTradeEligibility` e volta a `/market/`. Fontes do comportamento e do nome do cookie: https://github.com/dmitryshelamov/ProfitGraph/pull/112 e https://github.com/ill-yes/steam-bee/pull/61 (seguir até 3 redirecionamentos na mesma origem e guardar o cookie); https://dev.doctormckay.com/topic/5837-webtradeeligibility-cookie-and-its-purpose/ (é só cache do estado; a Steam rechecagem na compra). Nosso cliente segue 2 saltos e manda o cookie em toda requisição autenticada.
+
+---
+
+## 10. Recuperação pela interface antiga (sondas locais de 06/11/2026)
+
+- Referência da opção `bMarketOptOut=1`: https://github.com/Revadike/InternalSteamWebAPI/issues/13 (relato de maio/2026). A interface pública do mercado também oferece "Sair do beta do Mercado". O SteamCrawl de 2023 não implementa controle especial de 429: https://github.com/Hungreeee/steamcrawl/blob/main/steamcrawl/request.py .
+- No IP de produção, actions de anúncios e a página nova responderam 429. Pedidos sem compressão, com `identity`, com combinações normais de compressão e com sessão anônima inicializada continuaram recusados. **Não há prova de que mudar cabeçalhos resolva nosso bloqueio.** O navegador embutido abriu a página; não foi possível comprovar que a saída de rede dele coincide com a do programa, então isso não diagnostica o cliente.
+- O JS público atual confirma o formato já usado pelo app: GET `/market/actions?q=<método>&qp=<array JSON>` e `x-valve-request-type: queryAction`. Fontes da própria Steam: https://cdn.akamai.steamstatic.com/steamcommunity/public/ssr/Cr5iF9_D.js e https://cdn.akamai.steamstatic.com/steamcommunity/public/ssr/Fo4SpwBP.js .
+- A sonda abaixo respondeu **200**, sem login, com 20 anúncios da Moonrise FT, enquanto as actions continuavam em 429:
+
+```text
+GET /market/listings/730/<nome completo escapado>/render/
+    ?query=&start=0&count=20&country=BR&language=english&currency=7
+Cookie: bMarketOptOut=1
+Accept: application/json
+```
+
+- Resposta: `success`, `start`, `pagesize`, `total_count`, `listinginfo` indexado por `listingid`, `assets["730"]["2"][assetid]`. O preço do comprador em BRL é `converted_price + converted_fee`, **somente** com `converted_currencyid=2007`. O `price`/`fee` original pode estar em outra moeda (na amostra, `currencyid=2006`): nunca usar esse valor como real.
+- O asset contém `market_hash_name`, `market_bucket_group_id` (código G), `asset_properties` e o template de inspect. Seed vem em `int_value` textual; float vem em `float_value` **textual**. A identidade completa, o mapa de assets, a taxa e a moeda são validados antes de aceitar a página. Mapa JSON não garante ordem de preço: ordenar após converter.
+- Captura pública recortada, com três anúncios e seus assets: `testdata/steam_legacy_render_moonrise_2026-11.json`. Recorte conserva os campos originais de paginação; não é uma página completa para medir cobertura.
+- `GET /market/pricehistory/?appid=730&market_hash_name=<nome>` com a opção antiga respondeu **400 sem login** e **200 com a sessão já salva do app**, com 3.898 pontos. Resposta: `success=true`, `price_prefix="R$"`, `price_suffix=""`, `prices=[["Feb 16 2018 01: +0",48.186,"522"],...]`. Prefixo de moeda e UTC `+0` são obrigatórios no leitor. Captura pública recortada: `testdata/steam_legacy_history_moonrise_2026-11.json`. Nenhuma credencial foi salva nas capturas ou impressa.
+- **Limites:** nenhuma cota maior foi medida. O fallback compartilha a fila conservadora de busca/livro e respeita 429, com pelo menos 3 s entre quaisquer pedidos pela saída principal. Não há rotação de cabeçalhos, contas ou proxies para multiplicar cotas. Filtros de seed/float continuam dependendo das actions; os primeiros anúncios do nome não representam a cobertura de um filtro remoto.
+- O HTML da página nova que veio com 429 tinha só estrutura e preferências, sem anúncios/histórico: não foi aceito como dado. O fallback SSR não foi implantado, pois a alternativa JSON funcionou e permite reutilizar os validadores existentes.

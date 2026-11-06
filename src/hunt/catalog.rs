@@ -743,7 +743,7 @@ async fn measure_ratio_sample(
     wear: Option<u8>,
     usd_cents: i64,
 ) -> Result<()> {
-    let page = listings::query_listings_wear(&h.steam, code, 0, wear, &[]).await?;
+    let (page, _) = listings::query_listings_named(&h.steam, name, code, 0, wear).await?;
     let Some(brl) = page
         .listings
         .iter()
