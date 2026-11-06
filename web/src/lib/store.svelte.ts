@@ -249,12 +249,12 @@ export function start() {
 
 // Logo depois de ligar: a Steam ainda não respondeu (ou está em pausa) e o saldo vem dela.
 // Falha temporária também deixa ok null, mas com outro texto ("não consegui verificar…").
-// Bloqueio longo da Steam (não a pausa curta de um 429 avulso): sem resposta boa há 10 min, ou pausa de mais de 5 min
-// quando o app subiu sem saber da última resposta.
+// Bloqueio longo da Steam (não a pausa curta de um 429 avulso): em pausa e sem resposta boa há 10 min, ou nenhuma
+// desde que o app subiu (o prazo da pausa não serve: é o da saída que tenta antes, às vezes a extra em 60 s).
 export const steamBlocked = () => {
   const h = app.state?.hunt;
   if (!h || h.paused_until == null || h.paused_until <= app.now) return false;
-  return h.last_ok_at != null ? app.now - h.last_ok_at >= 600 : h.paused_until - app.now > 300;
+  return h.last_ok_at == null || app.now - h.last_ok_at >= 600;
 };
 
 export const readingSaldo = () =>
