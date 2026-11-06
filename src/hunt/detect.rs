@@ -787,6 +787,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                 continue;
             }
         };
+        let new_credit = !was_known && super::explore::first_credit(h, &l.listing_id).await?;
         let mut row = EvalRow::new(task, l, others_min, judged.refused.unwrap_or("aprovada"));
         row.mid_profit = judged.near.as_ref().map(|n| n.mid_cents);
         row.quick_profit = judged.near.as_ref().map(|n| n.quick_cents);
@@ -795,9 +796,9 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         let hist_now = history_at(h, &l.name).await?.unwrap_or(0);
         {
             if let Some(n) = judged.near.as_ref().filter(|_| judged.found.is_none()) {
-                out.rewarded.near_hits += u32::from(is_near(n));
+                out.rewarded.near_hits += u32::from(new_credit && is_near(n));
                 // Só anúncio novo ensina: reavaliar o mesmo (histórico mudou) não rende de novo.
-                if !was_known {
+                if new_credit {
                     out.rewarded.near_credit +=
                         learn::closeness_credit(n.price_cents, n.mid_cents, scale);
                 }
@@ -828,12 +829,12 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                         continue;
                     }
                 }
-                store_opportunity(h, task, l, &opp, fresh).await?;
-                if fresh {
+                let first_approved = store_opportunity(h, task, l, &opp, fresh).await?;
+                if first_approved {
                     out.rewarded.finds += 1;
                     out.rewarded.gain_cents += opp.sell.mid.profit_cents;
                 }
-                out.found.push((opp, fresh && notify));
+                out.found.push((opp, fresh && first_approved && notify));
             }
             (None, Some(_)) => out
                 .gone
@@ -895,7 +896,7 @@ async fn store_opportunity(
     l: &Listing,
     opp: &Opportunity,
     fresh: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let (id, json, lj, tid) = (
         opp.id.clone(),
         serde_json::to_string(opp)?,
@@ -903,9 +904,15 @@ async fn store_opportunity(
         task.id.clone(),
     );
     let at = opp.seen_at;
-    h.db.call(move |c| {
+    let (decision, now, profit) = (
+        crate::research::current().map(|ctx| ctx.id),
+        h.now(),
+        opp.sell.mid.profit_cents,
+    );
+    let first = h.db.call(move |c| {
         let tx = c.transaction()?;
-        if fresh
+        let first = fresh && super::explore::record_find(&tx,&id,decision,now,&tid,profit)?;
+        if first
             && let Err(error) = tx.execute("INSERT INTO hourly_activity(hour_utc, opportunities) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET opportunities = opportunities + 1", [at.div_euclid(3600)]) {
             tracing::warn!(%error, "falha ao registrar atividade de oportunidades");
         }
@@ -914,7 +921,8 @@ async fn store_opportunity(
              VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
             params![id, json, at, tid, lj],
         )?;
-        tx.commit()
+        tx.commit()?;
+        Ok(first)
     })
     .await?;
     {
@@ -928,7 +936,7 @@ async fn store_opportunity(
         );
     }
     let _ = h.events.send(Event::Opportunity(opp.clone()));
-    Ok(())
+    Ok(first)
 }
 
 /// Marca como encerradas (`gone_at`) e avisa o painel. Devolve os ids que estavam ativos.

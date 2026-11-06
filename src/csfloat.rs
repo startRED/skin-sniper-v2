@@ -57,6 +57,7 @@ pub struct CsfloatClient {
     http: reqwest::Client,
     base: String,
     state: Mutex<State>,
+    research_db: Mutex<Option<crate::db::Db>>,
 }
 
 fn now_unix() -> i64 {
@@ -72,6 +73,7 @@ impl CsfloatClient {
 
     pub(crate) fn with_base(base: &str) -> anyhow::Result<Self> {
         Ok(Self {
+            research_db: Mutex::new(None),
             http: reqwest::Client::builder()
                 .user_agent("skin-sniper/2")
                 .timeout(Duration::from_secs(30))
@@ -84,6 +86,10 @@ impl CsfloatClient {
                 next_at: Instant::now(),
             }),
         })
+    }
+
+    pub fn set_research_db(&self, db: crate::db::Db) {
+        *self.research_db.lock().unwrap() = Some(db);
     }
 
     /// Troca a chave em tempo de execução (`None` volta ao modo anônimo).
@@ -132,8 +138,18 @@ impl CsfloatClient {
         if let Some(k) = self.state.lock().unwrap().key.clone() {
             req = req.header("Authorization", k);
         }
-        let resp = req
-            .send()
+        let request = req
+            .build()
+            .map_err(|e| Error::Transport(e.without_url().to_string()))?;
+        let db = self.research_db.lock().unwrap().clone();
+        if let Some(db) = db {
+            crate::research::record_external(db)
+                .await
+                .map_err(|e| Error::Transport(format!("registro de pesquisa: {e:#}")))?;
+        }
+        let resp = self
+            .http
+            .execute(request)
             .await
             .map_err(|e| Error::Transport(e.without_url().to_string()))?;
         let status = resp.status();

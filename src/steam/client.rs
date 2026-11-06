@@ -97,6 +97,7 @@ impl Endpoint {
 
 #[derive(Debug)]
 pub enum Error {
+    BudgetExhausted,
     /// 429 da Steam: o grupo da consulta está pausado até `until` (segundos Unix).
     RateLimited {
         until: i64,
@@ -134,6 +135,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BudgetExhausted => write!(f, "cota de exploração esgotada"),
             Self::RateLimited { until } => write!(f, "Steam respondeu 429; pausado até {until}"),
             Self::BreakerOpen { endpoint, until } => write!(f, "{endpoint:?} em pausa até {until}"),
             Self::Http { endpoint, status } => write!(f, "{endpoint:?}: HTTP {status}"),
@@ -154,6 +156,14 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn research_outcome<T>(result: &Result<T>) -> &'static str {
+    match result {
+        Ok(_) => "ok",
+        Err(Error::RateLimited { .. }) => "rate_limited",
+        Err(_) => "error",
+    }
+}
 
 /// Cookie de login. Nunca aparece em log nem em `Debug`.
 #[derive(Clone, PartialEq)]
@@ -449,6 +459,15 @@ pub struct SteamClient {
     alt: Option<reqwest::Client>,
     base: String,
     inner: Mutex<Inner>,
+    research_db: Mutex<Option<crate::db::Db>>,
+    main_send_pace: tokio::sync::Mutex<SendPace>,
+    alt_send_pace: tokio::sync::Mutex<SendPace>,
+}
+
+#[derive(Default)]
+struct SendPace {
+    last_any: Option<Instant>,
+    last_bucket: [Option<Instant>; 3],
 }
 
 enum Slot {
@@ -506,6 +525,9 @@ impl SteamClient {
 
     pub(crate) fn with_base(base: &str) -> anyhow::Result<Self> {
         Ok(Self {
+            research_db: Mutex::new(None),
+            main_send_pace: tokio::sync::Mutex::new(SendPace::default()),
+            alt_send_pace: tokio::sync::Mutex::new(SendPace::default()),
             http: http_builder().build()?,
             alt: None,
             base: base.trim_end_matches('/').to_string(),
@@ -527,6 +549,100 @@ impl SteamClient {
                 alt_down_until: None,
             }),
         })
+    }
+
+    pub fn set_research_db(&self, db: crate::db::Db) {
+        *self.research_db.lock().unwrap() = Some(db);
+    }
+
+    // O banco pode atrasar reservas diferentes; o intervalo precisa valer também no envio real.
+    async fn pace_send(&self, ep: Endpoint, alt: bool) -> Result<()> {
+        let gate = if alt {
+            &self.alt_send_pace
+        } else {
+            &self.main_send_pace
+        };
+        let bucket = if matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
+            2
+        } else if side(ep) {
+            1
+        } else {
+            0
+        };
+        loop {
+            let at = {
+                let mut pace = gate.lock().await;
+                let mut inner = self.inner.lock().unwrap();
+                let now = Instant::now();
+                if let Some(t) = inner.breakers[ep.idx()].check(now) {
+                    return Err(Error::BreakerOpen {
+                        endpoint: ep,
+                        until: unix_in(t - now),
+                    });
+                }
+                let (spacing, gap) = if alt {
+                    if let Some(t) = inner
+                        .alt_limiter
+                        .pause_end(now)
+                        .into_iter()
+                        .chain(inner.alt_down_until.filter(|t| *t > now))
+                        .max()
+                    {
+                        return Err(Error::RateLimited {
+                            until: unix_in(t - now),
+                        });
+                    }
+                    (Duration::ZERO, inner.alt_limiter.gap)
+                } else {
+                    if let Some(t) = inner.bucket(ep).pause_end(now) {
+                        return Err(Error::RateLimited {
+                            until: unix_in(t - now),
+                        });
+                    }
+                    let spacing = inner.spacing;
+                    (spacing, inner.bucket(ep).gap)
+                };
+                let any = pace.last_any.map_or(now, |last| last + spacing);
+                let bucket_at = pace.last_bucket[bucket].map_or(now, |last| last + gap);
+                let at = any.max(bucket_at);
+                if at <= now {
+                    // O contador representa transporte iniciado, não vaga reservada.
+                    inner.sent += 1;
+                    pace.last_any = Some(now);
+                    pace.last_bucket[bucket] = Some(now);
+                    return Ok(());
+                }
+                at
+            };
+            tokio::time::sleep_until(at.into()).await;
+        }
+    }
+
+    async fn reserve_read(
+        &self,
+        ep: Endpoint,
+        route: &'static str,
+    ) -> Result<Option<(crate::db::Db, i64)>> {
+        if matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
+            return Ok(None);
+        }
+        let db = self.research_db.lock().unwrap().clone();
+        let endpoint = match ep {
+            Endpoint::Listings => "listings",
+            Endpoint::History => "history",
+            Endpoint::Search => "search",
+            Endpoint::Book => "book",
+            Endpoint::Legacy => "legacy",
+            _ => unreachable!(),
+        };
+        crate::research::reserve(db, endpoint, route)
+            .await
+            .map_err(|e| match e {
+                crate::research::ReserveError::Budget => Error::BudgetExhausted,
+                crate::research::ReserveError::Database(e) => {
+                    Error::Transport(format!("registro de pesquisa: {e:#}"))
+                }
+            })
     }
 
     /// Liga a saída extra pelo proxy HTTP em `url` (ver `ALT_PROXY`).
@@ -940,6 +1056,14 @@ impl SteamClient {
         check: Option<EnvelopeCheck>,
         reset_on_success: bool,
     ) -> Result<(Parts, Vec<u8>)> {
+        if !matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
+            crate::research::check_budget().await.map_err(|e| match e {
+                crate::research::ReserveError::Budget => Error::BudgetExhausted,
+                crate::research::ReserveError::Database(e) => {
+                    Error::Transport(format!("registro de pesquisa: {e:#}"))
+                }
+            })?;
+        }
         loop {
             let slot = {
                 let now = Instant::now();
@@ -959,14 +1083,10 @@ impl SteamClient {
                 match main {
                     Ok(()) => {
                         g.next_any = now + g.spacing;
-                        g.sent += 1;
                         Slot::Main
                     }
                     Err(w) => match self.alt_slot(&mut g, ep, now) {
-                        Some(Ok(())) => {
-                            g.sent += 1;
-                            Slot::Alt
-                        }
+                        Some(Ok(())) => Slot::Alt,
                         alt => {
                             // Balde em pausa por 429 e a extra sem vaga: falha já, em vez de segurar quem chamou
                             // por até 30 min (a caça segue pelo outro balde).
@@ -1019,15 +1139,27 @@ impl SteamClient {
                 req = req.header(COOKIE, "bMarketOptOut=1");
             }
         }
-        let resp = match req.send().await {
+        let request = req
+            .build()
+            .map_err(|e| Error::Transport(e.without_url().to_string()))?;
+        let attempt = self.reserve_read(ep, "main").await?;
+        if let Err(e) = self.pace_send(ep, false).await {
+            crate::research::finish(attempt, "not_sent").await;
+            return Err(e);
+        }
+        let resp = match self.http.execute(request).await {
             Ok(r) => r,
             Err(e) => {
+                crate::research::finish(attempt, "network_error").await;
                 self.inner.lock().unwrap().breakers[ep.idx()].on_fail(Instant::now());
                 return Err(Error::Transport(e.without_url().to_string()));
             }
         };
-        self.finish(ep, resp, sent_by, check, reset_on_success, false)
-            .await
+        let result = self
+            .finish(ep, resp, sent_by, check, reset_on_success, false)
+            .await;
+        crate::research::finish(attempt, research_outcome(&result)).await;
+        result
     }
 
     /// Vaga na saída extra: só leitura de mercado, com a saída ligada. Descansando, devolve quanto falta.
@@ -1062,8 +1194,21 @@ impl SteamClient {
     ) -> Option<Result<(Parts, Vec<u8>)>> {
         let alt = self.alt.as_ref()?;
         let request = req.try_clone()?.build().ok()?;
+        let attempt = match self.reserve_read(ep, "alt").await {
+            Ok(attempt) => attempt,
+            Err(e) => return Some(Err(e)),
+        };
+        if let Err(e) = self.pace_send(ep, true).await {
+            crate::research::finish(attempt, "not_sent").await;
+            return if matches!(e, Error::RateLimited { .. }) {
+                None
+            } else {
+                Some(Err(e))
+            };
+        }
         match alt.execute(request).await {
             Ok(r) if r.status() == StatusCode::TOO_MANY_REQUESTS => {
+                crate::research::finish(attempt, "rate_limited").await;
                 let retry = retry_after(&r);
                 let mut g = self.inner.lock().unwrap();
                 g.calls[1].limited += 1;
@@ -1072,11 +1217,15 @@ impl SteamClient {
                 tracing::warn!(endpoint = ?ep, "Steam: 429 na saída extra; ela pausa e a principal segue");
                 None
             }
-            Ok(r) => Some(
-                self.finish(ep, r, None, check, reset_on_success, true)
-                    .await,
-            ),
+            Ok(r) => {
+                let result = self
+                    .finish(ep, r, None, check, reset_on_success, true)
+                    .await;
+                crate::research::finish(attempt, research_outcome(&result)).await;
+                Some(result)
+            }
             Err(e) => {
+                crate::research::finish(attempt, "network_error").await;
                 let mut g = self.inner.lock().unwrap();
                 if g.alt_down_until.is_none_or(|t| Instant::now() >= t) {
                     tracing::warn!(erro = %e.without_url(), "saída extra indisponível; tenta de novo em 5 min");
@@ -1270,6 +1419,269 @@ pub(crate) struct Parts {
 mod tests {
     use super::*;
     use axum::{Router, http::StatusCode as AxStatus, routing::get};
+
+    #[tokio::test]
+    async fn research_limits_retry_but_never_blocks_account_calls() {
+        let app = Router::new()
+            .route("/market/actions", get(|| async { r#"{"data":null}"# }))
+            .route("/ok", get(|| async { "{}" }));
+        let c = fast(&serve(app).await);
+        let (db, _dir) = crate::db::temp_db();
+        c.set_research_db(db.clone());
+        for _ in 0..15 {
+            crate::research::reserve(Some(db.clone()), "history", "main")
+                .await
+                .unwrap();
+        }
+        let decision = crate::research::Decision {
+            source: "exploracao_externa".into(),
+            policy: "test".into(),
+            target: "x".into(),
+            scale: 1.0,
+            block_id: None,
+        };
+        let (result, context) = crate::research::scope_tracked(db.clone(), decision, async {
+            let err = c
+                .action(Endpoint::Listings, "Q", &serde_json::json!([]))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::BudgetExhausted));
+            c.get_json(Endpoint::Session, "/ok", &[]).await.unwrap();
+            c.get_json(Endpoint::Buy, "/ok", &[]).await.unwrap();
+            c.get_json(Endpoint::Auth, "/ok", &[]).await.unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(crate::research::attempts(db, context.id).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn research_checks_budget_again_after_alt_fallback() {
+        let app = Router::new().route(
+            "/market/actions",
+            get(|h: axum::http::HeaderMap| async move {
+                if h.contains_key("x-saida") {
+                    (AxStatus::TOO_MANY_REQUESTS, "")
+                } else {
+                    (AxStatus::OK, r#"{"data":{"ok":true}}"#)
+                }
+            }),
+        );
+        let c = SteamClient::with_base(&serve(app).await)
+            .unwrap()
+            .with_alt(alt_marked());
+        c.set_gap_for_test(Duration::from_millis(200));
+        let (db, _dir) = crate::db::temp_db();
+        c.set_research_db(db.clone());
+        for _ in 0..30 {
+            crate::research::reserve(Some(db.clone()), "history", "main")
+                .await
+                .unwrap();
+        }
+        let decision = crate::research::Decision {
+            source: "exploracao_externa".into(),
+            policy: "test".into(),
+            target: "x".into(),
+            scale: 1.0,
+            block_id: None,
+        };
+        let (result, context) = crate::research::scope_tracked(db.clone(), decision, async {
+            c.action(Endpoint::Listings, "Q", &serde_json::json!([]))
+                .await
+                .unwrap();
+            let err = c
+                .action(Endpoint::Listings, "Q", &serde_json::json!([]))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::BudgetExhausted));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(crate::research::attempts(db, context.id).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn research_distinguishes_unbuilt_request_from_network_failure() {
+        let c = fast("http://127.0.0.1:1");
+        let (db, _dir) = crate::db::temp_db();
+        c.set_research_db(db.clone());
+        assert!(
+            c.send(Endpoint::History, c.http.get("://invalid"), false)
+                .await
+                .is_err()
+        );
+        let count = || {
+            let db = db.clone();
+            async move {
+                db.call(|c| {
+                    c.query_row("SELECT count(*) FROM research_attempts", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                })
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(count().await, 0);
+        assert!(c.get_json(Endpoint::History, "/x", &[]).await.is_err());
+        let outcomes: (i64, String) = db
+            .call(|c| {
+                c.query_row("SELECT count(*), outcome FROM research_attempts", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcomes, (1, "network_error".into()));
+    }
+
+    #[tokio::test]
+    async fn slow_database_cannot_collapse_actual_send_spacing() {
+        use std::sync::Arc;
+        let times = Arc::new(Mutex::new(Vec::new()));
+        let seen = times.clone();
+        let app = Router::new().route(
+            "/ok",
+            get(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(Instant::now());
+                    "{}"
+                }
+            }),
+        );
+        let c = Arc::new(fast(&serve(app).await));
+        let (db, _dir) = crate::db::temp_db();
+        c.set_research_db(db.clone());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let db2 = db.clone();
+        let hold = tokio::spawn(async move {
+            db2.call(move |_| {
+                let _ = started.send(());
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(())
+            })
+            .await
+            .unwrap()
+        });
+        ready.await.unwrap();
+        let a = {
+            let c = c.clone();
+            tokio::spawn(async move { c.get_json(Endpoint::History, "/ok", &[]).await.unwrap() })
+        };
+        let b = {
+            let c = c.clone();
+            tokio::spawn(async move { c.get_json(Endpoint::History, "/ok", &[]).await.unwrap() })
+        };
+        a.await.unwrap();
+        b.await.unwrap();
+        hold.await.unwrap();
+        let times = times.lock().unwrap();
+        assert_eq!(times.len(), 2);
+        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(80));
+    }
+
+    #[tokio::test]
+    async fn waiting_history_does_not_hold_up_purchase() {
+        use std::sync::Arc;
+        let app = Router::new().route("/ok", get(|| async { "{}" }));
+        let c = Arc::new(fast(&serve(app).await));
+        c.inner.lock().unwrap().limiter.gap = Duration::from_secs(1);
+        c.main_send_pace.lock().await.last_bucket[0] = Some(Instant::now());
+        let history = {
+            let c = c.clone();
+            tokio::spawn(async move { c.get_json(Endpoint::History, "/ok", &[]).await.unwrap() })
+        };
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let started = Instant::now();
+        c.get_json(Endpoint::Buy, "/ok", &[]).await.unwrap();
+        assert!(started.elapsed() < Duration::from_millis(700));
+        history.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_research_budget_does_not_consume_limiter_slot() {
+        let c = fast("http://127.0.0.1:1");
+        let (db, _dir) = crate::db::temp_db();
+        c.set_research_db(db.clone());
+        let before = c.inner.lock().unwrap().next_any;
+        let d = crate::research::Decision {
+            source: "exploracao_externa".into(),
+            policy: "p".into(),
+            target: "x".into(),
+            scale: 1.0,
+            block_id: None,
+        };
+        crate::research::scope(db, d, async {
+            assert!(matches!(
+                c.get_json(Endpoint::History, "/x", &[]).await,
+                Err(Error::BudgetExhausted)
+            ));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(c.inner.lock().unwrap().next_any, before);
+        assert_eq!(c.sent(), 0);
+    }
+
+    #[tokio::test]
+    async fn pause_after_reservation_prevents_send_and_refunds_budget() {
+        use std::sync::Arc;
+        let app = Router::new().route("/ok", get(|| async { "{}" }));
+        let c = Arc::new(fast(&serve(app).await));
+        c.set_gap_for_test(Duration::from_millis(400));
+        c.main_send_pace.lock().await.last_any = Some(Instant::now());
+        let (db, _dir) = crate::db::temp_db();
+        c.set_research_db(db.clone());
+        for _ in 0..15 {
+            crate::research::reserve(Some(db.clone()), "history", "main")
+                .await
+                .unwrap();
+        }
+        let d = crate::research::Decision {
+            source: "exploracao_externa".into(),
+            policy: "p".into(),
+            target: "x".into(),
+            scale: 1.0,
+            block_id: None,
+        };
+        let c2 = c.clone();
+        let task = tokio::spawn({
+            let db = db.clone();
+            async move {
+                crate::research::scope_tracked(db, d, async move {
+                    assert!(matches!(
+                        c2.get_json(Endpoint::History, "/ok", &[]).await,
+                        Err(Error::RateLimited { .. })
+                    ));
+                    Ok(())
+                })
+                .await
+                .unwrap()
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        c.inner.lock().unwrap().limiter.on_429(Instant::now(), None);
+        let (result, context) = task.await.unwrap();
+        result.unwrap();
+        assert_eq!(c.sent(), 0);
+        assert_eq!(
+            crate::research::attempts(db.clone(), context.id)
+                .await
+                .unwrap(),
+            0
+        );
+        let summary = db
+            .call(|c| crate::research::summary(c, crate::db::now_unix()))
+            .await
+            .unwrap();
+        assert_eq!((summary.reads_1h, summary.available), (15, 1));
+    }
 
     #[tokio::test]
     async fn null_data_retries_once() {

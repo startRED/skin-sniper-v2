@@ -140,6 +140,53 @@ export type LearningWeek = {
   labeled: number;
   profit_cents: number;
 };
+export type LearningResearch = {
+  reads_1h: number;
+  exploratory_1h: number;
+  exploratory_limit: number;
+  available: number;
+  csfloat_1h: number;
+  limited_1h: number;
+  failed_1h: number;
+  followup_1h: number;
+};
+export type LearningTrial = {
+  enabled: boolean;
+  pilot: boolean;
+  block_id: number | null;
+  phase: string;
+  base_policy: string;
+  reason: string;
+};
+export type LearningCohort = {
+  policy: string | null;
+  block_id: number | null;
+  kind: string;
+  total: number;
+  mature: number;
+  waiting: number;
+  unlabeled: number;
+  labeled: number;
+  closed: number;
+  predicted_cents: number;
+  virtual_cents: number;
+  indirect: number;
+};
+export type LearningExploration = {
+  candidate: string | null;
+  visits: number;
+  retained: boolean;
+  targets_tested: number;
+  unique_finds: number;
+};
+export type LearningExperiment = {
+  blocks: { id: number; pilot: boolean; reads: number; finds: number; predicted_cents: number }[];
+  pairs: number;
+  mean: number | null;
+  lower: number | null;
+  conclusion: string;
+  reason: string;
+};
 export type Learning = {
   days: LearningDay[];
   since: number | null;
@@ -147,4 +194,9 @@ export type Learning = {
   harvest: HarvestInfo | null;
   refit: number;
   weeks: [LearningWeek, LearningWeek];
+  research?: LearningResearch | null;
+  trial?: LearningTrial | null;
+  cohorts?: LearningCohort[];
+  exploration?: LearningExploration | null;
+  experiment?: LearningExperiment | null;
 };

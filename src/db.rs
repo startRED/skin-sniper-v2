@@ -138,6 +138,10 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE arm_stats ADD COLUMN exposure REAL NOT NULL DEFAULT 0;
     ALTER TABLE arm_stats ADD COLUMN last_at INTEGER NOT NULL DEFAULT 0;
     "#,
+    crate::research::SCHEMA,
+    crate::hunt::teacher::SCHEMA,
+    crate::hunt::trial::SCHEMA,
+    crate::hunt::explore::SCHEMA,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -220,6 +224,8 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
         )?,
     };
     let learn = now - LEARN_KEEP_DAYS * DAY;
+    crate::research::retain(conn, now)?;
+    crate::hunt::explore::retain(conn, now)?;
     conn.execute(
         "DELETE FROM hourly_activity WHERE hour_utc < ?1",
         [learn.div_euclid(3600)],
@@ -228,6 +234,10 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
     conn.execute("DELETE FROM book_snapshots WHERE at < ?1", [learn])?;
     conn.execute("DELETE FROM evaluations WHERE at < ?1", [learn])?;
     conn.execute("DELETE FROM ghosts WHERE bought_at < ?1", [learn])?;
+    conn.execute(
+        "DELETE FROM ghost_decisions WHERE listing_id NOT IN (SELECT listing_id FROM ghosts)",
+        [],
+    )?;
     conn.execute("DELETE FROM csfloat_sales WHERE sold_at < ?1", [learn])?;
     conn.execute(
         "DELETE FROM activity_seen WHERE last_seen < ?1",

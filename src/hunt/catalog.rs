@@ -242,7 +242,7 @@ pub struct Ctx<'a> {
 /// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela (todos os desgastes) cujo piso cabe no saldo (até
 /// `RARE_MAX_TASKS`, os que mais vendem primeiro), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
-pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
+pub(super) fn common_candidates(items: &[Item], c: &Ctx) -> Vec<Task> {
     let ratio_floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, c.ratio));
     let min_floor = min_discount_floor();
     let mut common: Vec<(f64, Task)> = items
@@ -273,9 +273,14 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         })
         .collect();
     common.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
-    common.truncate(WATCH_MAX);
-    let total: f64 = common.iter().map(|c| c.1.score).sum();
-    let mut tasks: Vec<Task> = common.into_iter().map(|c| c.1).collect();
+    common.into_iter().map(|(_, task)| task).collect()
+}
+
+pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
+    let ratio_floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, c.ratio));
+    let mut tasks = common_candidates(items, c);
+    tasks.truncate(WATCH_MAX);
+    let total: f64 = tasks.iter().map(|t| t.score).sum();
     // Raros: uma tarefa por skin com tabela (código G), sem filtro de desgaste: a mesma consulta traz todos os
     // desgastes, StatTrak e Souvenir da faixa de seed, então cada faixa é revista ~4× mais vezes no mesmo ritmo.
     // Nome = o desgaste que mais vende (painel e CSFloat); piso = o menor dos desgastes; vendas = a soma.
@@ -780,8 +785,18 @@ async fn history_candidates(
         return Ok(vec![]);
     };
     let items = load_items(&h.db).await?;
+    Ok(history_order(items, now, saldo, ratio, exclude))
+}
+
+fn history_order(
+    items: Vec<Item>,
+    now: i64,
+    saldo: i64,
+    ratio: f64,
+    exclude: &HashSet<String>,
+) -> Vec<String> {
     let min_floor = min_discount_floor();
-    Ok(items
+    let mut candidates: Vec<_> = items
         .into_iter()
         .filter(|i| {
             i.code.is_some()
@@ -790,9 +805,18 @@ async fn history_candidates(
                 && i.history_at.is_none_or(|t| now - t >= HISTORY_TTL)
                 && !exclude.contains(&i.name)
         })
+        .collect();
+    candidates.sort_by(|a, b| {
+        a.history_at
+            .cmp(&b.history_at)
+            .then(a.rank.cmp(&b.rank))
+            .then(a.name.cmp(&b.name))
+    });
+    candidates
+        .into_iter()
         .take(HISTORY_PER_ROUND)
         .map(|i| i.name)
-        .collect())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -832,7 +856,7 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         floors: &floors,
         learned: &learned,
     };
-    let tasks = select(&items, &ctx);
+    let tasks = super::explore::select(h, &items, &ctx, select(&items, &ctx)).await?;
     let (n, removed) = {
         let mut s = h.lock();
         let removed = s.queue.set_tasks(tasks);
@@ -929,6 +953,29 @@ mod tests {
             dispersion: Some(disp),
             history_at: Some(0),
         }
+    }
+
+    #[test]
+    fn history_prioritizes_old_and_unseen_before_popularity() {
+        let now = 10 * DAY;
+        let mut popular = item("popular", 1000, 1, 10.0, 0.2);
+        popular.history_at = Some(now - HISTORY_TTL);
+        let mut old = item("old", 1000, 900, 1.0, 0.2);
+        old.history_at = Some(now - 2 * HISTORY_TTL);
+        let mut unseen = item("unseen", 1000, 999, 1.0, 0.2);
+        unseen.history_at = None;
+        let mut fresh = item("fresh", 1000, 0, 10.0, 0.2);
+        fresh.history_at = Some(now);
+        assert_eq!(
+            history_order(
+                vec![popular, old, unseen, fresh],
+                now,
+                2000,
+                1.0,
+                &HashSet::new()
+            ),
+            vec!["unseen", "old", "popular"]
+        );
     }
 
     #[test]

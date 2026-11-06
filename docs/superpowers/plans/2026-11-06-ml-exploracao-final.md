@@ -1,9 +1,15 @@
 # Melhorias do aprendizado com exploração — plano consolidado
 
-Data: 06/11/2026. Estado: planejamento concluído; implementação e experimento ainda não iniciados.
+Data: 06/11/2026. Estado: núcleo implementado e validado localmente; ganho de mercado e ampliações condicionais aguardam dados do piloto. O executável em produção não é substituído por esta alteração de código.
 Código inspecionado: `main` em `0dcccd9`. O [plano base v0](2026-11-06-ml-exploracao.md) foi escrito antes das três revisões GPT 6.1 Terra e fica preservado para comparação. Este documento prevalece sobre as propostas daquele rascunho.
 
 ## Recomendação
+
+Execução: contagem e limite físicos, candidata comum, proteção de ativos, persistência, deduplicação,
+coortes e painel implementados. O protocolo coleta referência e alterna blocos automaticamente ao rodar
+a versão nova; falha operacional interrompe o piloto. Hipóteses e comportamento efetivo estão em
+`docs/projeto.md`, seção "Exploração fora dos favoritos". As ampliações do item 3.3 continuam
+condicionadas à evidência; não se declara lucro superior nesta entrega.
 
 Abrir uma vaga de teste entre os 40 alvos comuns para skins que o ranking atual deixa de fora. Antes de ativar, medir e limitar o custo físico dessas consultas e preservar o acompanhamento de oportunidades ativas. Só depois ampliar o teste para os cortes anteriores do catálogo, seeds, floats e modelos mais sofisticados.
 

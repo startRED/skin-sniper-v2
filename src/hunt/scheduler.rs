@@ -70,7 +70,7 @@ impl Mode {
 }
 
 /// Uma consulta recorrente: `QueryListingsForItem` do código, com desgaste e/ou faixa de seed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Task {
     /// `d:<market_hash_name>` (mais barato) ou `r:<código>`
     /// (raro: uma tarefa por skin, todos os desgastes).
@@ -173,6 +173,14 @@ struct Entry {
     cursor: usize,
 }
 
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct Progress {
+    credit: f64,
+    explore: f64,
+    turn: usize,
+    cursors: HashMap<String, usize>,
+}
+
 #[derive(Default)]
 pub struct Queue {
     entries: HashMap<String, Entry>,
@@ -187,6 +195,10 @@ pub struct Queue {
     pub life: f64,
     pub policy: Policy,
     pub shadow: (u64, u64),
+    pub external: Option<String>,
+    pub external_ready: bool,
+    pub last_exploring: bool,
+    cursors: HashMap<String, usize>,
 }
 
 impl Queue {
@@ -215,8 +227,8 @@ impl Queue {
             match self.entries.get_mut(&t.id) {
                 Some(e) => e.task = t,
                 None => {
-                    self.entries
-                        .insert(t.id.clone(), Entry { task: t, cursor: 0 });
+                    let cursor = self.cursors.get(&t.id).copied().unwrap_or(0);
+                    self.entries.insert(t.id.clone(), Entry { task: t, cursor });
                 }
             }
         }
@@ -312,7 +324,9 @@ impl Queue {
 
     /// `next` só entre os alvos que `keep` aceita (sem os raros enquanto a leitura de anúncios está barrada).
     pub fn next_matching(&mut self, now: i64, keep: impl Fn(&Task) -> bool) -> Option<Task> {
-        if !self.entries.values().any(|e| keep(&e.task)) {
+        let external_id = self.external.clone();
+        let eligible = |t: &Task| keep(t) && external_id.as_ref() != Some(&t.id);
+        if !self.entries.values().any(|e| eligible(&e.task)) {
             return None;
         }
         for id in self.entries.keys() {
@@ -337,6 +351,7 @@ impl Queue {
         };
         self.explore += EXPLORE_SHARE;
         let exploring = self.explore >= 1.0;
+        self.last_exploring = exploring;
         let mut shadow = None;
         let pick = if exploring {
             // O slot de exploração gira entre os modos presentes (piso por modo, qualquer que seja o número de
@@ -344,43 +359,55 @@ impl Queue {
             let mut modes: Vec<Mode> = self
                 .entries
                 .values()
-                .filter(|e| keep(&e.task))
+                .filter(|e| eligible(&e.task))
                 .map(|e| e.task.mode())
                 .collect();
             modes.sort();
             modes.dedup();
             let mode = modes[self.explore_turn % modes.len()];
             self.explore_turn = self.explore_turn.wrapping_add(1);
-            self.entries
-                .values()
-                .filter(|e| keep(&e.task) && e.task.mode() == mode)
-                .min_by(|a, b| {
-                    n_of(self, &a.task.id)
-                        .total_cmp(&n_of(self, &b.task.id))
-                        .then_with(|| tie(a, b))
-                })
+            let external = self
+                .external
+                .as_ref()
+                .and_then(|id| self.entries.get(id))
+                .filter(|e| {
+                    self.external_ready
+                        && keep(&e.task)
+                        && mode == Mode::Cheap
+                        && (self.explore_turn / modes.len()).is_multiple_of(2)
+                });
+            external.or_else(|| {
+                self.entries
+                    .values()
+                    .filter(|e| eligible(&e.task) && e.task.mode() == mode)
+                    .min_by(|a, b| {
+                        n_of(self, &a.task.id)
+                            .total_cmp(&n_of(self, &b.task.id))
+                            .then_with(|| tie(a, b))
+                    })
+            })
         } else {
             let ucb = |e: &Entry| self.index(&e.task.id, now, total_n, scale);
             let by_ucb = self
                 .entries
                 .values()
-                .filter(|e| keep(&e.task))
+                .filter(|e| eligible(&e.task))
                 .min_by(|a, b| ucb(b).total_cmp(&ucb(a)).then_with(|| tie(a, b)));
             if self.policy == Policy::Ucb {
                 by_ucb
             } else {
                 // colheita: maior estoque acumulado; empate (ex.: ninguém rendeu) segue o UCB1
                 let hv = |e: &Entry| self.harvest_value(&e.task.id, now);
-                let by_harvest = self
-                    .entries
-                    .values()
-                    .filter(|e| keep(&e.task))
-                    .min_by(|a, b| {
-                        hv(b)
-                            .total_cmp(&hv(a))
-                            .then_with(|| ucb(b).total_cmp(&ucb(a)))
-                            .then_with(|| tie(a, b))
-                    });
+                let by_harvest =
+                    self.entries
+                        .values()
+                        .filter(|e| eligible(&e.task))
+                        .min_by(|a, b| {
+                            hv(b)
+                                .total_cmp(&hv(a))
+                                .then_with(|| ucb(b).total_cmp(&ucb(a)))
+                                .then_with(|| tie(a, b))
+                        });
                 let same = by_ucb.map(|e| &e.task.id) == by_harvest.map(|e| &e.task.id);
                 shadow = Some(same);
                 if self.policy == Policy::Harvest {
@@ -410,7 +437,12 @@ impl Queue {
         self.entries.get(&id).map(|e| e.task.clone())
     }
 
-    fn undo_unsent(&mut self, id: &str, now: i64, credit: (f64, f64, usize)) {
+    fn undo_unsent(
+        &mut self,
+        id: &str,
+        now: i64,
+        credit: (f64, f64, usize, HashMap<String, usize>),
+    ) {
         if let Some(s) = self.stats.get_mut(id) {
             s.n = (s.n - 1.0).max(0.0);
             s.queries = s.queries.saturating_sub(1);
@@ -419,7 +451,10 @@ impl Queue {
             }
             self.dirty.insert(id.to_string());
         }
-        (self.credit, self.explore, self.explore_turn) = credit;
+        (self.credit, self.explore, self.explore_turn, self.cursors) = credit;
+        for (id, e) in &mut self.entries {
+            e.cursor = self.cursors.get(id).copied().unwrap_or(0);
+        }
     }
 
     /// Resultado da consulta: lucro esperado das oportunidades novas (centavos) e o crédito de proximidade
@@ -484,6 +519,7 @@ impl Queue {
         };
         let range = task.seeds[e.cursor % task.seeds.len()];
         e.cursor = e.cursor.wrapping_add(1);
+        self.cursors.insert(task.id.clone(), e.cursor);
         Task {
             seeds: vec![range],
             ..task
@@ -543,6 +579,10 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     // professor: só o banco; roda também sem saldo e com a Steam em pausa
     super::teacher::maybe_step(h).await;
     super::harvest::maybe_step(h).await;
+    if let Err(e) = super::explore::refresh(h).await {
+        tracing::warn!("exploração aguardando registro confiável: {e:#}");
+        h.lock().queue.external_ready = false;
+    }
     if h.saldo() <= 0 {
         h.set_message(Some(NO_SALDO.into()));
         return Tick::Idle;
@@ -570,13 +610,25 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     if let Err(e) = catalog::maybe_reselect(h).await {
         tracing::warn!("seleção falhou: {e:#}");
     }
-    let (may_discover, empty) = {
+    let (may_discover, empty, urgent) = {
         let s = h.lock();
-        (s.queue.may_discover(), s.queue.len() == 0)
+        let urgent = s.active.values().any(|a| {
+            s.queue
+                .stats
+                .get(&a.task)
+                .is_none_or(|st| h.now() - st.last_at >= 600)
+        });
+        (s.queue.may_discover(), s.queue.len() == 0, urgent)
     };
     // a descoberta lê busca e histórico (os dois baldes)
-    if (may_discover || empty) && !listings_blocked && !book_blocked {
-        match catalog::step(h).await {
+    if (may_discover || empty) && !listings_blocked && !book_blocked && !urgent {
+        match crate::research::scope(
+            h.db.clone(),
+            decision(h, "descoberta", "catalogo"),
+            catalog::step(h),
+        )
+        .await
+        {
             Ok(true) => {
                 h.lock().queue.spend_discovery();
                 set_idle_message(h);
@@ -589,15 +641,45 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             }
         }
     }
-    if !book_blocked && super::orders::maybe_step(h).await {
+    if !book_blocked
+        && !urgent
+        && crate::research::scope(h.db.clone(), decision(h, "normal", "livro"), async {
+            Ok(super::orders::maybe_step(h).await)
+        })
+        .await
+        .unwrap_or(false)
+    {
         return Tick::Book;
     }
     // A seleção é provisória até uma requisição sair; a falha continua contando se a Steam recebeu a tentativa.
     let (next, credit) = {
         let now = h.now();
         let mut s = h.lock();
-        let credit = (s.queue.credit, s.queue.explore, s.queue.explore_turn);
-        if listings_blocked {
+        let credit = (
+            s.queue.credit,
+            s.queue.explore,
+            s.queue.explore_turn,
+            s.queue.cursors.clone(),
+        );
+        // Conferir ativo atrasado tem preferência sobre qualquer teste; usa a mesma vaga do laço.
+        let overdue = s
+            .queue
+            .tasks()
+            .into_iter()
+            .filter(|t| !listings_blocked || !t.rare())
+            .filter(|t| s.active.values().any(|a| a.task == t.id))
+            .filter(|t| {
+                s.queue
+                    .stats
+                    .get(&t.id)
+                    .is_none_or(|st| h.now() - st.last_at >= 600)
+            })
+            .min_by_key(|t| s.queue.stats.get(&t.id).map_or(0, |st| st.last_at));
+        if let Some(task) = overdue {
+            s.queue.record_scan(&task.id, now);
+            s.queue.last_exploring = false;
+            (Some(task), credit)
+        } else if listings_blocked {
             (s.queue.next_matching(now, |t| !t.rare()), credit)
         } else {
             (s.queue.next(now), credit)
@@ -607,19 +689,71 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         set_idle_message(h);
         return Tick::Idle;
     };
-    let sent = h.steam.sent();
-    match run_task(h, &task).await {
+    let source = {
+        let s = h.lock();
+        if s.active.values().any(|a| a.task == task.id) {
+            "acompanhamento"
+        } else if s.queue.external.as_ref() == Some(&task.id) {
+            "exploracao_externa"
+        } else if s.queue.last_exploring {
+            "exploracao_interna"
+        } else {
+            "normal"
+        }
+    };
+    let tracked = crate::research::scope_tracked(
+        h.db.clone(),
+        decision(h, source, &task.id),
+        run_task(h, &task),
+    )
+    .await;
+    let (result, attempts) = match tracked {
+        Ok((result, context)) => match crate::research::attempts(h.db.clone(), context.id).await {
+            Ok(n) => (result, n),
+            Err(e) => {
+                tracing::warn!("contagem de consultas indisponível: {e:#}");
+                (result, 1)
+            }
+        },
+        Err(e) => (Err(e), 0),
+    };
+    match result {
         Ok(()) => {
             set_idle_message(h);
+        }
+        Err(e)
+            if e.downcast_ref::<SteamError>()
+                .is_some_and(|e| matches!(e, SteamError::BudgetExhausted)) =>
+        {
+            h.lock().queue.external_ready = false;
         }
         Err(e) => backoff(h, &e).await,
     }
     // nada saiu para a Steam (ex.: anúncios barrados e o livro sem teto): o laço descansa em vez de girar em falso
-    if h.steam.sent() == sent {
+    if attempts == 0 {
         h.lock().queue.undo_unsent(&task.id, h.now(), credit);
         return Tick::Idle;
     }
+    if source == "exploracao_externa"
+        && let Err(e) = super::explore::visited(h, &task, attempts).await
+    {
+        tracing::warn!("visita exploratória não gravada: {e:#}");
+    }
     Tick::Watched(task.id)
+}
+
+fn decision(h: &Hunt, source: &str, target: &str) -> crate::research::Decision {
+    let s = h.lock();
+    let (policy, block_id) = s.trial.as_ref().map_or(("baseline".to_owned(), None), |t| {
+        (t.phase.clone(), t.block_id)
+    });
+    crate::research::Decision {
+        source: source.to_owned(),
+        policy,
+        target: target.to_owned(),
+        scale: s.closeness_scale,
+        block_id,
+    }
 }
 
 fn set_idle_message(h: &Hunt) {
@@ -640,6 +774,11 @@ fn same_query(a: &Task, b: &Task) -> bool {
     a.code == b.code && a.wear == b.wear && a.filters() == b.filters()
 }
 
+fn can_cover(task: &Task, external: &Option<String>) -> bool {
+    external.as_ref() != Some(&task.id)
+        || crate::research::current().is_some_and(|c| c.source == "exploracao_externa")
+}
+
 fn affordable(price: i64, max: i64) -> bool {
     i128::from(price) * 100 <= i128::from(max) * (100 + i128::from(SCAN_TOLERANCE_PERCENT))
 }
@@ -652,7 +791,11 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
     let (tasks, ratio, active) = {
         let s = h.lock();
         (
-            s.queue.tasks(),
+            s.queue
+                .tasks()
+                .into_iter()
+                .filter(|t| can_cover(t, &s.queue.external))
+                .collect::<Vec<_>>(),
             s.ratio.map(|r| r.0),
             s.active
                 .values()
@@ -819,6 +962,9 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             if targets.iter().any(|t| t.id == other.id) {
                 continue;
             }
+            if !can_cover(&other, &s.queue.external) {
+                continue;
+            }
             let focused = if !other.seeds.is_empty() {
                 let Some(entry) = s.queue.entries.get(&other.id) else {
                     continue;
@@ -935,10 +1081,17 @@ async fn backoff(h: &Hunt, e: &anyhow::Error) {
 
 /// Grava no banco as notas alteradas.
 pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
-    let rows = h.lock().queue.take_dirty();
-    if rows.is_empty() {
-        return Ok(());
-    }
+    let (rows, progress) = {
+        let mut s = h.lock();
+        let q = &mut s.queue;
+        let progress = serde_json::to_string(&Progress {
+            credit: q.credit,
+            explore: q.explore,
+            turn: q.explore_turn,
+            cursors: q.cursors.clone(),
+        })?;
+        (q.take_dirty(), progress)
+    };
     h.db.call(move |c| {
         let tx = c.transaction()?;
         for (id, s) in rows {
@@ -962,6 +1115,7 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
                 ],
             )?;
         }
+        tx.execute("INSERT INTO settings(key,value) VALUES ('queue_progress',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[progress])?;
         tx.commit()
     })
     .await
@@ -998,6 +1152,15 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
         })
         .await?;
     h.lock().queue.load_stats(rows);
+    if let Some(json) = catalog::get_setting(&h.db, "queue_progress").await?
+        && let Ok(progress) = serde_json::from_str::<Progress>(&json)
+    {
+        let mut s = h.lock();
+        s.queue.credit = progress.credit.clamp(0.0, CREDIT_CAP);
+        s.queue.explore = progress.explore.clamp(0.0, 1.0);
+        s.queue.explore_turn = progress.turn;
+        s.queue.cursors = progress.cursors;
+    }
     Ok(())
 }
 
@@ -1027,6 +1190,76 @@ pub async fn run(h: Arc<Hunt>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_candidate_cannot_win_normal_slots_or_run_without_credit() {
+        let mut q = Queue::default();
+        q.set_tasks(vec![task("normal", 1.0), task("outside", 1000.0)]);
+        q.external = Some("outside".into());
+        for now in 0..200 {
+            assert_eq!(q.next(now).unwrap().id, "normal");
+        }
+        q.external_ready = true;
+        let mut tests = 0;
+        for now in 200..1200 {
+            if q.next(now).unwrap().id == "outside" {
+                assert!(q.last_exploring);
+                tests += 1;
+            }
+        }
+        assert!(tests > 0 && tests <= 125);
+    }
+
+    #[tokio::test]
+    async fn normal_group_cannot_pull_in_an_external_candidate() {
+        let (db, _dir) = crate::db::temp_db();
+        let external = Some("outside".into());
+        let d = crate::research::Decision {
+            source: "normal".into(),
+            policy: "control".into(),
+            target: "normal".into(),
+            scale: 0.03,
+            block_id: Some(1),
+        };
+        crate::research::scope(db.clone(), d.clone(), async {
+            assert!(!can_cover(&task("outside", 1.0), &external));
+            assert!(can_cover(&task("normal", 1.0), &external));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut d = d;
+        d.source = "exploracao_externa".into();
+        crate::research::scope(db, d, async {
+            assert!(can_cover(&task("outside", 1.0), &external));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn seed_cursor_survives_removal_and_persisted_progress() {
+        let mut t = task("r:seed", 1.0);
+        t.seeds = vec![(1, 1), (9, 9)];
+        let mut q = Queue::default();
+        q.set_tasks(vec![t.clone()]);
+        assert_eq!(q.focus(t.clone()).seeds, vec![(1, 1)]);
+        let json = serde_json::to_string(&Progress {
+            cursors: q.cursors.clone(),
+            ..Progress::default()
+        })
+        .unwrap();
+        q.set_tasks(vec![]);
+        q.set_tasks(vec![t.clone()]);
+        assert_eq!(q.focus(t.clone()).seeds, vec![(9, 9)]);
+        let mut restart = Queue {
+            cursors: serde_json::from_str::<Progress>(&json).unwrap().cursors,
+            ..Queue::default()
+        };
+        restart.set_tasks(vec![t.clone()]);
+        assert_eq!(restart.focus(t).seeds, vec![(9, 9)]);
+    }
 
     #[test]
     fn search_threshold_includes_tolerance_and_groups_variants() {
