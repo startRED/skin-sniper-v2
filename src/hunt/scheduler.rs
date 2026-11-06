@@ -38,6 +38,10 @@ const HALF_LIFE: f64 = 24.0 * 3600.0;
 const DRY_HALF_LIFE: f64 = 4.0 * 3600.0;
 /// Até aqui o alvo ainda é "novo" para o painel.
 const NEW_QUERIES: u64 = 10;
+/// Peso, em consultas, da referência na média encolhida de um alvo: com poucas consultas ele fica perto dela.
+const BOOST_PRIOR_QUERIES: f64 = 20.0;
+/// Limites do fator de seleção: quem rende pouco ainda pode voltar, quem rende muito não engole a vaga dos outros.
+const BOOST_RANGE: (f64, f64) = (0.25, 4.0);
 /// Acima disto sem recompensa o painel diz "sem achar nada há N h".
 const DRY_REASON_SECS: i64 = 3 * 3600;
 /// Piso (centavos/consulta) da escala do bônus, para a escala não zerar quando nada rendeu ainda.
@@ -212,6 +216,44 @@ impl Queue {
     /// Carrega as notas guardadas no banco (arranque).
     pub fn load_stats(&mut self, rows: Vec<(String, Stat)>) {
         self.stats.extend(rows);
+    }
+
+    /// Fator aprendido de cada alvo `d:` para a seleção do catálogo: quanto a recompensa por consulta dele (com
+    /// decaimento até `now`, encolhida para a referência quando há poucas consultas) passa da mediana dos alvos
+    /// já testados. Sem referência (ninguém rendeu ainda) devolve vazio, e a seleção segue só a nota-base.
+    pub fn boosts(&self, now: i64) -> HashMap<String, f64> {
+        // (id, consultas, n, r) já decaídos, sem mexer nas notas
+        let arms: Vec<(&str, u64, f64, f64)> = self
+            .stats
+            .iter()
+            .filter(|(id, s)| id.starts_with("d:") && s.queries > 0)
+            .map(|(id, s)| {
+                let f = 0.5_f64.powf((now - s.updated_at).max(0) as f64 / HALF_LIFE);
+                (id.as_str(), s.queries, s.n * f, s.r * f)
+            })
+            .collect();
+        let mut rates: Vec<f64> = arms
+            .iter()
+            .filter(|a| a.1 >= NEW_QUERIES && a.2 > 0.0)
+            .map(|a| a.3 / a.2)
+            .collect();
+        rates.sort_by(f64::total_cmp);
+        let mid = rates.len() / 2;
+        let reference = match rates.len() {
+            0 => 0.0,
+            n if n % 2 == 0 => (rates[mid - 1] + rates[mid]) / 2.0,
+            _ => rates[mid],
+        };
+        if reference <= 0.0 {
+            return HashMap::new();
+        }
+        arms.into_iter()
+            .map(|(id, _, n, r)| {
+                let shrunk = (r + BOOST_PRIOR_QUERIES * reference) / (n + BOOST_PRIOR_QUERIES);
+                let factor = (shrunk / reference).clamp(BOOST_RANGE.0, BOOST_RANGE.1);
+                (id.to_string(), factor)
+            })
+            .collect()
     }
 
     /// Notas alteradas desde a última vez, para gravar.
@@ -907,6 +949,42 @@ mod tests {
         let (a, why) = q.describe("a", 40);
         assert!(a > 0.0 && why.starts_with("quase deu lucro"), "{a} {why}");
         assert!(q.describe("b", 40).0 == 0.0);
+    }
+
+    #[test]
+    fn boosts_reward_yield_and_fade_back_to_one() {
+        let stat = |n: f64, r: f64, queries: u64| Stat {
+            n,
+            r,
+            queries,
+            ..Stat::default()
+        };
+        let mut q = Queue::default();
+        q.load_stats(vec![
+            ("d:good".into(), stat(100.0, 1000.0, 100)),
+            ("d:mid1".into(), stat(100.0, 100.0, 100)),
+            ("d:mid2".into(), stat(100.0, 100.0, 100)),
+            ("d:bad".into(), stat(100.0, 50.0, 100)),
+            ("d:new".into(), stat(5.0, 0.0, 5)), // menos de 10 consultas: fora da referência
+            ("r:rare".into(), stat(100.0, 5000.0, 100)), // só `d:` entra
+        ]);
+        // referência = mediana de r/n de good, mid1, mid2 e bad = (1 + 1) / 2 = 1
+        let b = q.boosts(0);
+        assert_eq!(b["d:good"], 4.0); // teto
+        assert!(b["d:bad"] > 0.25 && b["d:bad"] < 1.0, "{b:?}"); // 70 / 120 ≈ 0,58
+        assert!((b["d:mid1"] - 1.0).abs() < 1e-9, "{b:?}");
+        assert!(!b.contains_key("r:rare"));
+        // 10 meias-vidas sem consulta: tudo volta para perto de 1
+        let late = q.boosts(10 * 86_400);
+        assert!((late["d:good"] - 1.0).abs() < 0.2, "{late:?}");
+        assert!((late["d:bad"] - 1.0).abs() < 0.2, "{late:?}");
+        // notas antigas sem recompensa (instalação sobre `arm_stats` velho): nenhuma referência
+        let mut empty = Queue::default();
+        empty.load_stats(vec![
+            ("d:a".into(), stat(100.0, 0.0, 100)),
+            ("d:b".into(), stat(50.0, 0.0, 50)),
+        ]);
+        assert!(empty.boosts(0).is_empty());
     }
 
     #[test]
