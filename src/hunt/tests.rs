@@ -24,6 +24,7 @@ use std::time::Duration;
 
 const NOW: i64 = 1_793_754_060; // um minuto depois do último ponto da captura de histórico
 const MOON: &str = "Glock-18 | Moonrise (Field-Tested)";
+const ST_MOON: &str = "StatTrak™ Glock-18 | Moonrise (Field-Tested)";
 const ID_CHEAP: &str = "6624491228774232473";
 const ID_T1: &str = "8709556594461768769";
 
@@ -95,6 +96,7 @@ struct Bodies {
     book_queries: AtomicUsize,
     /// A leitura de anúncios responde 429 (bloqueio de horas da Steam).
     listings_429: AtomicBool,
+    legacy_queries: AtomicUsize,
 }
 
 async fn serve() -> (String, Arc<Bodies>) {
@@ -107,6 +109,7 @@ async fn serve() -> (String, Arc<Bodies>) {
         book: Mutex::new(fixture("steam_orderbook_negev_2026-11.json")),
         book_queries: AtomicUsize::new(0),
         listings_429: AtomicBool::new(false),
+        legacy_queries: AtomicUsize::new(0),
     });
     async fn actions(
         AxState(b): AxState<Arc<Bodies>>,
@@ -169,6 +172,45 @@ async fn serve() -> (String, Arc<Bodies>) {
             get(|AxState(b): AxState<Arc<Bodies>>| async move {
                 Json(b.search.lock().unwrap().clone())
             }),
+        )
+        .route(
+            "/market/listings/730/{name}/render/",
+            get(
+                |AxState(b): AxState<Arc<Bodies>>, Path(name): Path<String>| async move {
+                    use axum::response::IntoResponse;
+                    b.legacy_queries.fetch_add(1, Ordering::Relaxed);
+                    if name == MOON || name == ST_MOON {
+                        let mut data = fixture("steam_legacy_render_moonrise_2026-11.json");
+                        if name == ST_MOON {
+                            for asset in data["assets"]["730"]["2"]
+                                .as_object_mut()
+                                .unwrap()
+                                .values_mut()
+                            {
+                                asset["market_hash_name"] = json!(ST_MOON);
+                            }
+                        }
+                        let rows = std::mem::take(data["listinginfo"].as_object_mut().unwrap());
+                        let mut unique = serde_json::Map::new();
+                        for (id, mut row) in rows {
+                            let id = format!(
+                                "{}{id}",
+                                if name == MOON {
+                                    "legacy-"
+                                } else {
+                                    "legacy-st-"
+                                }
+                            );
+                            row["listingid"] = json!(id);
+                            unique.insert(id, row);
+                        }
+                        data["listinginfo"] = Value::Object(unique);
+                        Json(data).into_response()
+                    } else {
+                        axum::http::StatusCode::NOT_FOUND.into_response()
+                    }
+                },
+            ),
         )
         .route(
             "/history/{name}/sales",
@@ -611,11 +653,16 @@ async fn book_skips_listings_when_the_lowest_ask_is_above_the_ceiling() {
     let task = lone_moonrise(&h, &mut rx).await;
     let listings = || bodies.listing_queries.load(Ordering::Relaxed);
     let books = || bodies.book_queries.load(Ordering::Relaxed);
+    let legacy = || bodies.legacy_queries.load(Ordering::Relaxed);
     let (l0, b0) = (listings(), books());
 
     set_lowest_ask(&bodies, 20000); // R$ 200: nenhum anúncio cabe no teto
     scheduler::run_task(&h, &task).await.unwrap();
-    assert_eq!((listings(), books()), (l0, b0 + 1), "só o livro");
+    assert_eq!(
+        (listings(), books(), legacy()),
+        (l0, b0 + 1, 0),
+        "só o livro"
+    );
     assert_eq!(h.lock().cycle.saved_listings, 1);
     assert_eq!(
         h.lock().books[MOON].1.as_ref().unwrap().min_sell_cents,
@@ -635,7 +682,7 @@ async fn book_skips_listings_when_the_lowest_ask_is_above_the_ceiling() {
         .unwrap()
         .min_sell_cents = Some(200);
     scheduler::run_task(&h, &task).await.unwrap();
-    assert_eq!((listings(), books()), (l0 + 1, b0 + 2));
+    assert_eq!((listings(), books(), legacy()), (l0 + 1, b0 + 2, 0));
 }
 
 #[tokio::test]
@@ -643,30 +690,47 @@ async fn blocked_listings_keep_the_book_lane_without_waiting() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
     let (h, mut rx) = hunt_against(&base, db);
-    let task = lone_moonrise(&h, &mut rx).await;
+    let mut task = lone_moonrise(&h, &mut rx).await;
+    task.code = "G180420B6053004".into(); // identidade que o fixture render realmente valida
+    h.lock().queue.set_tasks(vec![task.clone()]);
     let listings = || bodies.listing_queries.load(Ordering::Relaxed);
     let books = || bodies.book_queries.load(Ordering::Relaxed);
+    let legacy = || bodies.legacy_queries.load(Ordering::Relaxed);
 
     // a leitura de anúncios leva 429: pausa só esse balde
     bodies.listings_429.store(true, Ordering::Relaxed);
     set_lowest_ask(&bodies, 200);
-    assert!(scheduler::run_task(&h, &task).await.is_err());
+    let (actions0, legacy_before) = (listings(), legacy());
+    scheduler::run_task(&h, &task).await.unwrap();
     assert!(h.steam.blocked(crate::steam::client::Endpoint::Listings));
+    assert_eq!((listings(), legacy()), (actions0 + 1, legacy_before + 1));
+    let recovered = h.state().hunt;
+    assert!(
+        recovered.paused_until.is_none(),
+        "o render validado mantém a caça ativa"
+    );
+    assert!(h.steam.blocked(crate::steam::client::Endpoint::Listings));
+    assert!(
+        recovered.last_ok_at.is_some(),
+        "render validado conta como resposta boa"
+    );
     let (l0, b0) = (listings(), books());
+    let legacy0 = legacy();
 
-    // o livro segue; preço bom não tenta os anúncios barrados nem segura o passo
+    // o livro segue e o fallback barato continua aprendendo sem esperar a pausa
     let quick = Duration::from_secs(5);
     tokio::time::timeout(quick, scheduler::run_task(&h, &task))
         .await
         .expect("não espera a pausa dos anúncios")
         .unwrap();
-    assert_eq!((listings(), books()), (l0, b0 + 1));
+    assert_eq!((listings(), books(), legacy()), (l0, b0 + 1, legacy0 + 1));
+    assert_eq!(listings(), l0, "não repete /actions durante a pausa");
     set_lowest_ask(&bodies, 20000);
     tokio::time::timeout(quick, scheduler::run_task(&h, &task))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((listings(), books()), (l0, b0 + 2));
+    assert_eq!((listings(), books(), legacy()), (l0, b0 + 2, legacy0 + 1));
 
     // e a agenda deixa os raros (que só os anúncios servem) de fora enquanto dura o bloqueio
     let mut rare = task.clone();
@@ -678,6 +742,184 @@ async fn blocked_listings_keep_the_book_lane_without_waiting() {
         let t = s.queue.next_matching(NOW, |t| !t.rare()).unwrap();
         assert_eq!(t.id, task.id);
     }
+}
+
+#[tokio::test]
+async fn cheap_legacy_fallback_learns_during_listings_pause() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    let mut task = lone_moonrise(&h, &mut rx).await;
+    task.code = "G180420B6053004".into(); // identidade que o fixture render realmente valida
+    h.lock().queue.set_tasks(vec![task.clone()]);
+    bodies.listings_429.store(true, Ordering::Relaxed);
+    set_lowest_ask(&bodies, 200);
+    let actions0 = bodies.listing_queries.load(Ordering::Relaxed);
+    let legacy0 = bodies.legacy_queries.load(Ordering::Relaxed);
+
+    let before: (i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT count(*) FROM listings_seen), (SELECT count(*) FROM evaluations)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    scheduler::run_task(&h, &task).await.unwrap();
+    let after: (i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT count(*) FROM listings_seen), (SELECT count(*) FROM evaluations)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), actions0 + 1);
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), legacy0 + 1);
+    assert!(
+        after.0 > before.0,
+        "detect::process registrou anúncios vistos"
+    );
+    assert!(after.1 > before.1, "detect::process registrou avaliações");
+    let state = h.state().hunt;
+    assert!(
+        state.paused_until.is_none(),
+        "o render validado mantém a caça ativa"
+    );
+    assert!(h.steam.blocked(crate::steam::client::Endpoint::Listings));
+    assert!(
+        state.last_ok_at.is_some(),
+        "render validado recupera last_ok"
+    );
+
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), actions0 + 1);
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), legacy0 + 2);
+}
+
+#[tokio::test]
+async fn legacy_queries_each_name_without_marking_other_version_gone() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let found = run_until_two(&h, &mut rx).await;
+    let mut task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    task.code = "G180420B6053004".into();
+    let mut other = task.clone();
+    other.name = ST_MOON.into();
+    other.id = format!("d:{ST_MOON}");
+    let mut opp = found[0].clone();
+    opp.id = "legacy-st-5074569024067185966".into();
+    opp.name = ST_MOON.into();
+    opp.price_cents = 530;
+    {
+        let mut s = h.lock();
+        s.active.clear();
+        s.active.insert(
+            opp.id.clone(),
+            Active {
+                opp: opp.clone(),
+                task: other.id.clone(),
+            },
+        );
+        s.queue.set_tasks(vec![task.clone(), other.clone()]);
+    }
+    bodies.listings_429.store(true, Ordering::Relaxed);
+    let before = bodies.legacy_queries.load(Ordering::Relaxed);
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), before + 2);
+    assert!(
+        h.lock().active.contains_key(&opp.id),
+        "a página de outra versão não pode removê-la"
+    );
+    assert!(
+        h.lock().floors.contains_key(&other.id),
+        "a segunda versão também foi consultada"
+    );
+}
+
+#[tokio::test]
+async fn rare_listing_does_not_use_name_only_legacy_fallback() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let mut rare = lone_moonrise(&h, &mut rx).await;
+    rare.code = "G180420B6053004".into();
+    rare.id = "r:moonrise-seed".into();
+    rare.seeds = vec![(59, 59)];
+    let (actions0, legacy0) = (
+        bodies.listing_queries.load(Ordering::Relaxed),
+        bodies.legacy_queries.load(Ordering::Relaxed),
+    );
+    bodies.listings_429.store(true, Ordering::Relaxed);
+
+    assert!(scheduler::run_task(&h, &rare).await.is_err());
+    assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), actions0 + 1);
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), legacy0);
+}
+
+#[tokio::test]
+async fn unsent_watch_does_not_count_as_a_learning_sample() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let tasks: Vec<Task> = (0..10)
+        .map(|i| Task {
+            id: format!("d:missing-{i}"),
+            name: format!("missing item {i}"),
+            code: "invalid".into(),
+            wear: Some(2),
+            seeds: vec![],
+            float: None,
+            score: 1.0,
+        })
+        .collect();
+    let before: std::collections::HashMap<String, (f64, u64)> = {
+        let mut s = h.lock();
+        s.queue.set_tasks(tasks);
+        for _ in 0..3 {
+            s.queue.next(NOW).unwrap(); // deixa exatamente 0,75 de crédito de descoberta
+        }
+        assert!(!s.queue.may_discover());
+        s.queue
+            .take_dirty()
+            .into_iter()
+            .map(|(id, stat)| (id, (stat.n, stat.queries)))
+            .collect()
+    };
+
+    let sent = h.steam.sent();
+    assert_eq!(tick(&h).await, Tick::Idle);
+    assert_eq!(
+        h.steam.sent(),
+        sent,
+        "código inválido falha antes de qualquer requisição"
+    );
+    assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(bodies.book_queries.load(Ordering::Relaxed), 0);
+    let changed = h.lock().queue.take_dirty();
+    assert_eq!(changed.len(), 1);
+    let (id, after) = &changed[0];
+    assert_eq!(after.queries, before.get(id).map_or(0, |s| s.1));
+    assert_eq!(after.n, before.get(id).map_or(0.0, |s| s.0));
+    assert!(
+        !h.lock().queue.may_discover(),
+        "o alvo não ganhou crédito sem amostra"
+    );
 }
 
 #[tokio::test]

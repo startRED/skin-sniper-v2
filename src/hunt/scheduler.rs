@@ -356,6 +356,18 @@ impl Queue {
         self.entries.get(&id).map(|e| e.task.clone())
     }
 
+    fn undo_unsent(&mut self, id: &str, now: i64, credit: (f64, f64, usize)) {
+        if let Some(s) = self.stats.get_mut(id) {
+            s.n = (s.n - 1.0).max(0.0);
+            s.queries = s.queries.saturating_sub(1);
+            if s.queries == 0 {
+                s.first_at = now;
+            }
+            self.dirty.insert(id.to_string());
+        }
+        (self.credit, self.explore, self.explore_turn) = credit;
+    }
+
     /// Resultado da consulta: lucro esperado das oportunidades novas (centavos) e o crédito de proximidade
     /// dos anúncios novos que não passaram (`learn::closeness_credit`).
     pub fn reward(&mut self, id: &str, now: i64, found: Found) {
@@ -488,7 +500,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         set_idle_message(h);
         return Tick::Idle;
     }
-    if !listings_blocked && let Err(e) = catalog::maybe_reselect(h).await {
+    if let Err(e) = catalog::maybe_reselect(h).await {
         tracing::warn!("seleção falhou: {e:#}");
     }
     let (may_discover, empty) = {
@@ -513,15 +525,15 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     if !book_blocked && super::orders::maybe_step(h).await {
         return Tick::Book;
     }
-    // `next` já conta a consulta: uma falha não deixa o mesmo alvo ocupando a frente.
-    // shortcut: um alvo pulado sem consulta (anúncios barrados, sem teto) também conta; some quando o bloqueio passa
-    let next = {
+    // A seleção é provisória até uma requisição sair; a falha continua contando se a Steam recebeu a tentativa.
+    let (next, credit) = {
         let now = h.now();
         let mut s = h.lock();
+        let credit = (s.queue.credit, s.queue.explore, s.queue.explore_turn);
         if listings_blocked {
-            s.queue.next_matching(now, |t| !t.rare())
+            (s.queue.next_matching(now, |t| !t.rare()), credit)
         } else {
-            s.queue.next(now)
+            (s.queue.next(now), credit)
         }
     };
     let Some(task) = next else {
@@ -537,6 +549,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     }
     // nada saiu para a Steam (ex.: anúncios barrados e o livro sem teto): o laço descansa em vez de girar em falso
     if h.steam.sent() == sent {
+        h.lock().queue.undo_unsent(&task.id, h.now(), credit);
         return Tick::Idle;
     }
     Tick::Watched(task.id)
@@ -717,7 +730,7 @@ async fn book_then_listings(
             }
         }
     }
-    if h.steam.blocked(Endpoint::Listings) {
+    if h.steam.blocked(Endpoint::Listings) && h.steam.blocked(Endpoint::Legacy) {
         if let Some((p, max)) = lead {
             tracing::info!(
                 preco = p,
@@ -756,11 +769,34 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             }
         }
     }
-    let page =
-        listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &task.filters()).await?;
-    for t in &targets {
+    let (page, named_only) = if task.rare() {
+        (
+            listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &task.filters())
+                .await?,
+            false,
+        )
+    } else {
+        listings::query_listings_named(&h.steam, &task.name, &task.code, 0, task.wear).await?
+    };
+    for t in targets
+        .iter()
+        .filter(|t| !named_only || t.name == task.name)
+    {
         let out = detect::process(h, t, &page).await?;
         h.lock().queue.reward(&t.id, h.now(), out.rewarded);
+    }
+    if named_only {
+        let mut seen = HashSet::from([task.name.as_str()]);
+        for t in &targets {
+            if seen.insert(t.name.as_str()) {
+                let (page, _) =
+                    listings::query_listings_named(&h.steam, &t.name, &t.code, 0, t.wear).await?;
+                for target in targets.iter().filter(|other| other.name == t.name) {
+                    let out = detect::process(h, target, &page).await?;
+                    h.lock().queue.reward(&target.id, h.now(), out.rewarded);
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -15,14 +15,29 @@ pub struct PricePoint {
 
 /// Histórico da skin comum do nome (logado quando há cookie; funciona sem). Mede o preço da skin, nunca o prêmio de um exemplar raro.
 pub async fn fetch_history(c: &SteamClient, market_hash_name: &str) -> Result<Vec<PricePoint>> {
-    let data = c
+    let result = c
         .action(
             Endpoint::History,
             "QueryPriceHistory",
             &json!([730, market_hash_name]),
         )
-        .await?;
-    parse_history(&data)
+        .await;
+    match result {
+        Ok(data) => parse_history(&data),
+        Err(
+            Error::RateLimited { .. } | Error::BreakerOpen { .. } | Error::ActionUnavailable { .. },
+        ) if c.cookie().is_some() => {
+            let q = [
+                ("appid", "730".into()),
+                ("market_hash_name", market_hash_name.into()),
+            ];
+            let data = c.legacy_json("/market/pricehistory/", &q, true).await?;
+            let points = super::legacy::parse_history(&data)?;
+            c.note_legacy_ok();
+            Ok(points)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// `price_median` chega como float em BRL (ex.: `5.855159282684326`, um float32 promovido). Vira centavos

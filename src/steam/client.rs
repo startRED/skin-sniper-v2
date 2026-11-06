@@ -1,8 +1,9 @@
-//! HTTP único da Steam: cookie trocável, limitador global adaptativo e breaker por endpoint.
+//! HTTP da Steam: cookie trocável, ritmo por grupo de leitura e breaker por endpoint.
 //!
 //! Ritmo (docs/projeto.md, "Caça → Ritmo"): começa em 1 consulta a cada 6 s (também o piso); cada 10 min sem
 //! 429 encurta 15 %; um 429 pausa 60 s (dobrando até 30 min) e alonga o intervalo em 50 %.
-//! O limitador é um só para todos os endpoints; os breakers são um por endpoint (conhecimento 2): falhas
+//! Actions, interface antiga/busca/livro e sessão/ações do usuário têm pausas independentes, com espaçamento
+//! global de pelo menos 3 s. Os breakers são por endpoint (conhecimento 2): falhas
 //! repetidas que não são 429 (5xx, rede) abrem só o breaker daquele endpoint.
 #![allow(dead_code)]
 
@@ -56,6 +57,7 @@ const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 /// `ALT_DOWN`; ligado fora da rede certa, responde 503 e dá no mesmo.
 pub const ALT_PROXY: &str = "http://127.0.0.1:1056";
 const ALT_DOWN: Duration = Duration::from_secs(5 * 60);
+const MAX_BODY: usize = 16 * 1024 * 1024;
 
 const BREAKER_THRESHOLD: u32 = 3;
 const BREAKER_OPEN_START: Duration = Duration::from_secs(30);
@@ -69,14 +71,16 @@ pub enum Endpoint {
     Search,
     Session,
     Buy,
-    /// api.steampowered.com (login por QR e renovação): mesmo limitador global, breaker próprio.
+    /// api.steampowered.com (login por QR e renovação): ritmo de controle, breaker próprio.
     Auth,
     /// Livro de pedidos de compra (`/market/orderbook`).
     Book,
+    /// Leituras pela interface antiga, selecionada pelo cookie público `bMarketOptOut`.
+    Legacy,
 }
 
 impl Endpoint {
-    const ALL: [Endpoint; 7] = [
+    const ALL: [Endpoint; 8] = [
         Self::Listings,
         Self::History,
         Self::Search,
@@ -84,6 +88,7 @@ impl Endpoint {
         Self::Buy,
         Self::Auth,
         Self::Book,
+        Self::Legacy,
     ];
     fn idx(self) -> usize {
         self as usize
@@ -92,7 +97,7 @@ impl Endpoint {
 
 #[derive(Debug)]
 pub enum Error {
-    /// 429 da Steam: tudo pausado até `until` (segundos Unix).
+    /// 429 da Steam: o grupo da consulta está pausado até `until` (segundos Unix).
     RateLimited {
         until: i64,
     },
@@ -388,7 +393,9 @@ type PaceHook = Arc<dyn Fn(String) + Send + Sync>;
 
 struct Inner {
     limiter: Limiter,
-    breakers: [Breaker; 7],
+    /// Sessão e ações do usuário não herdam a pausa das consultas de anúncios.
+    control: Limiter,
+    breakers: [Breaker; Endpoint::ALL.len()],
     cookie: Option<Cookie>,
     /// Cookies que a Steam setou nas respostas autenticadas (`webTradeEligibility` etc.); valem enquanto
     /// o login for o mesmo e vão em toda requisição autenticada, inclusive a compra.
@@ -396,15 +403,17 @@ struct Inner {
     on_pace: Option<PaceHook>,
     /// Até quando `action` lê sem login (depois de um 429 logado).
     anon_reads_until: Option<Instant>,
-    /// Ritmo da saída extra: outro IP, outra cota. Fica só em memória.
+    /// Ritmo da saída extra; outro IP não garante outra cota. Fica só em memória.
     // shortcut: reiniciar volta a 6 s nessa saída; se a Steam castigar esse IP por horas, salvar como `steam_pace`
     alt_limiter: Limiter,
     /// Saída extra recusou ou falhou na rede: fica de lado até aqui.
     alt_down_until: Option<Instant>,
-    /// Livro de ofertas e busca: a Steam conta à parte da leitura de anúncios (medido em 06/11: com
+    /// Interface antiga, livro de ofertas e busca: medidos disponíveis com actions em 429 (06/11; com
     /// `/market/actions` em 429 havia horas, `orderbook`, `search/render` e `priceoverview` respondiam 200).
     // shortcut: ritmo só em memória (reiniciar volta a 6 s); salvar como `steam_pace` se esse balde também levar horas
     side: Limiter,
+    /// Última página legada validada: anúncios e histórico seguem mesmo com `/actions` em pausa.
+    legacy_ok: Option<Instant>,
     /// Próxima vaga de qualquer consulta pela principal, de qualquer balde (`MIN_SPACING`).
     next_any: Instant,
     spacing: Duration,
@@ -415,12 +424,14 @@ struct Inner {
 
 /// Endpoints do balde do livro de ofertas e da busca (`Inner::side`).
 fn side(ep: Endpoint) -> bool {
-    matches!(ep, Endpoint::Book | Endpoint::Search)
+    matches!(ep, Endpoint::Book | Endpoint::Search | Endpoint::Legacy)
 }
 
 impl Inner {
     fn bucket(&mut self, ep: Endpoint) -> &mut Limiter {
-        if side(ep) {
+        if matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
+            &mut self.control
+        } else if side(ep) {
             &mut self.side
         } else {
             &mut self.limiter
@@ -500,13 +511,15 @@ impl SteamClient {
             base: base.trim_end_matches('/').to_string(),
             inner: Mutex::new(Inner {
                 limiter: Limiter::new(Instant::now()),
-                breakers: [Breaker::new(); 7],
+                control: Limiter::new(Instant::now()),
+                breakers: [Breaker::new(); Endpoint::ALL.len()],
                 cookie: None,
                 extra: Vec::new(),
                 on_pace: None,
                 anon_reads_until: None,
                 alt_limiter: Limiter::new(Instant::now()),
                 side: Limiter::new(Instant::now()),
+                legacy_ok: None,
                 next_any: Instant::now(),
                 spacing: MIN_SPACING,
                 calls: [Calls::default(); 3],
@@ -604,6 +617,7 @@ impl SteamClient {
         let mut g = self.inner.lock().unwrap();
         g.limiter.gap = gap;
         g.side.gap = gap;
+        g.control.gap = gap;
         g.spacing = gap;
     }
 
@@ -626,8 +640,11 @@ impl SteamClient {
         let mut g = self.inner.lock().unwrap();
         let mut s = g.limiter.stats(now);
         let side = g.side.stats(now);
+        let control = g.control.stats(now);
         s.queries_per_min += side.queries_per_min;
+        s.queries_per_min += control.queries_per_min;
         s.last_query_at = s.last_query_at.max(side.last_query_at);
+        s.last_query_at = s.last_query_at.max(control.last_query_at);
         s.book_ok_at = side.last_ok_at;
         if self.alt.is_some() {
             let a = g.alt_limiter.stats(now);
@@ -636,6 +653,18 @@ impl SteamClient {
             s.last_ok_at = s.last_ok_at.max(a.last_ok_at);
             if g.alt_down_until.is_none_or(|t| now >= t) {
                 s.paused_until = s.paused_until.zip(a.paused_until).map(|(m, x)| m.min(x));
+            }
+        }
+        if let Some(t) = g.legacy_ok {
+            let age = now.saturating_duration_since(t);
+            s.last_ok_at = s
+                .last_ok_at
+                .max(Some(unix_in(Duration::ZERO) - age.as_secs() as i64));
+            if age < Duration::from_secs(600)
+                && g.side.pause_end(now).is_none()
+                && g.breakers[Endpoint::Legacy.idx()].check(now).is_none()
+            {
+                s.paused_until = None;
             }
         }
         s
@@ -831,6 +860,38 @@ impl SteamClient {
         serde_json::from_slice(&body).map_err(|e| Error::Parse(format!("{path}: {e}")))
     }
 
+    /// Interface antiga, opção pública "sair do beta". Compartilha o ritmo de busca/livro, sem rajada.
+    /// Login só no histórico; anúncios continuam públicos, sem encaminhar credenciais para a saída extra.
+    pub async fn legacy_json(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        auth: bool,
+    ) -> Result<Value> {
+        let mut req = self
+            .http
+            .get(self.url(path))
+            .query(query)
+            .header("accept", "application/json");
+        if !auth {
+            req = req.header(COOKIE, "bMarketOptOut=1");
+        }
+        let (parts, body) = self.send(Endpoint::Legacy, req, auth).await?;
+        if parts.status != 200 {
+            return Err(Error::Http {
+                endpoint: Endpoint::Legacy,
+                status: parts.status,
+            });
+        }
+        serde_json::from_slice(&body)
+            .map_err(|_| Error::Parse("render: resposta não é JSON".into()))
+    }
+
+    /// Só quem validou identidade, moeda e conteúdo pode declarar a leitura recuperada.
+    pub fn note_legacy_ok(&self) {
+        self.inner.lock().unwrap().legacy_ok = Some(Instant::now());
+    }
+
     /// GET que não segue redirecionamento: devolve status e `Location` (para o 302 do código G).
     pub async fn get_location(&self, ep: Endpoint, path: &str) -> Result<(u16, Option<String>)> {
         let req = self
@@ -944,10 +1005,18 @@ impl SteamClient {
             if let Some(c) = g.cookie.as_ref().filter(|_| !anon) {
                 sent_by = Some(c.steam_login_secure.clone());
                 let mut h = c.header();
+                if ep == Endpoint::Legacy {
+                    h.push_str("; bMarketOptOut=1");
+                }
                 for (k, v) in &g.extra {
+                    if ep == Endpoint::Legacy && k == "bMarketOptOut" {
+                        continue;
+                    }
                     h.push_str(&format!("; {k}={v}"));
                 }
                 req = req.header(COOKIE, h);
+            } else if ep == Endpoint::Legacy {
+                req = req.header(COOKIE, "bMarketOptOut=1");
             }
         }
         let resp = match req.send().await {
@@ -1057,7 +1126,7 @@ impl SteamClient {
             if sent_by.is_some()
                 && matches!(ep, Endpoint::Listings | Endpoint::History | Endpoint::Book)
             {
-                // A Steam segurou a conta, não o IP: sem pausa, a próxima leitura (no ritmo) vai sem login.
+                // Tenta a próxima leitura sem login, no ritmo; restrição da conta é hipótese, não diagnóstico.
                 // 429 de uma sessão que já saiu não marca a conta nova.
                 let current = g.cookie.as_ref().map(|c| c.steam_login_secure.as_str());
                 if current == sent_by.as_deref() {
@@ -1084,10 +1153,21 @@ impl SteamClient {
             tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(), "Steam: 429");
             return Err(Error::RateLimited { until });
         }
-        let body = resp
-            .bytes()
+        let mut resp = resp;
+        if resp.content_length().is_some_and(|n| n > MAX_BODY as u64) {
+            return Err(Error::Parse("resposta da Steam excede 16 MiB".into()));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| Error::Transport(e.without_url().to_string()))?;
+            .map_err(|e| Error::Transport(e.without_url().to_string()))?
+        {
+            if chunk.len() > MAX_BODY - body.len() {
+                return Err(Error::Parse("resposta da Steam excede 16 MiB".into()));
+            }
+            body.extend_from_slice(&chunk);
+        }
         let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
         {
             let mut g = self.inner.lock().unwrap();
@@ -1136,7 +1216,7 @@ impl SteamClient {
                 location,
                 eresult,
             },
-            body.to_vec(),
+            body,
         ))
     }
 
@@ -1693,13 +1773,13 @@ mod tests {
     }
 
     // gap de 100 ms para os testes de rede não dormirem 3 s por consulta
-    fn fast(base: &str) -> SteamClient {
+    pub(super) fn fast(base: &str) -> SteamClient {
         let c = SteamClient::with_base(base).unwrap();
         c.set_gap_for_test(Duration::from_millis(100));
         c
     }
 
-    async fn serve(app: Router) -> String {
+    pub(super) async fn serve(app: Router) -> String {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -1975,3 +2055,7 @@ mod tests {
         assert!(matches!(e, Error::BreakerOpen { .. }), "{e}");
     }
 }
+
+#[cfg(test)]
+#[path = "client_legacy_tests.rs"]
+mod legacy_tests;
