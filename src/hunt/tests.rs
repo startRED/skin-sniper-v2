@@ -460,6 +460,18 @@ async fn cheaper_competitor_reevaluates_known_opportunity() {
         .await
         .unwrap();
     assert_eq!(approved, 2);
+    // os dois avisos viram compras virtuais do professor, uma vez cada
+    let ghosts: (i64, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*), coalesce(sum(approved), 0) FROM ghosts WHERE status = 'aguardando'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(ghosts.1, 2, "{ghosts:?}");
     // outro comum baixa para R$ 4,00: o barato (mesmo preço, mesmo histórico) só vende a R$ 3,99 e perde
     {
         let mut b = bodies.listings.lock().unwrap();
@@ -1462,7 +1474,7 @@ async fn book_snapshot_only_on_change() {
     let b = crate::steam::book::parse_book(&fixture("steam_orderbook_negev_2026-11.json")["data"])
         .unwrap();
     assert_eq!(
-        orders::remember_book(&h, MOON, NOW, Some(b.clone())).await,
+        orders::remember_book(&h, MOON, NOW, Some(b.clone()), false).await,
         None
     );
     // mesmo topo (só a contagem de pedidos de compra mudou): não grava de novo
@@ -1471,15 +1483,15 @@ async fn book_snapshot_only_on_change() {
         ..b.clone()
     };
     assert!(
-        orders::remember_book(&h, MOON, NOW + 60, Some(more_bids))
+        orders::remember_book(&h, MOON, NOW + 60, Some(more_bids), false)
             .await
             .is_some()
     );
     // falha de leitura não grava e não apaga o que já se sabia
-    orders::remember_book(&h, MOON, NOW + 90, None).await;
+    orders::remember_book(&h, MOON, NOW + 90, None, false).await;
     let mut sold = b.clone();
     sold.sell_levels[0].1 = 1; // um dos dois anúncios de R$ 1,67 vendeu
-    orders::remember_book(&h, MOON, NOW + 120, Some(sold)).await;
+    orders::remember_book(&h, MOON, NOW + 120, Some(sold), false).await;
     let rows: Vec<(i64, String)> = db
         .call(|c| {
             c.prepare("SELECT at, sell_levels FROM book_snapshots ORDER BY at")?

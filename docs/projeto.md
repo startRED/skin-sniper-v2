@@ -46,6 +46,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador |
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
+| `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
 | `web/` | rotas, SSE, guarda de Host, arquivos embutidos |
 
@@ -123,7 +124,8 @@ Purchase = { id, name, icon_url, price_cents, status: "pending" | "need_confirma
 Calibration = { families: [{ family: string, kind: "desconto" | "raro", n: number,
                               mean_error_pct: number, bias_pct: number }],
                 hours: [{ hour: 0..23, listings: number, opportunities: number }] }
-Learning = { days: LearningDay[], since: number | null }   // do dia mais recente; since = 1º anúncio do registro
+Learning = { days: LearningDay[], since: number | null,     // do dia mais recente; since = 1º anúncio do registro
+             teacher: TeacherSummary }                    // resumo das compras virtuais (Aprendizado, item 4)
 LearningDay = { day: "AAAA-MM-DD", queries, books, new_listings, aged, age_median_min: number | null,
                 sales, relists, life_median_min: number | null, near, finds }
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
@@ -228,7 +230,24 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    `[preço, quantidade]`, só quando maior pedido, número de anúncios ou degraus mudaram.
 3. **Placar (`GET /api/learning`, seção "Aprendizado" do painel).** Por dia de Brasília, 14 dias: leituras de
    anúncios e do livro (`hourly_activity.queries`/`books`), anúncios novos e a idade mediana dos de idade conhecida,
-   os que sumiram sem relistagem e quanto duraram (mediana), relistados, quase-achados e achados.
+   os que sumiram sem relistagem e quanto duraram (mediana), relistados, quase-achados e achados. Também o resumo
+   do professor (item 4).
+4. **Professor grátis (`ghosts`, `csfloat_sales`, `hunt/teacher.rs`).** Sem comprar nada e sem gastar o balde de
+   anúncios: todo anúncio novo avaliado que virou aviso, ou cujo lucro médio ficou a até `max(R$ 0,30, 10 % do
+   preço)` abaixo da régua (quase-achado), vira uma compra virtual a preço do anúncio, com o preço médio previsto.
+   De hora em hora o professor rotula:
+   - **Rápido (48 h):** comum = parte das compras do histórico nas 48 h com mediana ≥ o previsto, a mediana
+     ponderada delas e anúncios da mesma skin a ≥ o previsto que sumiram sem relistagem; "fechou" = um sumiço, ou
+     ≥ 50 % das compras; sem compra nem sumiço, indefinido. Raro = sumiço do mesmo grupo a ≥ o previsto ou venda do
+     CSFloat do grupo (guardadas em `csfloat_sales` a cada leitura) a ≥ o múltiplo sugerido (previsto ÷ preço comum).
+   - **Final do comum (dia 10):** venda virtual pelo menor entre a mediana dos dias 7–9 (a trava da Steam) e o menor
+     anúncio do 1º registro do livro nesses dias − 1 centavo; lucro = líquido − preço. Nos dias 7–9 o professor pede
+     uma leitura do livro (balde do livro) das skins sem registro. Sem nenhum dos dois até o dia 12: `sem_rotulo`.
+   - **Final do raro (dia 14):** fechou entre os dias 7 e 14 pelas mesmas fontes do rápido; sem fechar, vende pela
+     mediana comum dos dias 7–9.
+   - O placar mostra: compras virtuais, avisos e quase-achados que venderiam em 48 h, real ÷ previsto (mediana, só
+     comuns; abaixo de 1 = o app prevê alto), lucro virtual realizado dos avisos contra o previsto e raros que fecharam.
+   - Prazos e régua são hipóteses de calibração. Tudo fica 60 dias.
 
 ## Precificação (o coração)
 

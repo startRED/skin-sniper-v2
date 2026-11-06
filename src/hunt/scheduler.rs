@@ -464,6 +464,8 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     detect::roll_cycle(h);
     // patterns: só o CSFloat; roda também sem saldo e com a Steam em pausa (429), quando a caça para
     super::patterns::maybe_step(h).await;
+    // professor: só o banco; roda também sem saldo e com a Steam em pausa
+    super::teacher::maybe_step(h).await;
     if h.saldo() <= 0 {
         h.set_message(Some(NO_SALDO.into()));
         return Tick::Idle;
@@ -677,7 +679,7 @@ async fn book_then_listings(
                     let now = h.now();
                     let (lowest, second) = (b.min_sell_cents, b.second_ask());
                     // o livro lido também serve aos pedidos sugeridos (`orders`), ao teto (concorrente) e ao registro
-                    let before = super::orders::remember_book(h, &task.name, now, Some(b))
+                    let before = super::orders::remember_book(h, &task.name, now, Some(b), false)
                         .await
                         .and_then(|b| b.min_sell_cents);
                     let mut s = h.lock();

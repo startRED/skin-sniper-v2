@@ -143,6 +143,7 @@ pub async fn maybe_step(h: &Hunt) {
         Ok(s) => s,
         Err(e) => return tracing::warn!("patterns: CSFloat falhou para {name}: {e}"),
     };
+    super::teacher::store_csfloat(h, &name, &sales).await;
     let found = premium_sales(&name, &sales);
     h.lock().csfloat_cache.insert(name.clone(), (now, sales));
     if found.is_empty() {

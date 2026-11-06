@@ -11,6 +11,7 @@ pub mod ledger;
 pub mod orders;
 pub mod patterns;
 pub mod scheduler;
+pub mod teacher;
 pub mod watch;
 
 use crate::csfloat::{CsfloatClient, CsfloatSale};
@@ -88,6 +89,11 @@ pub(crate) struct Shared {
     pub closeness_scale: f64,
     /// Registro (`ledger`): por chave de consulta, quando foi a última e até que preço ela cobria (`None` = tudo).
     pub ledger_prev: HashMap<String, (i64, Option<i64>)>,
+    /// Professor (`teacher`): última volta e as skins cujo livro ele precisa ler para rotular (dias 7–9).
+    pub teach_at: i64,
+    pub label_books: Vec<String>,
+    /// Último registro do livro por skin (`orders::remember_book`).
+    pub book_logged: HashMap<String, i64>,
 }
 
 /// Livro de ofertas "respondendo" = resposta boa há menos de 3 min (uma leitura a cada 6 s quando os anúncios estão barrados).
@@ -164,6 +170,9 @@ impl Hunt {
                 learn_seen: HashMap::new(),
                 closeness_scale: learn::DEFAULT_SCALE,
                 ledger_prev: HashMap::new(),
+                teach_at: 0,
+                label_books: vec![],
+                book_logged: HashMap::new(),
             }),
         })
     }

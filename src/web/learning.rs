@@ -53,6 +53,9 @@ pub struct Learning {
     pub days: Vec<Day>,
     /// Primeiro anúncio do registro (`None` = registro vazio).
     pub since: Option<i64>,
+    /// Compras virtuais e o que o mercado disse delas.
+    #[serde(default)]
+    pub teacher: crate::hunt::teacher::Summary,
 }
 
 fn median(v: &mut [f64]) -> Option<f64> {
@@ -162,6 +165,7 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
             Ok(Learning {
                 days: scorecard(now, &hours, &new, &gone),
                 since,
+                teacher: crate::hunt::teacher::summary(c)?,
             })
         })
         .await?;

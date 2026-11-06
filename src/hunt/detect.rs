@@ -292,6 +292,7 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> RareEvidence {
             h.lock()
                 .csfloat_cache
                 .insert(name.to_string(), (at, v.clone()));
+            super::teacher::store_csfloat(h, name, &v).await;
             v
         }
     };
@@ -347,6 +348,8 @@ struct Judged {
     refused: Option<&'static str>,
     /// O porquê em texto: a evidência da estimativa ou o erro dela.
     detail: Option<String>,
+    /// Compra virtual para o professor (`teacher`): virou oportunidade ou chegou perto.
+    ghost: Option<super::teacher::Ghost>,
 }
 
 /// Uma linha de `evaluations`: o anúncio como veio e o que o radar decidiu.
@@ -461,6 +464,7 @@ async fn evaluate_one(
                 near: None,
                 refused: Some(no_estimate_reason(&e)),
                 detail: Some(format!("{e:?}")),
+                ghost: None,
             });
         }
     };
@@ -477,12 +481,29 @@ async fn evaluate_one(
         mid_cents: ev.sell.mid.net_cents - l.price_cents,
         quick_cents: ev.sell.quick.net_cents - l.price_cents,
     });
+    let ghost = super::teacher::ghost_worthy(l.price_cents, ev.sell.mid.profit_cents).then(|| {
+        super::teacher::Ghost {
+            listing_id: l.listing_id.clone(),
+            name: l.name.clone(),
+            grp: group.as_ref().map(|g| g.key.clone()),
+            price_cents: l.price_cents,
+            mid_price_cents: ev.sell.mid.price_cents,
+            mid_net_cents: ev.sell.mid.net_cents,
+            // base do múltiplo sugerido: o mesmo histórico sem o prêmio do grupo
+            base_cents: group
+                .as_ref()
+                .and_then(|_| sell::estimate(&points, now, others_min, None).ok())
+                .map(|e| e.mid.price_cents),
+            approved: ev.listable,
+        }
+    });
     if !ev.listable {
         return Ok(Judged {
             found: None,
             near,
             refused: Some("sem_lucro"),
             detail: Some(est.evidence),
+            ghost,
         });
     }
     let opp = Opportunity {
@@ -523,6 +544,7 @@ async fn evaluate_one(
         near,
         refused: None,
         detail,
+        ghost,
     })
 }
 
@@ -721,6 +743,9 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         }
         if !was_known {
             seen.push(l);
+            if let Some(g) = judged.ghost {
+                super::teacher::add_ghost(h, g, now).await;
+            }
         }
         match (judged.found, active) {
             (Some((mut opp, notify)), prev) => {
