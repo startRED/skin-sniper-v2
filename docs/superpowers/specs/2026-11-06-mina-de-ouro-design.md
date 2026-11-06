@@ -15,6 +15,15 @@ Decisões dele, por escolha em cards, em 06/11:
 - **Aprendizado:** só com sinais grátis. Não haverá compras de teste para o app aprender.
 - **Gasto mensal:** nenhum. Sem proxy pago, sem API paga, sem conta nova.
 
+## Prazo (pedido do Erick, 06/11)
+
+**Pronto na semana que vem, rodando 24 h por dia.**
+- As Fases 0 a 3 são construídas em sequência nessa semana, cada uma num PR com CI verde e instalada assim que
+  passa.
+- O aprendizado começa na hora em que a Fase 0 é instalada. Nada espera os 60 dias: eles são só quanto tempo o
+  app lembra.
+- Os primeiros números do placar saem no 1º dia. A comparação justa da agenda nova sai com ~7 dias rodando.
+
 ## O que os dados dizem (medido em 06/11, só leitura)
 
 Fontes:
@@ -224,10 +233,10 @@ Troca o índice do UCB1 por "quanto vale olhar este alvo agora", aprendido por a
   - Responde de uma vez "quem olhar" e "de quanto em quanto tempo".
 - **A cota de exploração continua:** alvo pouco testado sempre tem vez.
 - **Entrada em sombra, depois teste em dias alternados.**
-  - Enquanto o registro tem menos de 14 dias, a colheita só calcula e registra o que escolheria. O UCB1
+  - Enquanto o registro tem menos de 7 dias, a colheita só calcula e registra o que escolheria. O UCB1
     continua decidindo.
   - Depois, dias pares ficam com o UCB1 e dias ímpares com a colheita. Vence quem tiver mais quase-achados e
-    achados por consulta em 14 dias. O placar mostra a comparação.
+    achados por consulta em 7 dias. O placar mostra a comparação.
 
 Divisão dos baldes:
 - **Comum:** lido pelo livro, olhando a escada (o mais barato contra o segundo e contra o teto). Os anúncios
@@ -238,7 +247,8 @@ Divisão dos baldes:
 
 ### Fase 4 — Recalibração contínua e boletim
 
-Começa quando houver ≥ 14 dias de rótulos da Fase 1. Antes disso, não há o que repetir.
+Começa com ≥ 7 dias de rótulos rápidos da Fase 1 (sumiço, venda do grupo). A confirmação do dia 7 entra quando
+chegar.
 
 - **Todo dia,** um ajuste lê o registro e recalcula τ por faixa, λ, L, a tabela de prêmios e os limiares
   (tolerância do filtro, quase-achado).
@@ -267,7 +277,7 @@ Começa quando houver ≥ 14 dias de rótulos da Fase 1. Antes disso, não há o
 - **Comum:** o ganho é pequeno e disputado. 0,2 % dos anúncios novos pagam sequer a taxa contra o próximo.
   O aprendizado melhora a mira e corta o desperdício de cota, mas não cria margem que o mercado não dá.
 - **Raro:** é onde existe lucro de 100 %+ (Center Star: ~135 %). Com quanta frequência isso aparece no saldo
-  atual ainda não se sabe. Esse número sai da Fase 0/1 em ~2 semanas de registro.
+  atual ainda não se sabe. Esse número sai do placar com ~1 semana rodando 24 h.
 - **"100 % em toda skin, várias por dia":** nenhum dado medido sustenta isso hoje. O desenho mede, aprende e
   mostra o resultado real, para a decisão de crescer (saldo maior, compra automática) se apoiar em lucro
   medido.
@@ -304,9 +314,9 @@ hipóteses de calibração e vão escritos assim no `projeto.md`.
 - Prêmio como múltiplo na mesma plataforma, sem fator de conversão. Estimado seed → faixa → neutro.
 - Rótulo do raro binário ("fechou"). O lucro virtual do raro é só informativo.
 - Rótulo do comum sem gastar o balde de anúncios. Sem dados até o dia 12, fecha como "sem rótulo".
-- Colheita em sombra até 14 dias de registro, depois dias alternados contra o UCB1.
+- Colheita em sombra até 7 dias de registro, depois dias alternados contra o UCB1.
 - Fases 2 e 3 construídas logo após a 0 e a 1, porque usam dados que já existem (CSFloat) ou entram em sombra.
-  A Fase 4 espera os rótulos.
+  A Fase 4 espera 7 dias de rótulos rápidos.
 - Busca como varredura larga só na Fase 3.
 - Boletim no painel, não no Telegram. Um tipo novo de notificação já quebrou as listas do Telegram no robô
   antigo.
