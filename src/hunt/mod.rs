@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod detect;
+pub mod explore;
 pub mod harvest;
 mod learn;
 pub mod ledger;
@@ -13,7 +14,11 @@ pub mod orders;
 pub mod patterns;
 pub mod scheduler;
 pub mod teacher;
+pub mod trial;
 pub mod watch;
+
+#[cfg(test)]
+mod explore_tests;
 
 use crate::csfloat::{CsfloatClient, CsfloatSale};
 use crate::db::{Db, now_unix};
@@ -99,6 +104,8 @@ pub(crate) struct Shared {
     pub label_books: Vec<String>,
     /// Último registro do livro por skin (`orders::remember_book`).
     pub book_logged: HashMap<String, i64>,
+    pub exploration: explore::State,
+    pub trial: Option<trial::Info>,
 }
 
 /// Livro de ofertas "respondendo" = resposta boa há menos de 3 min (uma leitura a cada 6 s quando os anúncios estão barrados).
@@ -132,6 +139,8 @@ impl Hunt {
     }
 
     pub(crate) fn with_clock(deps: HuntDeps, now: fn() -> i64) -> Arc<Self> {
+        deps.steam.set_research_db(deps.db.clone());
+        deps.csfloat.set_research_db(deps.db.clone());
         Arc::new(Hunt {
             db: deps.db,
             steam: deps.steam,
@@ -180,6 +189,8 @@ impl Hunt {
                 refit: 1.0,
                 label_books: vec![],
                 book_logged: HashMap::new(),
+                exploration: explore::State::default(),
+                trial: None,
             }),
         })
     }
@@ -226,6 +237,7 @@ impl Hunt {
         self.refresh_correction().await?;
         scheduler::load_pace(self).await?;
         patterns::load(self).await?;
+        explore::load(self).await?;
         {
             let mut s = self.lock();
             for (json, task) in rows {

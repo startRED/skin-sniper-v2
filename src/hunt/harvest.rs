@@ -178,7 +178,10 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
         .map(|&(hour, q, near, finds)| (brt_day(hour * 3600), q, near, finds))
         .collect();
     let r = rates(start, &days);
-    let p = policy(start, now, winner(r));
+    let saved = h.lock().trial.as_ref().map(|t| t.base_policy.clone());
+    let p = saved
+        .and_then(|p| serde_json::from_value(serde_json::Value::String(p)).ok())
+        .unwrap_or_else(|| policy(start, now, winner(r)));
     let (old, picks, agree) = {
         let mut s = h.lock();
         let old = s.queue.policy;

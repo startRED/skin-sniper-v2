@@ -86,7 +86,10 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
         .iter()
         .zip(facts)
         .zip(learned)
-        .map(|((t, f), (score, reason))| {
+        .map(|((t, f), (score, mut reason))| {
+            if h.lock().queue.external.as_ref() == Some(&t.id) {
+                reason = format!("explorando fora dos favoritos · {reason}");
+            }
             let seen = catalog::observed(&floors, &t.id, now);
             let (floor, at) = (seen.floor, seen.at);
             let rare = t.rare();

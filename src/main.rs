@@ -5,6 +5,7 @@ mod db;
 mod hunt;
 mod notify;
 mod pricing;
+mod research;
 mod runtime;
 mod settings;
 mod steam;

@@ -27,6 +27,27 @@
   const t = $derived(data?.teacher ?? null);
   const hv = $derived(data?.harvest ?? null);
   const wk = $derived(data?.weeks ?? null);
+  const research = $derived(data?.research ?? null);
+  const trial = $derived(data?.trial ?? null);
+  const exploration = $derived(data?.exploration ?? null);
+  const experiment = $derived(data?.experiment ?? null);
+  const cohorts = $derived.by(() => {
+    const groups = new Map<string, {
+      policy: string | null; kind: string; total: number; mature: number; waiting: number;
+      unlabeled: number; labeled: number; closed: number; predicted_cents: number;
+      virtual_cents: number; indirect: number;
+    }>();
+    for (const c of data?.cohorts ?? []) {
+      const key = `${c.policy ?? ''}|${c.kind}`;
+      const row = groups.get(key) ?? {
+        policy: c.policy, kind: c.kind, total: 0, mature: 0, waiting: 0, unlabeled: 0,
+        labeled: 0, closed: 0, predicted_cents: 0, virtual_cents: 0, indirect: 0
+      };
+      for (const field of ['total', 'mature', 'waiting', 'unlabeled', 'labeled', 'closed', 'predicted_cents', 'virtual_cents', 'indirect'] as const) row[field] += c[field];
+      groups.set(key, row);
+    }
+    return [...groups.values()];
+  });
   const POLICY = {
     shadow: 'em teste silencioso: o modo atual escolhe, o modo colheita só mede',
     ucb: 'hoje no modo atual (dia de comparação)',
@@ -36,27 +57,69 @@
   const life = (s: number) => (s < 120 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
   const of = (a: number, b: number) => (b ? `${a} de ${b}` : '—');
   const ratio = (r: number | null) => (r == null ? '—' : `${r.toFixed(2).replace('.', ',')}×`);
+  const trialState = (phase: string) => ({
+    baseline: 'Linha de base', control: 'Controle', pilot: 'Piloto', paused: 'Pausado', complete: 'Concluído'
+  } as Record<string, string>)[phase.toLowerCase()] ?? phase;
+  const policyName = (policy: string | null) => ({
+    ucb: 'Atual', harvest: 'Colheita', shadow: 'Sombra', baseline: 'Linha de base', control: 'Controle', pilot: 'Piloto'
+  } as Record<string, string>)[policy?.toLowerCase() ?? ''] ?? policy ?? 'Sem política';
+  const kindName = (kind: string) => ({ comum: 'Comuns', common: 'Comuns', raro: 'Raros', rare: 'Raros' } as Record<string, string>)[kind.toLowerCase()] ?? kind;
+  const conclusionName = (conclusion: string) => ({
+    inconclusivo: 'inconclusivo', inseguro: 'interrompido por segurança', elegivel: 'apto para avaliação'
+  } as Record<string, string>)[conclusion.toLowerCase()] ?? conclusion;
   const days = $derived((data?.days ?? []).filter((d, i) => i === 0 || d.queries + d.books + d.new_listings > 0));
 </script>
 
 <details class="fold">
   <summary>
     Aprendizado
-    {#if today}<span class="muted"> · hoje: {today.new_listings} anúncios novos, {today.sales} sumiram (vendidos), {today.finds} {today.finds === 1 ? 'achado' : 'achados'}</span>{/if}
+    {#if today}<span class="muted"> · hoje: {today.new_listings} anúncios novos, {today.sales} saíram da lista, {today.finds} {today.finds === 1 ? 'achado' : 'achados'}</span>{/if}
   </summary>
   <div class="body">
     <p class="muted sub">
       O app guarda cada anúncio que vê e confere com o mercado o que aconteceu com ele, sem comprar nada. É daqui que ele
-      aprende quanto um achado dura e o que fecha de verdade.{#if data?.since}{' '}Registro desde {day(data.since)}.{/if}
+      aprende quanto os anúncios duram e procura indícios do que pode ter sido vendido; sumir da lista não confirma uma venda.{#if data?.since}{' '}Registro desde {day(data.since)}.{/if}
     </p>
     {#if error}<p class="amber">{error}</p>{/if}
+    {#if trial || exploration || research || experiment}
+      <section class="ml" aria-label="Exploração e pesquisa">
+        {#if trial}
+          <div class="ml-head"><b>{trialState(trial.phase)}</b>{#if trial.block_id != null}<span class="muted">bloco {trial.block_id}</span>{/if}<span class="muted">política de referência: {policyName(trial.base_policy)}</span></div>
+          {#if trial.reason}<p class="muted ml-reason">{trial.reason}</p>{/if}
+        {/if}
+        {#if exploration}
+          <p><b>Candidata:</b> {exploration.candidate ?? 'nenhuma no momento'} · {exploration.visits} visitas · {exploration.targets_tested} alvos testados · {exploration.unique_finds} achados únicos{#if exploration.retained} · mantida para acompanhamento{/if}</p>
+        {/if}
+        {#if research}
+          <p><b>Última hora:</b> {research.reads_1h} tentativas de leitura na Steam · exploração {research.exploratory_1h}/{research.exploratory_limit} (até {research.exploratory_limit}; não é cota garantida) · {research.available} vagas de exploração disponíveis. CSFloat: {research.csfloat_1h} leituras.</p>
+          <p class="muted">Acompanhamento: {research.followup_1h} leituras · respostas 429: {research.limited_1h} · erros: {research.failed_1h}.</p>
+        {/if}
+        {#if experiment}
+          <p><b>Comparação:</b> {experiment.pairs} {experiment.pairs === 1 ? 'par' : 'pares'} de blocos · {conclusionName(experiment.conclusion)}{#if experiment.reason} · {experiment.reason}{/if}</p>
+        {/if}
+      </section>
+    {/if}
+    {#if cohorts.length}
+      <section class="cohorts" aria-label="Resultados por grupo de comparação">
+        <h3>Grupos de comparação</h3>
+        <p class="muted">Previsto e virtual são estimativas. O resultado virtual NÃO é uma venda real; venda real informada ainda não aparece neste placar.</p>
+        {#each cohorts as c (`${c.policy ?? ''}|${c.kind}`)}
+          <div class="cohort">
+            <b>{policyName(c.policy)} · {kindName(c.kind)}</b>
+            <span>{c.total} registros · maduros {c.mature} · pendentes {c.waiting} · sem resultado {c.unlabeled}</span>
+            <span>Rotulados {c.labeled} · fechados {c.closed}{#if c.indirect} ({c.indirect} por indício indireto){/if}</span>
+            <span>Lucro previsto {money(c.predicted_cents)} · lucro virtual {c.labeled ? signed(c.virtual_cents) : '—'}</span>
+          </div>
+        {/each}
+      </section>
+    {/if}
     {#if t && t.ghosts}
       <div class="teacher" aria-label="Professor">
         <div><span class="muted">Compras virtuais</span><b>{t.ghosts}</b><small class="muted">{t.waiting} esperando o resultado</small></div>
-        <div title="Nas 48 h depois do aviso, vendeu a pelo menos o preço que o app previu?"><span class="muted">Avisos que venderiam em 48 h</span><b>{of(t.fast_alerts_closed, t.fast_alerts)}</b><small class="muted">quase-achados: {of(t.fast_near_closed, t.fast_near)}</small></div>
-        <div title="Mediana do preço real das 48 h dividido pelo previsto. Abaixo de 1 = o app prevê alto."><span class="muted">Real ÷ previsto</span><b class:amber={t.fast_ratio != null && t.fast_ratio < 0.95}>{ratio(t.fast_ratio)}</b><small class="muted">comuns, 48 h</small></div>
+        <div title="Nos casos acompanhados, o preço observado chegou ao previsto em até 48 h; isso não confirma uma venda."><span class="muted">Avisos com preço previsto em 48 h</span><b>{of(t.fast_alerts_closed, t.fast_alerts)}</b><small class="muted">quase-achados: {of(t.fast_near_closed, t.fast_near)}</small></div>
+        <div title="Mediana dos preços observados nas 48 h dividida pelo previsto. Abaixo de 1 = o app prevê alto."><span class="muted">Mercado ÷ previsto</span><b class:amber={t.fast_ratio != null && t.fast_ratio < 0.95}>{ratio(t.fast_ratio)}</b><small class="muted">comuns, 48 h</small></div>
         <div title="Vendendo depois dos 7 dias de trava, pelo menor entre o histórico e o livro"><span class="muted">Lucro virtual (7 dias)</span><b class:up={t.profit_cents > 0}>{t.final_alerts ? signed(t.profit_cents) : '—'}</b><small class="muted">{t.final_alerts ? `${of(t.final_alerts_won, t.final_alerts)} com lucro · previsto ${money(t.predicted_cents)}` : 'primeiro resultado no 10º dia'}</small></div>
-        {#if t.rare_labeled}<div><span class="muted">Raros que fecharam</span><b>{of(t.rare_closed, t.rare_labeled)}</b><small class="muted">em 14 dias</small></div>{/if}
+        {#if t.rare_labeled}<div><span class="muted">Raros com indício de fechamento</span><b>{of(t.rare_closed, t.rare_labeled)}</b><small class="muted">em 14 dias</small></div>{/if}
       </div>
     {/if}
     {#if hv || wk}
@@ -114,6 +177,14 @@
   .body { padding: 0 0 8px; }
   .sub { margin: 0 16px 10px; max-width: 110ch; }
   .amber { color: var(--amber); margin: 0 16px 8px; }
+  .ml, .cohorts { margin: 0 16px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 5px; }
+  .ml p, .cohorts p { margin: 0; }
+  .ml-head { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .ml-reason { font-size: 13px; }
+  .cohorts h3 { margin: 0; font-size: 14px; }
+  .cohorts > p { font-size: 13px; }
+  .cohort { display: grid; gap: 2px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .cohort > span { color: var(--muted); }
   .notes { margin: 0 16px 12px; padding-left: 18px; max-width: 110ch; display: grid; gap: 4px; }
   .notes b { color: var(--ink); font-weight: 600; }
   .teacher { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 16px; margin: 0 16px 12px; }
@@ -129,6 +200,7 @@
   .row { min-height: 40px; border-bottom: 1px solid var(--line); }
   .c::before { content: attr(data-l); display: none; }
   @media (max-width: 899px) {
+    .ml, .cohorts { margin-left: 10px; margin-right: 10px; }
     .head { display: none; }
     .grid { grid-template-columns: repeat(3, 1fr); row-gap: 8px; padding: 10px 14px; }
     .c::before { display: block; color: var(--faint); font-size: 11px; }

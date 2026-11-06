@@ -65,6 +65,16 @@ pub struct Learning {
     /// Boletim: últimos 7 dias e os 7 anteriores.
     #[serde(default)]
     pub weeks: [crate::hunt::teacher::Week; 2],
+    #[serde(default)]
+    pub research: Option<crate::research::Summary>,
+    #[serde(default)]
+    pub trial: Option<crate::hunt::trial::Info>,
+    #[serde(default)]
+    pub cohorts: Vec<crate::hunt::teacher::Cohort>,
+    #[serde(default)]
+    pub exploration: Option<crate::hunt::explore::Info>,
+    #[serde(default)]
+    pub experiment: Option<crate::hunt::trial::Report>,
 }
 
 fn one() -> f64 {
@@ -192,6 +202,11 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                     crate::hunt::teacher::week(c, now - 7 * DAY, now)?,
                     crate::hunt::teacher::week(c, now - 14 * DAY, now - 7 * DAY)?,
                 ],
+                research: Some(crate::research::summary(c, now)?),
+                trial: Some(crate::hunt::trial::info(c, now)?),
+                cohorts: crate::hunt::teacher::cohorts(c, now - 60 * DAY, now, now)?,
+                exploration: Some(crate::hunt::explore::info(c)?),
+                experiment: Some(crate::hunt::trial::report(c, now)?),
             })
         })
         .await?;

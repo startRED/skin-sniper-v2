@@ -20,6 +20,14 @@ use crate::pricing::sell::weighted_quantile;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+/// Vínculo com a decisão que originou a compra virtual.
+pub const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS ghost_decisions (
+ listing_id TEXT PRIMARY KEY, decision_id INTEGER NOT NULL, source TEXT NOT NULL,
+ policy TEXT NOT NULL, block_id INTEGER
+);
+"#;
+
 const HOUR: i64 = 3600;
 const DAY: i64 = 86_400;
 /// O professor roda de hora em hora.
@@ -57,15 +65,17 @@ pub(crate) fn ghost_worthy(price_cents: i64, mid_profit_cents: i64) -> bool {
 }
 
 pub(crate) async fn add_ghost(h: &Hunt, g: Ghost, now: i64) {
+    let context = crate::research::current();
     let r = h
         .db
         .call(move |c| {
-            c.execute(
+            let tx = c.transaction()?;
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO ghosts(listing_id, name, kind, grp, bought_at, price_cents, mid_price_cents,
                     mid_net_cents, base_cents, approved)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
-                    g.listing_id,
+                    &g.listing_id,
                     g.name,
                     if g.grp.is_some() { "raro" } else { "desconto" },
                     g.grp,
@@ -76,7 +86,12 @@ pub(crate) async fn add_ghost(h: &Hunt, g: Ghost, now: i64) {
                     g.base_cents,
                     g.approved
                 ],
-            )
+            )?;
+            if inserted > 0 && let Some(ctx) = context {
+                tx.execute("INSERT INTO ghost_decisions(listing_id, decision_id, source, policy, block_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![g.listing_id, ctx.id, ctx.source, ctx.policy, ctx.block_id])?;
+            }
+            tx.commit()
         })
         .await;
     if let Err(error) = r {
@@ -190,14 +205,15 @@ fn vanished_at_or_above(
 /// Vendas do CSFloat do grupo em `[from, to]` a um múltiplo ≥ `multiple`.
 fn csfloat_at_or_above(
     c: &Connection,
+    name: &str,
     grp: &str,
     from: i64,
     to: i64,
     multiple: f64,
 ) -> rusqlite::Result<i64> {
     c.query_row(
-        "SELECT count(*) FROM csfloat_sales WHERE grp = ?1 AND sold_at >= ?2 AND sold_at <= ?3 AND multiple >= ?4",
-        params![grp, from, to, multiple],
+        "SELECT count(*) FROM csfloat_sales WHERE name = ?1 AND grp = ?2 AND sold_at >= ?3 AND sold_at <= ?4 AND multiple >= ?5",
+        params![name, grp, from, to, multiple],
         |r| r.get(0),
     )
 }
@@ -255,7 +271,7 @@ fn rare_closed(c: &Connection, r: &Row, from: i64, to: i64) -> rusqlite::Result<
     let grp = r.grp.as_deref().unwrap_or_default();
     let mut n = vanished_at_or_above(c, &r.name, Some(grp), from, to, r.mid)?;
     if let Some(m) = suggested_multiple(r) {
-        n += csfloat_at_or_above(c, grp, from, to, m)?;
+        n += csfloat_at_or_above(c, &r.name, grp, from, to, m)?;
     }
     Ok(n)
 }
@@ -273,7 +289,7 @@ pub(crate) fn label(c: &mut Connection, now: i64) -> rusqlite::Result<Labeled> {
         let (from, to) = (r.bought, r.bought + FAST);
         let (share, median, sold, closed) = if r.grp.is_some() {
             let n = rare_closed(&tx, &r, from, to)?;
-            (None, None, n, Some(n > 0))
+            (None, None, n, (n > 0).then_some(true))
         } else {
             let share = share_at_or_above(&tx, &r.name, from, to, r.mid)?;
             let median = sales_median(&tx, &r.name, from, to)?;
@@ -337,11 +353,15 @@ pub(crate) fn label(c: &mut Connection, now: i64) -> rusqlite::Result<Labeled> {
     for r in rows(
         &tx,
         &format!(
-            "SELECT {COLS} WHERE status = 'aguardando' AND grp IS NOT NULL AND bought_at <= ?1"
+            "SELECT {COLS} WHERE (status = 'aguardando' OR (status = 'sem_rotulo' AND label_source = 'sem_cobertura')) AND grp IS NOT NULL AND bought_at <= ?1"
         ),
         [now - RARE_UNTIL],
     )? {
         let closed = rare_closed(&tx, &r, r.bought + SELL_FROM, r.bought + RARE_UNTIL)? > 0;
+        if !closed {
+            out.unlabeled += tx.execute("UPDATE ghosts SET status = 'sem_rotulo', labeled_at = ?2, closed = NULL, label_source = 'sem_cobertura' WHERE listing_id = ?1 AND status = 'aguardando'", params![r.id, now])? as u32;
+            continue;
+        }
         // sem fechar, vende como comum (mediana dos dias 7–9); o lucro do raro é só informativo
         let sell = if closed {
             Some(r.mid)
@@ -363,6 +383,36 @@ pub(crate) fn label(c: &mut Connection, now: i64) -> rusqlite::Result<Labeled> {
             ],
         )?;
         out.done += 1;
+    }
+    // Recalcula sinais de sumiço: uma relistagem pode chegar depois do primeiro rótulo.
+    for r in rows(
+        &tx,
+        &format!(
+            "SELECT {COLS} WHERE fast_at IS NOT NULL OR (grp IS NOT NULL AND status = 'rotulado' AND closed = 1)"
+        ),
+        [],
+    )? {
+        let fast_n = if r.grp.is_some() {
+            rare_closed(&tx, &r, r.bought, r.bought + FAST)?
+        } else {
+            vanished_at_or_above(&tx, &r.name, None, r.bought, r.bought + FAST, r.mid)?
+        };
+        let share = if r.grp.is_none() {
+            share_at_or_above(&tx, &r.name, r.bought, r.bought + FAST, r.mid)?
+        } else {
+            None
+        };
+        let fast_closed = if fast_n > 0 {
+            Some(true)
+        } else {
+            share.map(|v| v >= 0.5)
+        };
+        tx.execute("UPDATE ghosts SET fast_sold = ?2, fast_closed = ?3, fast_share = ?4, fast_median_cents = ?5 WHERE listing_id = ?1 AND fast_at IS NOT NULL", params![r.id, fast_n, fast_closed, share, if r.grp.is_none() { sales_median(&tx, &r.name, r.bought, r.bought + FAST)? } else { None }])?;
+        if r.grp.is_some()
+            && rare_closed(&tx, &r, r.bought + SELL_FROM, r.bought + RARE_UNTIL)? == 0
+        {
+            tx.execute("UPDATE ghosts SET status = 'sem_rotulo', closed = NULL, sell_cents = NULL, net_cents = NULL, profit_cents = NULL, label_source = 'sem_cobertura' WHERE listing_id = ?1 AND status = 'rotulado'", [&r.id])?;
+        }
     }
     tx.commit()?;
     Ok(out)
@@ -412,7 +462,8 @@ pub(crate) fn fast_ratio(c: &Connection, since: i64) -> rusqlite::Result<(Option
     let mut v: Vec<f64> = c
         .prepare(
             "SELECT CAST(fast_median_cents AS REAL) / mid_price_cents FROM ghosts
-             WHERE grp IS NULL AND fast_at >= ?1 AND fast_median_cents > 0 AND mid_price_cents > 0",
+             WHERE grp IS NULL AND bought_at >= ?1 AND fast_median_cents > 0 AND mid_price_cents > 0
+             AND NOT EXISTS (SELECT 1 FROM ghost_decisions d WHERE d.listing_id = ghosts.listing_id AND d.source = 'exploracao_externa' AND ghosts.approved = 0)",
         )?
         .query_map([since], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -439,7 +490,7 @@ pub(crate) fn summary(c: &Connection) -> rusqlite::Result<Summary> {
                 coalesce(sum(status = 'sem_rotulo'), 0),
                 coalesce(sum(status = 'rotulado' AND grp IS NOT NULL), 0),
                 coalesce(sum(status = 'rotulado' AND grp IS NOT NULL AND closed = 1), 0)
-             FROM ghosts"
+             FROM ghosts WHERE NOT EXISTS (SELECT 1 FROM ghost_decisions d WHERE d.listing_id = ghosts.listing_id AND d.source = 'exploracao_externa' AND ghosts.approved = 0)"
         ),
         [],
         |r| {
@@ -463,6 +514,54 @@ pub(crate) fn summary(c: &Connection) -> rusqlite::Result<Summary> {
     )?;
     s.fast_ratio = fast_ratio(c, 0)?.0;
     Ok(s)
+}
+
+/// Coortes por decisão original e data da compra virtual, nunca pela data do rótulo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cohort {
+    pub policy: Option<String>,
+    pub block_id: Option<i64>,
+    pub kind: String,
+    pub total: i64,
+    pub mature: i64,
+    pub waiting: i64,
+    pub unlabeled: i64,
+    pub labeled: i64,
+    pub closed: i64,
+    pub predicted_cents: i64,
+    pub virtual_cents: i64,
+    pub indirect: i64,
+}
+
+pub fn cohorts(c: &Connection, from: i64, to: i64, now: i64) -> rusqlite::Result<Vec<Cohort>> {
+    c.prepare(
+        "SELECT d.policy, d.block_id, CASE WHEN g.grp IS NULL THEN 'comum' ELSE 'raro' END,
+       count(*), sum(g.bought_at + CASE WHEN g.grp IS NULL THEN 12*86400 ELSE 14*86400 END <= ?3),
+       sum(g.status = 'aguardando'), sum(g.status = 'sem_rotulo'), sum(g.status = 'rotulado'),
+       coalesce(sum(g.closed = 1),0), sum(g.mid_net_cents - g.price_cents),
+       coalesce(sum(CASE WHEN g.status = 'rotulado' THEN g.profit_cents END),0),
+       sum(g.grp IS NOT NULL AND g.status = 'rotulado' AND g.closed = 1)
+       FROM ghosts g LEFT JOIN ghost_decisions d ON d.listing_id = g.listing_id
+       WHERE g.bought_at >= ?1 AND g.bought_at < ?2 AND g.approved = 1
+       GROUP BY d.policy, d.block_id, g.grp IS NOT NULL",
+    )?
+    .query_map(params![from, to, now], |r| {
+        Ok(Cohort {
+            policy: r.get(0)?,
+            block_id: r.get(1)?,
+            kind: r.get(2)?,
+            total: r.get(3)?,
+            mature: r.get(4)?,
+            waiting: r.get(5)?,
+            unlabeled: r.get(6)?,
+            labeled: r.get(7)?,
+            closed: r.get(8)?,
+            predicted_cents: r.get(9)?,
+            virtual_cents: r.get(10)?,
+            indirect: r.get(11)?,
+        })
+    })?
+    .collect()
 }
 
 /// Boletim de uma semana (`GET /api/learning`): consultas, achados e quase da caça; avisos rotulados em 48 h e
@@ -561,7 +660,7 @@ async fn refit_step(h: &Hunt, now: i64) -> anyhow::Result<()> {
     let ((ratio, labels), first) =
         h.db.call(move |c| {
             let first: Option<i64> = c.query_row(
-                "SELECT MIN(fast_at) FROM ghosts WHERE grp IS NULL AND fast_median_cents > 0",
+                "SELECT MIN(fast_at) FROM ghosts WHERE grp IS NULL AND fast_median_cents > 0 AND NOT EXISTS (SELECT 1 FROM ghost_decisions d WHERE d.listing_id = ghosts.listing_id AND d.source = 'exploracao_externa' AND ghosts.approved = 0)",
                 [],
                 |r| r.get(0),
             )?;
@@ -847,14 +946,11 @@ mod tests {
         .await;
         point(&db, T + 8 * DAY, 1100, 5).await;
         assert_eq!(run(&db, T + 13 * DAY).await.done, 0, "raro espera o dia 14");
-        assert_eq!(run(&db, T + 14 * DAY).await.done, 2);
+        assert_eq!(run(&db, T + 14 * DAY).await.done, 1);
         let r1 = fin(&db, "r1").await;
         assert_eq!((r1.1, r1.3), (Some(2000), Some(true)));
         let r2 = fin(&db, "r2").await;
-        assert_eq!(
-            (r2.1, r2.2, r2.3),
-            (Some(1100), Some(seller_gets(1100) - 1000), Some(false))
-        );
+        assert_eq!((r2.1, r2.2, r2.3), (None, None, None));
         // venda do CSFloat a 2× fecharia
         exec(
             &db,
@@ -962,5 +1058,76 @@ mod tests {
             .unwrap();
         assert_eq!(empty, Week::default());
         assert_eq!(db.call(|c| refit_factor(c)).await.unwrap(), 1.0);
+    }
+    #[tokio::test]
+    async fn rare_without_coverage_is_unknown_and_relisting_revokes_signal() {
+        let (db, _dir) = temp_db();
+        ghost(&db, "r", Some("g"), 1000, 2000, Some(1000)).await;
+        exec(&db, "INSERT INTO observations(listing_id, name, query, grp, price_cents, first_seen, last_seen, cheapest, gone_at) VALUES ('o', ?1, 'q', 'g', 2100, ?2, ?2, 1, ?3)", vec![v(NAME.to_string()),v(T),v(T+8*DAY)]).await;
+        run(&db, T + 14 * DAY).await;
+        assert_eq!(fin(&db, "r").await.3, Some(true));
+        exec(
+            &db,
+            "UPDATE observations SET relisted=1 WHERE listing_id='o'",
+            vec![],
+        )
+        .await;
+        run(&db, T + 14 * DAY + HOUR).await;
+        let result = fin(&db, "r").await;
+        assert_eq!((result.0.as_str(), result.3), ("sem_rotulo", None));
+    }
+
+    #[tokio::test]
+    async fn delayed_evidence_updates_unknown_rare() {
+        let (db, _dir) = temp_db();
+        ghost(&db, "r", Some("g"), 1000, 2000, Some(1000)).await;
+        run(&db, T + 14 * DAY).await;
+        assert_eq!(fin(&db, "r").await.3, None);
+        exec(
+            &db,
+            "INSERT INTO csfloat_sales VALUES (?1, ?2, 200, 100, 2.0, 1, 0.2, NULL, 'g')",
+            vec![v(NAME.to_string()), v(T + 8 * DAY)],
+        )
+        .await;
+        run(&db, T + 15 * DAY).await;
+        assert_eq!(fin(&db, "r").await.3, Some(true));
+    }
+
+    #[tokio::test]
+    async fn cohorts_use_purchase_date_and_exclude_rejected_research() {
+        let (db, _dir) = temp_db();
+        ghost(&db, "a", None, 800, 1000, None).await;
+        ghost(&db, "b", Some("g"), 800, 1000, Some(800)).await;
+        exec(
+            &db,
+            "INSERT INTO ghost_decisions VALUES ('a', 1, 'normal', 'control', 3)",
+            vec![],
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO ghost_decisions VALUES ('b', 2, 'exploracao_externa', 'pilot', 4)",
+            vec![],
+        )
+        .await;
+        let rows = db
+            .call(|c| cohorts(c, T, T + 1, T + 15 * DAY))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.mature == 1 && r.waiting == 1));
+        exec(
+            &db,
+            "UPDATE ghosts SET approved=0 WHERE listing_id='b'",
+            vec![],
+        )
+        .await;
+        let (s, rows) = db
+            .call(|c| Ok((summary(c)?, cohorts(c, T, T + 1, T + 15 * DAY)?)))
+            .await
+            .unwrap();
+        assert_eq!(s.ghosts, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].block_id, Some(3));
     }
 }

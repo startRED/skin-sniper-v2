@@ -49,6 +49,8 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
 | `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado; recalibração do comum |
 | `hunt/harvest.rs` | colheita: valor de consultar um alvo agora (estoque acumulado) e a política da agenda por dia |
+| `research.rs` | atribuição de decisões e tentativas, cota persistente de pesquisa |
+| `hunt/explore.rs`, `hunt/trial.rs` | candidatas fora do ranking, continuidade de ativos e comparação por blocos |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
 | `web/` | rotas, SSE, guarda de Host, arquivos embutidos |
 
@@ -138,7 +140,12 @@ Learning = { days: LearningDay[], since: number | null,     // do dia mais recen
              teacher: TeacherSummary,                     // resumo das compras virtuais (Aprendizado, item 4)
              harvest: HarvestInfo | null,                 // política da agenda e medidas (item 6)
              refit: number,                               // fator do professor no comum, 1 = sem desconto (item 7)
-             weeks: [LearningWeek, LearningWeek] }        // boletim: últimos 7 dias e os 7 anteriores
+             weeks: [LearningWeek, LearningWeek],         // boletim: últimos 7 dias e os 7 anteriores
+             research?: ResearchSummary | null,          // tentativas e cota na última hora
+             trial?: TrialInfo | null,                   // referência, controle, piloto, pausa ou fim
+             exploration?: ExplorationInfo | null,       // candidata, visitas e cobertura nova
+             cohorts?: LearningCohort[],                 // decisão original; comum e raro separados
+             experiment?: TrialReport | null }           // comparação por blocos e incerteza
 LearningDay = { day: "AAAA-MM-DD", queries, books, new_listings, aged, age_median_min: number | null,
                 sales, relists, life_median_min: number | null, near, finds }
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
@@ -293,6 +300,51 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    `refit_log` e para o log. O placar traz o fator e o boletim da semana contra a anterior (consultas, achados,
    quase, avisos que venderiam em 48 h, lucro virtual).
 
+## Exploração fora dos favoritos
+
+Plano e condições: `docs/superpowers/plans/2026-11-06-ml-exploracao-final.md`. O núcleo fica em
+`research.rs` (custo/cota), `hunt/explore.rs` (candidatas) e `hunt/trial.rs` (comparação persistente).
+
+- A nova versão registra a política vigente e coleta pelo menos 24 h e 100 tentativas físicas. Depois
+  alterna oito pares de blocos de 24 h, balanceados por semente persistida; as primeiras 6 h são transição
+  fora da comparação. Reiniciar não reinicia o protocolo. Números são hipóteses, não calibração de mercado.
+- No piloto, uma das 40 vagas comuns recebe uma candidata elegível fora do ranking, com histórico fresco.
+  Rodízio por nunca testada/mais antiga e família; consultas somente em parte dos slots de exploração
+  comum. Controle permite que a mesma skin entre normalmente no ranking. Não altera a régua de compra.
+- Custo por tentativa, incluindo histórico/repetição/saída extra/fallback, atribuído à decisão original.
+  Pedido compartilhado custa uma vez; busca normal não puxa a candidata para avaliação adicional fora da
+  cota. Janela móvel de 1 h: máximo 6 tentativas externas, pelo menos 15 normais por externa e máximo 3 por
+  decisão. Reserva persistida/atômica antes do transporte, sempre dentro do limitador. São hipóteses.
+- Erro certo antes do envio vira `not_sent` e não entra na cota. Reserva sem desfecho após queda do processo
+  continua `started`, custo conservador que não prova recebimento pela Steam. CSFloat tem contagem própria;
+  compra/login/sessão não herdam cota de exploração. Intervalos são reconferidos no envio, após o banco.
+- Visitas espaçadas por 1 h. Após 6 h e três visitas, ou 24 h sem terminar, a vaga gira. Retenção provisória
+  por mais uma janela exige três aprovados únicos, 12 tentativas da candidata e 12 de referência nas últimas
+  24 h, com rendimento aprovado/tentativa superior ao comum normal. Não promove por quase-achado. Limiar
+  hipotético, sem alegar superioridade estatística individual; depois a vaga volta a desafiar outra skin.
+- Ativo impede rotação que o abandone; conferência atrasada há 10 min precede pesquisa/descoberta dentro
+  do limitador. Acompanhamento usa vagas normais, entra no custo total e aparece separado. Instalação que
+  herdou mais ativos que o teto mantém esses acompanhamentos, sem abrir candidata extra.
+- Tarefas, identidade/visitas da candidata, crédito, rodízio de modos e cursor de seed são persistidos.
+  Históricos ausentes ou mais antigos vêm antes dos mais populares. Falhas ainda dependem do rodízio em
+  memória daquela descoberta para não repetir no ciclo; não há nova consulta fora da cota para isso.
+- Achados e créditos são deduplicados por ID por 60 dias, entre tarefas/reinícios. Achado e oportunidade
+  são gravados na mesma transação. Identificação de relistagem continua limitada à cobertura observada.
+- Professor mantém decisão original e coortes por compra virtual. Raro sem sinal fica sem rótulo;
+  evidência atrasada pode preencher o resultado e relistagem desfaz o indício. Amostras externas recusadas
+  ficam fora da recalibração/placar padrão. Painel separa previsto, virtual, pendente, sem rótulo e maduro;
+  vendas reais continuam no registro de compras, sem serem inferidas do virtual.
+- 429 exploratório ou limite violado interrompe persistentemente o ensaio e restaura a política base.
+  A eleição antiga de colheita não troca a política durante a comparação. O relatório por blocos mostra
+  diferença/incerteza, mas não elege vencedor enquanto maturação, cobertura e memória não forem comprovadas.
+- Pesquisa dura até 60 dias, teto nominal de 500 mil linhas por tabela; últimos 14 dias e vínculos de
+  compras virtuais são preservados mesmo acima do teto. Medir espaço antes de aumentar tráfego; retenção
+  nunca apaga compras para abrir lugar. Alvos e deduplicação também expiram com o registro.
+
+As ampliações para cortes anteriores de descoberta, exploração externa de seed/float, recusados distantes
+e compartilhamento de aprendizado dependem da evidência do piloto e não são liberadas por calendário.
+Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float internos continuam com rodízio.
+
 ## Precificação (o coração)
 
 - Taxas: fórmula em centavos de `conhecimento.md` 5.1; inverso por busca binária. Nunca ÷ 1,15.
@@ -429,8 +481,8 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   memória: reiniciar começa do zero.
 - Concorrência do `quick` e do `mid`: só conta outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns); um
   comum barato não limita a venda de um T1.
-- Anúncio acima do saldo não entra em `listings_seen`: se o saldo subir, ainda é novo. Tarefa que sai da seleção
-  encerra (`gone`) as oportunidades dela, porque ninguém mais as confere.
+- Anúncio acima do saldo não entra em `listings_seen`: se o saldo subir, ainda é novo. Tarefa com oportunidade
+  ativa é preservada para acompanhamento mesmo quando perde o lugar na seleção normal; sair do teste não prova sumiço.
 - `gone` só vale com a página confiável: página vazia precisa se repetir 2 vezes, e anúncio fora da primeira
   página (`more`) só some se o preço dele estava dentro da faixa vista.
 - Reavaliação (revisão do Codex): anúncio já visto é avaliado de novo quando o preço, o histórico do item ou o menor concorrente mudam
