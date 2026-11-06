@@ -162,7 +162,15 @@ function learning(): Learning {
     ghosts: 212, waiting: 160, fast_alerts: 6, fast_alerts_closed: 4, fast_near: 58, fast_near_closed: 21, fast_ratio: 0.96,
     final_alerts: 0, final_alerts_won: 0, profit_cents: 0, predicted_cents: 0, unlabeled: 0, rare_labeled: 0, rare_closed: 0
   };
-  return { days, since: nowS() - 2.4 * 86400, teacher };
+  const harvest = {
+    policy: 'shadow' as const, start: nowS() - 2.4 * 86400, life_s: 540, lives: 312, picks: 4810, agree: 3127,
+    ucb_rate: null, harvest_rate: null
+  };
+  const weeks: Learning['weeks'] = [
+    { queries: 11900, finds: 2, near: 93, alerts: 6, alerts_closed: 4, labeled: 0, profit_cents: 0 },
+    { queries: 0, finds: 0, near: 0, alerts: 0, alerts_closed: 0, labeled: 0, profit_cents: 0 }
+  ];
+  return { days, since: nowS() - 2.4 * 86400, teacher, harvest, refit: 1, weeks };
 }
 
 function history(o: Opportunity): History {

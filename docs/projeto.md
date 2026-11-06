@@ -47,7 +47,8 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador |
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
-| `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado |
+| `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado; recalibração do comum |
+| `hunt/harvest.rs` | colheita: valor de consultar um alvo agora (estoque acumulado) e a política da agenda por dia |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
 | `web/` | rotas, SSE, guarda de Host, arquivos embutidos |
 
@@ -134,7 +135,10 @@ Calibration = { families: [{ family: string, kind: "desconto" | "raro", n: numbe
                               mean_error_pct: number, bias_pct: number }],
                 hours: [{ hour: 0..23, listings: number, opportunities: number }] }
 Learning = { days: LearningDay[], since: number | null,     // do dia mais recente; since = 1º anúncio do registro
-             teacher: TeacherSummary }                    // resumo das compras virtuais (Aprendizado, item 4)
+             teacher: TeacherSummary,                     // resumo das compras virtuais (Aprendizado, item 4)
+             harvest: HarvestInfo | null,                 // política da agenda e medidas (item 6)
+             refit: number,                               // fator do professor no comum, 1 = sem desconto (item 7)
+             weeks: [LearningWeek, LearningWeek] }        // boletim: últimos 7 dias e os 7 anteriores
 LearningDay = { day: "AAAA-MM-DD", queries, books, new_listings, aged, age_median_min: number | null,
                 sales, relists, life_median_min: number | null, near, finds }
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
@@ -274,6 +278,20 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    - Preço sugerido: anunciar a `base × p75` e descer até `base × prêmio`. Anúncios do grupo à venda há mais de
      48 h (vistos nas últimas 6 h) aparecem como "parados".
    - Sai no painel (etiqueta ao lado do grupo e linha nos detalhes), no aviso do Windows e no Telegram.
+6. **Colheita (`hunt/harvest.rs`).** Achado chega a uma taxa λ por alvo e some com vida média `L`; o que sobra `Δ`
+   segundos depois da última consulta é `λ·L·(1 − e^(−Δ/L))`. λ = recompensa ÷ exposição do braço (`arm_stats.exposure`,
+   mesma recompensa e decaimento de 24 h do UCB1); cada resultado de consulta soma `L·(1 − e^(−Δ/L))` de exposição.
+   `L` = vida mediana (7 dias) dos anúncios que eram o mais barato e sumiram sem relistagem, com ≥ 20 medidas;
+   senão 600 s. Política por dia de Brasília contado da 1ª volta (`settings.harvest_start`): 7 dias em sombra (o UCB1
+   escolhe; conta quantas vezes a colheita escolheria igual), 7 dias alternando (par = UCB1, ímpar = colheita) e
+   depois a que rendeu mais (achados + quase) por consulta nesses dias; empate ou falta de dado fica com o UCB1. A
+   exploração não muda. Resumo de hora em hora em `settings.harvest_info`, mostrado no placar.
+7. **Recalibração (`teacher::refit`).** Uma vez por dia de Brasília, com ≥ 7 dias de rótulos rápidos e ≥ 30 rótulos de
+   comum com mediana na última semana: alvo = fator aplicado × mediana de (real das 48 h ÷ previsto), em
+   [0,80; 1,00] (só desconta), andando no máximo 2 % por dia. Entra como `min` com o fator das vendas do Erick no
+   desconto do comum (raro não muda); a frase de confiança diz qual dos dois descontou. Toda mudança vai para
+   `refit_log` e para o log. O placar traz o fator e o boletim da semana contra a anterior (consultas, achados,
+   quase, avisos que venderiam em 48 h, lucro virtual).
 
 ## Precificação (o coração)
 

@@ -17,6 +17,7 @@
 //! - **Decaimento** (meia-vida `HALF_LIFE`): o passado antigo pesa menos, o mercado muda.
 //! - **Seca** (`DRY_HALF_LIFE`): a média vale pela metade a cada 4 h sem recompensa nenhuma.
 
+use super::harvest::{self, Policy};
 use super::{Hunt, catalog, detect, learn, watch};
 use crate::steam::book;
 use crate::steam::client::{Endpoint, Error as SteamError};
@@ -135,6 +136,9 @@ pub struct Stat {
     /// Última recompensa (achado ou quase), em segundos; 0 = nunca.
     pub reward_at: i64,
     pub updated_at: i64,
+    /// Colheita: exposição somada das consultas (s, com o mesmo decaimento de `r`) e a última consulta.
+    pub exposure: f64,
+    pub last_at: i64,
 }
 
 impl Stat {
@@ -144,6 +148,7 @@ impl Stat {
             let f = 0.5_f64.powf(dt / HALF_LIFE);
             self.n *= f;
             self.r *= f;
+            self.exposure *= f;
         }
         self.updated_at = self.updated_at.max(now);
     }
@@ -178,6 +183,10 @@ pub struct Queue {
     explore: f64,
     /// Rodízio de modos no slot de exploração.
     explore_turn: usize,
+    /// Colheita: vida do achado (s; 0 = padrão), política do dia e, fora da exploração, (escolhas, iguais ao UCB1).
+    pub life: f64,
+    pub policy: Policy,
+    pub shadow: (u64, u64),
 }
 
 impl Queue {
@@ -265,6 +274,22 @@ impl Queue {
             .collect()
     }
 
+    fn life(&self) -> f64 {
+        if self.life > 0.0 {
+            self.life
+        } else {
+            harvest::DEFAULT_LIFE
+        }
+    }
+
+    /// Recompensa esperada de consultar o braço agora (`harvest::value`).
+    fn harvest_value(&self, id: &str, now: i64) -> f64 {
+        let Some(s) = self.stats.get(id).filter(|s| s.queries > 0) else {
+            return f64::INFINITY;
+        };
+        harvest::value(s.r, s.exposure, now - s.last_at, self.life())
+    }
+
     /// Índice UCB1 de um braço: lucro esperado por consulta + bônus de incerteza na escala da maior média.
     fn index(&self, id: &str, now: i64, total_n: f64, scale: f64) -> f64 {
         let Some(s) = self.stats.get(id).filter(|s| s.queries > 0) else {
@@ -307,6 +332,7 @@ impl Queue {
         };
         self.explore += EXPLORE_SHARE;
         let exploring = self.explore >= 1.0;
+        let mut shadow = None;
         let pick = if exploring {
             // O slot de exploração gira entre os modos presentes (piso por modo, qualquer que seja o número de
             // braços de cada um) e, dentro do modo, vai para o menos testado (consultas decaídas).
@@ -329,18 +355,41 @@ impl Queue {
                         .then_with(|| tie(a, b))
                 })
         } else {
-            self.entries
+            let ucb = |e: &Entry| self.index(&e.task.id, now, total_n, scale);
+            let by_ucb = self
+                .entries
                 .values()
                 .filter(|e| keep(&e.task))
-                .min_by(|a, b| {
-                    let (ia, ib) = (
-                        self.index(&a.task.id, now, total_n, scale),
-                        self.index(&b.task.id, now, total_n, scale),
-                    );
-                    ib.total_cmp(&ia).then_with(|| tie(a, b))
-                })
+                .min_by(|a, b| ucb(b).total_cmp(&ucb(a)).then_with(|| tie(a, b)));
+            if self.policy == Policy::Ucb {
+                by_ucb
+            } else {
+                // colheita: maior estoque acumulado; empate (ex.: ninguém rendeu) segue o UCB1
+                let hv = |e: &Entry| self.harvest_value(&e.task.id, now);
+                let by_harvest = self
+                    .entries
+                    .values()
+                    .filter(|e| keep(&e.task))
+                    .min_by(|a, b| {
+                        hv(b)
+                            .total_cmp(&hv(a))
+                            .then_with(|| ucb(b).total_cmp(&ucb(a)))
+                            .then_with(|| tie(a, b))
+                    });
+                let same = by_ucb.map(|e| &e.task.id) == by_harvest.map(|e| &e.task.id);
+                shadow = Some(same);
+                if self.policy == Policy::Harvest {
+                    by_harvest
+                } else {
+                    by_ucb
+                }
+            }
         };
         let id = pick?.task.id.clone();
+        if let Some(same) = shadow {
+            self.shadow.0 += 1;
+            self.shadow.1 += u64::from(same);
+        }
         if exploring {
             self.explore -= 1.0;
         }
@@ -375,6 +424,16 @@ impl Queue {
             return;
         };
         s.decay(now);
+        let gap = (s.last_at > 0).then(|| now - s.last_at);
+        s.exposure += harvest::exposure(
+            gap,
+            if self.life > 0.0 {
+                self.life
+            } else {
+                harvest::DEFAULT_LIFE
+            },
+        );
+        s.last_at = now;
         let r = found.gain_cents.max(0) as f64 + found.near_credit;
         s.r += r;
         s.finds += found.finds;
@@ -478,6 +537,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     super::patterns::maybe_step(h).await;
     // professor: só o banco; roda também sem saldo e com a Steam em pausa
     super::teacher::maybe_step(h).await;
+    super::harvest::maybe_step(h).await;
     if h.saldo() <= 0 {
         h.set_message(Some(NO_SALDO.into()));
         return Tick::Idle;
@@ -878,8 +938,9 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
         let tx = c.transaction()?;
         for (id, s) in rows {
             tx.execute(
-                "INSERT OR REPLACE INTO arm_stats(id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR REPLACE INTO arm_stats(id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at,
+                    exposure, last_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     id,
                     s.n,
@@ -890,7 +951,9 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
                     s.near_hits,
                     s.first_at,
                     s.reward_at,
-                    s.updated_at
+                    s.updated_at,
+                    s.exposure,
+                    s.last_at
                 ],
             )?;
         }
@@ -905,7 +968,8 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
         .db
         .call(|c| {
             c.prepare(
-                "SELECT id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at FROM arm_stats",
+                "SELECT id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at, exposure, last_at
+                 FROM arm_stats",
             )?
             .query_map([], |r| {
                 Ok((
@@ -920,6 +984,8 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
                         first_at: r.get(7)?,
                         reward_at: r.get(8)?,
                         updated_at: r.get(9)?,
+                        exposure: r.get(10)?,
+                        last_at: r.get(11)?,
                     },
                 ))
             })?
@@ -1183,6 +1249,51 @@ mod tests {
         q2.set_tasks(vec![task("dud1", 1.0)]);
         q2.set_tasks(arms_queue().tasks());
         assert!(q2.stats["best"].queries > 0);
+    }
+
+    #[test]
+    fn harvest_pick_prefers_stale_productive_target() {
+        // dois alvos com a mesma taxa medida: "fresh" consultado há 30 s, "stale" há 30 min
+        let now = 100_000;
+        let stat = |last_at| Stat {
+            n: 10.0,
+            r: 600.0,
+            queries: 10,
+            first_at: 1,
+            reward_at: now - 60,
+            updated_at: now,
+            exposure: 6000.0,
+            last_at,
+            ..Stat::default()
+        };
+        let queue = |policy| {
+            let mut q = Queue {
+                policy,
+                ..Queue::default()
+            };
+            q.set_tasks(vec![task("fresh", 1.0), task("stale", 1.0)]);
+            q.load_stats(vec![
+                ("fresh".into(), stat(now - 30)),
+                ("stale".into(), stat(now - 1800)),
+            ]);
+            q
+        };
+        // UCB1 empata e desempata pelo id; a colheita vai para o estoque maior
+        let mut q = queue(Policy::Ucb);
+        assert_eq!(q.next(now).unwrap().id, "fresh");
+        assert_eq!(q.shadow, (0, 0));
+        let mut q = queue(Policy::Harvest);
+        assert_eq!(q.next(now).unwrap().id, "stale");
+        assert_eq!(q.shadow, (1, 0));
+        // em sombra o UCB1 escolhe e a discordância fica contada
+        let mut q = queue(Policy::default());
+        assert_eq!(q.next(now).unwrap().id, "fresh");
+        assert_eq!(q.shadow, (1, 0));
+        // o resultado da consulta soma exposição e marca a hora
+        q.reward("fresh", now + 10, Found::default());
+        let s = &q.stats["fresh"];
+        assert_eq!(s.last_at, now + 10);
+        assert!(s.exposure > 6000.0 * 0.99 && s.exposure < 6000.0 + 40.0);
     }
 
     #[test]

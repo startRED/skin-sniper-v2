@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod detect;
+pub mod harvest;
 mod learn;
 pub mod ledger;
 pub mod orders;
@@ -91,6 +92,10 @@ pub(crate) struct Shared {
     pub ledger_prev: HashMap<String, (i64, Option<i64>)>,
     /// Professor (`teacher`): última volta e as skins cujo livro ele precisa ler para rotular (dias 7–9).
     pub teach_at: i64,
+    /// Última volta da colheita (`harvest::maybe_step`).
+    pub harvest_at: i64,
+    /// Fator do professor para o comum (`teacher::refit`); entra como `min` com o das vendas reais.
+    pub refit: f64,
     pub label_books: Vec<String>,
     /// Último registro do livro por skin (`orders::remember_book`).
     pub book_logged: HashMap<String, i64>,
@@ -171,6 +176,8 @@ impl Hunt {
                 closeness_scale: learn::DEFAULT_SCALE,
                 ledger_prev: HashMap::new(),
                 teach_at: 0,
+                harvest_at: 0,
+                refit: 1.0,
                 label_books: vec![],
                 book_logged: HashMap::new(),
             }),
@@ -251,9 +258,15 @@ impl Hunt {
         Ok(())
     }
 
-    /// Fator das vendas reais para o tipo (raro = item de grupo).
+    /// Fator das vendas reais para o tipo (raro = item de grupo); no comum vence o menor entre ele e o do professor.
     pub(crate) fn correction(&self, rare: bool) -> f64 {
-        self.lock().correction[usize::from(rare)]
+        self.corrections()[usize::from(rare)]
+    }
+
+    /// `[desconto, raro]` com o fator do professor já aplicado ao desconto.
+    pub(crate) fn corrections(&self) -> [f64; 2] {
+        let s = self.lock();
+        [s.correction[0].min(s.refit), s.correction[1]]
     }
 
     /// Melhor combinação das oportunidades ativas que cabe no saldo (lucro esperado ajustado ao risco).

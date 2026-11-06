@@ -522,10 +522,21 @@ async fn evaluate_one(
         }
     };
     if correction < 1.0 {
-        est.evidence += &format!(
-            " · suas vendas saíram {}% abaixo do previsto, já descontado",
-            ((1.0 - correction) * 100.0).round()
-        );
+        let teacher = group.is_none() && {
+            let s = h.lock();
+            s.refit < s.correction[0]
+        };
+        est.evidence += &if teacher {
+            format!(
+                " · o mercado pagou {}% abaixo do previsto nos avisos da última semana, já descontado",
+                ((1.0 - correction) * 100.0).round()
+            )
+        } else {
+            format!(
+                " · suas vendas saíram {}% abaixo do previsto, já descontado",
+                ((1.0 - correction) * 100.0).round()
+            )
+        };
     }
     let ev = sell::evaluate(l.price_cents, &est, notify_min);
     let near = Some(Near {
