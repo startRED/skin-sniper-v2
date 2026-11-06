@@ -24,7 +24,7 @@ cargo build --release                                  # gera target/release/ski
 3. Não invente número de mercado. Sem medida, diga que não mediu; resposta da Steam não validada é hipótese.
 4. Dinheiro em centavos inteiros (`i64`). Nada de `f64` para preço final nem ÷ 1,15.
 5. Não adicione crate fora do `Cargo.toml` sem motivo escrito no PR.
-6. Entrega: worktree próprio em `E:\Documentos\ProjetosIA\Skin Sniper\worktrees\v2-<tarefa>`, ramo próprio,
+6. Entrega: worktree próprio em `E:\Documentos\ProjetosIA\SkinSniperV2\worktrees\v2-<tarefa>`, ramo próprio,
    commit com arquivos pelo nome (nunca `git add -A`), push, PR para `main`, CI verde.
 7. Tráfego real contra a Steam só com ritmo ≥ 3 s entre consultas e nunca em rajada: o IP é o mesmo do
    robô antigo, que continua ligado.
