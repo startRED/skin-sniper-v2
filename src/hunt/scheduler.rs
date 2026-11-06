@@ -287,6 +287,11 @@ impl Queue {
         let Some(s) = self.stats.get(id).filter(|s| s.queries > 0) else {
             return f64::INFINITY;
         };
+        // escolhido sem nenhum resultado medido (consulta falhou, ou nota de antes da colheita): fica para o
+        // desempate pelo UCB1 em vez de prender a agenda nele
+        if s.exposure <= 0.0 {
+            return 0.0;
+        }
         harvest::value(s.r, s.exposure, now - s.last_at, self.life())
     }
 
@@ -1294,6 +1299,17 @@ mod tests {
         let s = &q.stats["fresh"];
         assert_eq!(s.last_at, now + 10);
         assert!(s.exposure > 6000.0 * 0.99 && s.exposure < 6000.0 + 40.0);
+        // alvo escolhido sem resultado medido não prende a colheita: perde para o que tem estoque
+        let mut q = queue(Policy::Harvest);
+        q.load_stats(vec![(
+            "stale".into(),
+            Stat {
+                exposure: 0.0,
+                last_at: 0,
+                ..stat(0)
+            },
+        )]);
+        assert_eq!(q.next(now).unwrap().id, "fresh");
     }
 
     #[test]
