@@ -72,7 +72,7 @@ export type WatchRow = {
   kind: 'desconto' | 'raro';
   group: string | null;
   last_checked_at: number | null;
-  mode: 'barato' | 'seed';
+  mode: 'barato' | 'seed' | 'float';
   score: number;
   reason: string;
   bid_cents: number | null; // pedido de compra sugerido (1 centavo acima do maior); null quando não compensa

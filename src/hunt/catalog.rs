@@ -17,7 +17,7 @@ use super::scheduler::Task;
 use super::{Hunt, detect};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
-use crate::pricing::groups::{seed_ranges, table_skins};
+use crate::pricing::groups::{float_band, seed_ranges, table_skins};
 use crate::pricing::sell::{
     MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
 };
@@ -39,6 +39,10 @@ pub const MIN_SALES_PER_DAY: f64 = 1.0;
 const SCORE_SALES_CAP: f64 = 10.0;
 pub const WATCH_MAX: usize = 40;
 pub const RARE_MAX_TASKS: usize = 24;
+/// Float de elite: até tantas skins × desgaste, as que mais vendem primeiro (giro traz anúncio novo na faixa).
+pub const FLOAT_MAX_TASKS: usize = 16;
+/// Abaixo disso quase nunca chega anúncio novo na faixa de elite (10 % do desgaste).
+const FLOAT_MIN_SALES: f64 = 20.0;
 /// Rank das entradas vindas da busca por nome de skin com tabela (depois da popularidade); não rebaixa o rank
 /// que a varredura já deu ao item.
 const SKIN_RANK_BASE: i64 = 100_000;
@@ -252,6 +256,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
                     code,
                     wear: wear_of(&i.name),
                     seeds: vec![],
+                    float: None,
                     score: base,
                 },
             ))
@@ -306,6 +311,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
                     code: code.to_string(),
                     wear: None,
                     seeds,
+                    float: None,
                     score: 0.0,
                 };
                 // faixa vista acima do saldo: ainda gira (outra faixa pode estar barata), mas com menos peso
@@ -333,6 +339,40 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         score: per_weight * w,
         ..t
     }));
+    // Float de elite: skin comum × desgaste com faixa conhecida, piso que cabe e giro. Sem piso mínimo de
+    // desconto: o prêmio de float (1,3–2,8× nas vendas medidas) paga a taxa mesmo em skin barata. A faixa vista
+    // acima do saldo sai até a consulta envelhecer.
+    let mut float: Vec<(f64, Task)> = items
+        .iter()
+        .filter(|i| !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir"))
+        .filter_map(|i| {
+            let id = format!("f:{}", i.name);
+            let spd = i.sales_per_day.filter(|s| *s >= FLOAT_MIN_SALES)?;
+            let f = ratio_floor(i)?;
+            let seen = observed(c.floors, &id, c.now);
+            if f > c.saldo || seen.floor.is_some_and(|f| f > c.saldo) {
+                return None;
+            }
+            Some((
+                spd,
+                Task {
+                    id,
+                    name: i.name.clone(),
+                    code: i.code.clone()?,
+                    wear: Some(wear_of(&i.name)?),
+                    seeds: vec![],
+                    float: Some(float_band(&i.name)?),
+                    score: 0.0,
+                },
+            ))
+        })
+        .collect();
+    float.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+    float.dedup_by(|a, b| a.1.id == b.1.id);
+    float.truncate(FLOAT_MAX_TASKS);
+    // Mesma nota-base somada dos raros: só desempata braços ainda não testados.
+    let each = if total > 0.0 { total } else { 10.0 } / float.len().max(1) as f64;
+    tasks.extend(float.into_iter().map(|(_, t)| Task { score: each, ..t }));
     tasks
 }
 
@@ -875,7 +915,9 @@ pub async fn load_ratio(db: &Db) -> Result<Option<(f64, i64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hunt::scheduler::Mode;
     use crate::steam::history;
+    use crate::steam::listings::PropFilter;
 
     fn item(name: &str, usd: i64, rank: i64, spd: f64, disp: f64) -> Item {
         Item {
@@ -1052,7 +1094,10 @@ mod tests {
         let floors = HashMap::new();
         let hits = NO_HITS();
         let tasks = select(&items, &ctx(saldo, &hits, &floors));
-        let (rare, common): (Vec<&Task>, Vec<&Task>) = tasks.iter().partition(|t| t.rare());
+        let (rare, common): (Vec<&Task>, Vec<&Task>) = tasks
+            .iter()
+            .filter(|t| t.float.is_none())
+            .partition(|t| t.rare());
         let min = min_discount_floor();
         for t in &common {
             let i = items.iter().find(|i| i.name == t.name).unwrap();
@@ -1192,12 +1237,27 @@ mod tests {
     }
 
     #[test]
-    fn selected_arms_include_discounts_and_rares_only() {
+    fn selected_arms_include_discounts_rares_and_elite_floats() {
         let (items, saldo) = catalog_fixture();
         let tasks = select(&items, &ctx(saldo, &NO_HITS(), &HashMap::new()));
         assert!(tasks.iter().any(|t| t.id.starts_with("d:")));
         assert!(tasks.iter().any(|t| t.id.starts_with("r:")));
-        assert!(tasks.iter().all(|t| !t.id.starts_with("f:")));
+        let floats: Vec<&Task> = tasks.iter().filter(|t| t.id.starts_with("f:")).collect();
+        assert!(!floats.is_empty() && floats.len() <= FLOAT_MAX_TASKS);
+        for t in &floats {
+            // comum com desgaste, faixa dentro do começo do desgaste, filtro de float na consulta
+            let (lo, hi) = t.float.unwrap();
+            assert!(!t.name.contains("StatTrak") && t.wear.is_some(), "{t:?}");
+            assert!(lo < hi && t.mode() == Mode::Float, "{t:?}");
+            assert_eq!(t.filters(), vec![PropFilter::float(lo, hi)]);
+            let i = items.iter().find(|i| i.name == t.name).unwrap();
+            assert!(i.sales_per_day.unwrap() >= FLOAT_MIN_SALES);
+        }
+        // faixa vista acima do saldo: sai
+        let id = floats[0].id.clone();
+        let seen = HashMap::from([(id.clone(), (Some(saldo + 1), 1_793_769_000))]);
+        let again = select(&items, &ctx(saldo, &NO_HITS(), &seen));
+        assert!(again.iter().all(|t| t.id != id));
     }
 
     #[test]

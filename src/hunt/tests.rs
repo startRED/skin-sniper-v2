@@ -4,7 +4,8 @@
 //! As capturas reais são usadas como estão, com estas alterações feitas no teste (a captura de 03/11 não
 //! tem anúncio com lucro): o primeiro anúncio da página de listagens passa a custar R$ 4,00, o segundo
 //! recebe seed 59 (tier 1 do Moonrise) e custa R$ 7,00, e a primeira entrada da busca vira o Moonrise FT
-//! a US$ 1,00. No CSFloat, três vendas sem adesivo ganham seeds do tier 1 e preço ×1,5.
+//! a US$ 1,00. No CSFloat, três vendas sem adesivo ganham seeds do tier 1 e preço ×1,5, e quatro vendas com float
+//! de elite do FT (0,155–0,173; duas já eram reais e saíram a ~1,0×) passam a ×2.
 
 use super::detect::points_for;
 use super::scheduler::{Task, Tick, tick};
@@ -75,6 +76,11 @@ fn csfloat_body() -> Value {
         v[i]["price"] = json!(price * 3 / 2);
         v[i]["item"]["paint_seed"] = json!(seed);
     }
+    for (i, float) in [(4, 0.1628), (6, 0.155), (7, 0.16), (8, 0.1728)] {
+        let price = v[i]["price"].as_i64().unwrap();
+        v[i]["price"] = json!(price * 2);
+        v[i]["item"]["float_value"] = json!(float);
+    }
     v
 }
 
@@ -113,6 +119,21 @@ async fn serve() -> (String, Arc<Bodies>) {
                         .retain(|l| {
                             let seed = l["asset"]["asset_properties"][0]["int_value"].as_str();
                             seed.and_then(|v| v.parse::<i64>().ok())
+                                .is_some_and(|v| (lo..=hi).contains(&v))
+                        });
+                }
+                // e a faixa de float (propriedade 2), em número
+                if let Some(f) = qp[0]["propertyFilters"].get("2") {
+                    let (lo, hi) = (
+                        f["float_min"].as_f64().unwrap(),
+                        f["float_max"].as_f64().unwrap(),
+                    );
+                    body["data"]["listings"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|l| {
+                            l["asset"]["asset_properties"][1]["float_value"]
+                                .as_f64()
                                 .is_some_and(|v| (lo..=hi).contains(&v))
                         });
                 }
@@ -333,6 +354,55 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     assert_eq!(gone_at, Some(NOW));
 }
 
+#[tokio::test]
+async fn elite_float_listing_is_priced_by_the_premium_of_its_band() {
+    const ID_FLOAT: &str = "6932893052431123649";
+    let (base, bodies) = serve().await;
+    {
+        let mut b = bodies.listings.lock().unwrap();
+        let l = &mut b["data"]["listings"][12];
+        l["asset"]["asset_properties"][1]["float_value"] = json!(0.152);
+        l["unPrice"] = json!(1044);
+        l["unFee"] = json!(156);
+    }
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let mut hit = None;
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Opportunity(o) = ev
+                && o.id == ID_FLOAT
+            {
+                hit = Some(o);
+            }
+        }
+        if hit.is_some() {
+            break;
+        }
+    }
+    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; com float 0,152 a faixa vendeu a ~2× (3 vendas: a de seed 95 é tier do Moonrise, pattern vence float)
+    let o = hit.expect("float de elite vira oportunidade");
+    assert_eq!(
+        (o.kind, o.group.as_deref()),
+        (Kind::Raro, Some("Float ≤ 0.173"))
+    );
+    assert!(
+        o.evidence.contains("grupo raro: 3 vendas"),
+        "{}",
+        o.evidence
+    );
+    assert!(o.sell.mid.profit_cents >= 100 && !o.safe, "{:?}", o.sell);
+    // a agenda tem braços de float, com o filtro de float na consulta
+    let tasks = h.lock().queue.tasks();
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.id == format!("f:{MOON}") && t.float.is_some())
+    );
+}
+
 /// Roda a caça até aparecerem as duas oportunidades da fixture.
 async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Vec<Opportunity> {
     let mut found = vec![];
@@ -404,6 +474,7 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
         code: "G1".into(),
         wear: None,
         seeds,
+        float: None,
         score: 1.0,
     };
     let only = |l: Listing| {
@@ -553,6 +624,7 @@ async fn hourly_listings_include_above_balance_without_counting_repeats() {
         code: "G1".into(),
         wear: None,
         seeds: vec![],
+        float: None,
         score: 1.0,
     };
     let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
@@ -585,6 +657,7 @@ async fn empty_pages_counter_saturates() {
         code: "G1".into(),
         wear: None,
         seeds: vec![],
+        float: None,
         score: 1.0,
     };
     let page = crate::steam::listings::ListingsPage {
@@ -686,6 +759,7 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
         code: "G1".into(),
         wear: None,
         seeds: vec![],
+        float: None,
         score: 1.0,
     };
     {
@@ -940,6 +1014,7 @@ async fn orders_read_one_book_per_gap_oldest_common_first() {
         code: "G1".into(),
         wear: None,
         seeds,
+        float: None,
         score: 1.0,
     };
     h.lock().queue.set_tasks(vec![

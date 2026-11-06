@@ -47,7 +47,8 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
 | `web/` | rotas, SSE, guarda de Host, arquivos embutidos |
 
-Tabelas de pattern copiadas do projeto antigo para `assets/patterns/` (ver `conhecimento.md` 4.5).
+Tabelas de pattern copiadas do projeto antigo para `assets/patterns/` (ver `conhecimento.md` 4.5). `floats.json` traz o
+menor e o maior float de cada skin (ByMykel/CSGO-API, via `skins.json` do projeto antigo; facas e luvas fora).
 
 ## Contrato da API (o frontend depende só disto)
 
@@ -82,7 +83,7 @@ Opportunity = {
   name: string,                  // market_hash_name
   icon_url: string, steam_url: string, inspect_url: string | null,
   wear: string | null, float: number | null, seed: number | null,
-  group: string | null,          // ex.: "T1 Center Star", "Ruby", "Fade 99%"
+  group: string | null,          // ex.: "T1 Center Star", "Ruby", "Fade 99%", "Float ≤ 0.173"
   kind: "desconto" | "raro",
   price_cents: number,           // total que o comprador paga
   sell: Sell,
@@ -103,7 +104,7 @@ WatchRow = {
                                    // null sem estimativa e sempre null em item raro (o teto depende do grupo)
   sales_per_day: number, kind: "desconto" | "raro", group: string | null,
   last_checked_at: number | null,  // ordem: (floor - max_buy) crescente; sem os dois, por último
-  mode: "barato" | "seed", // modo de busca do alvo (a mesma skin pode aparecer em mais de um modo)
+  mode: "barato" | "seed" | "float", // modo de busca do alvo (a mesma skin pode aparecer em mais de um modo)
   score: number,                   // lucro esperado por consulta gasta, em centavos, aprendido (0 sem dados)
   reason: string                   // por que a agenda dá consultas a ele, em palavras curtas: "rendeu R$ 1,20 em
                                    // 30 consultas", "testando alvo novo", "quase deu lucro 3 vezes",
@@ -181,7 +182,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   (quem compra leva o mais barato: vender acima do concorrente já à venda não é o mais provável).
   Concorrente = mesmo nome e mesmo grupo raro (ou ambos comuns); no raro conta também o menor anúncio do grupo
   visto nas outras faixas de seed da mesma skin nas últimas 6 h, porque a página de uma faixa não mostra as outras.
-- Raro: o grupo do anúncio (tier, fase, faixa de fade) busca vendas do CSFloat do mesmo grupo
+- Float de elite: anúncio comum cujo float está nos 10 % melhores do desgaste (a partir do menor float da skin) é
+  raro do grupo `float:<skin>:<desgaste>` (pattern vence float). O prêmio vem das vendas do CSFloat da mesma faixa,
+  pela mesma regra do raro abaixo; sem 3 vendas, não há prêmio. Medido em 06/11 (157 skins, ~6 000 vendas do
+  CSFloat): os 10 % melhores saíram de 1,3× a 2,8× a mediana em várias skins (XM1014 Zombie Offensive FN 2,8×, USP-S
+  Tropical Breeze FN 2,3×, M4A1-S Solitude MW 1,7×); no Moonrise FT as duas vendas da faixa saíram a ~1,0×. Os 10 %
+  são recorte de hipótese, não calibração.
+- Raro: o grupo do anúncio (tier, fase, faixa de fade, float de elite) busca vendas do CSFloat do mesmo grupo
   (`price / reference.base_price`). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
   prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
   usa a base comum e escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço.
@@ -255,6 +262,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 usar o painel de verdade no navegador contra a Steam real, com o robô antigo pausado durante a medição.
 
 ## Desvios registrados (caça, implementação)
+
+- Braço de float (`f:<nome>`, modo `float`): até 16 skins comuns × desgaste com faixa de float conhecida, ≥ 20 vendas/dia
+  e piso que cabe no saldo, as que mais vendem primeiro; consulta com o desgaste e o filtro de float da faixa de elite
+  (propriedade 2). Faixa vista acima do saldo sai até a consulta envelhecer (6 h). Não usa o piso mínimo de desconto:
+  o prêmio de float paga a taxa mesmo em skin barata. Um braço de float anterior (removido no #32) consultava a faixa
+  mas avaliava como comum, sem prêmio, então nunca podia achar lucro de float.
 
 - Varredura limitada a 6 páginas do topo (60 itens) e 6 amostras da cauda por categoria por ciclo, intercaladas
   entre as categorias: cada página é uma consulta e o catálogo tem milhares. A cauda pega uma página por faixa de

@@ -129,6 +129,8 @@ pub enum PropFilter {
         min: i64,
         max: i64,
     },
+    /// Float (propriedade 2). Faixa inclusiva; vai como NÚMERO (`int_min` na prop 2 quebra a resposta).
+    Float { min: f64, max: f64 },
 }
 
 impl PropFilter {
@@ -140,9 +142,14 @@ impl PropFilter {
         }
     }
 
+    pub fn float(min: f64, max: f64) -> Self {
+        Self::Float { min, max }
+    }
+
     fn id(&self) -> u32 {
         match self {
             Self::Int { property_id, .. } => *property_id,
+            Self::Float { .. } => PROP_WEAR as u32,
         }
     }
 
@@ -154,6 +161,9 @@ impl PropFilter {
                 max,
             } => {
                 json!({"property_id": property_id, "int_min": min.to_string(), "int_max": max.to_string()})
+            }
+            Self::Float { min, max } => {
+                json!({"property_id": PROP_WEAR, "float_min": min, "float_max": max})
             }
         }
     }

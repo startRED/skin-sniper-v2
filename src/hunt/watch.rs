@@ -82,7 +82,11 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
             let group = t
                 .seeds
                 .first()
-                .and_then(|&(lo, _)| group_of(&t.name, Some(u32::from(lo)), None));
+                .and_then(|&(lo, _)| group_of(&t.name, Some(u32::from(lo)), None, None))
+                .or_else(|| {
+                    t.float
+                        .and_then(|(lo, _)| group_of(&t.name, None, None, Some(lo)))
+                });
             let (icon, spd, mut pts) = match f {
                 Some((_, i, s, p)) => (i, s, p),
                 None => (String::new(), 0.0, vec![]),
@@ -161,7 +165,7 @@ fn rare_multiples(h: &Hunt, name: &str, group_key: &str) -> Vec<f64> {
             .iter()
             .filter(|x| !x.has_stickers)
             .filter(|x| {
-                group_of(name, x.seed.map(u32::from), x.paint_index)
+                group_of(name, x.seed.map(u32::from), x.paint_index, x.float)
                     .is_some_and(|g| g.key == group_key)
             })
             .map(|x| x.multiple)
