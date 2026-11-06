@@ -167,6 +167,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até o piso aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso (até 20 s), e cada 6 h sem 429 desce um degrau até 6 s (a 6 s fixos a Steam bloqueava a cada 1–2 h, e cada série custava até 2 h paradas). O degrau da pausa só volta a 60 s após 60 min sem 429.
    Pausa, intervalo e piso aprendido do último 429 ficam salvos (`steam_pace`) e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar.
+   **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
+   Starlink por um celular com Tailscale) dá outro IP público e outra cota. Leva só leitura de mercado (anúncios,
+   histórico, livro, busca), sempre sem login; compra, sessão e login nunca passam por ele. Tem limitador próprio,
+   só em memória (reiniciar volta a 6 s). A principal tem a preferência: a extra só pega a vaga quando a principal
+   está esperando. Recusa, erro de rede ou 429 na extra não tocam no breaker nem no limitador da principal: a
+   consulta volta para a fila dela, e a extra descansa 5 min (rede/recusa) ou pausa pelo próprio 429. Consultas por
+   minuto somam as duas; a caça só aparece em pausa quando as duas estão paradas. Sem o proxy ligado, nada muda.
 4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
 
