@@ -153,7 +153,11 @@ function learning(): Learning {
       near: on ? 31 : 0, finds: on ? (i === 1 ? 2 : 0) : 0
     };
   });
-  return { days, since: nowS() - 2.4 * 86400 };
+  const teacher = {
+    ghosts: 212, waiting: 160, fast_alerts: 6, fast_alerts_closed: 4, fast_near: 58, fast_near_closed: 21, fast_ratio: 0.96,
+    final_alerts: 0, final_alerts_won: 0, profit_cents: 0, predicted_cents: 0, unlabeled: 0, rare_labeled: 0, rare_closed: 0
+  };
+  return { days, since: nowS() - 2.4 * 86400, teacher };
 }
 
 function history(o: Opportunity): History {

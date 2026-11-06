@@ -95,4 +95,20 @@ export type LearningDay = {
   near: number;
   finds: number;
 };
-export type Learning = { days: LearningDay[]; since: number | null };
+export type TeacherSummary = {
+  ghosts: number;
+  waiting: number;
+  fast_alerts: number;
+  fast_alerts_closed: number;
+  fast_near: number;
+  fast_near_closed: number;
+  fast_ratio: number | null;
+  final_alerts: number;
+  final_alerts_won: number;
+  profit_cents: number;
+  predicted_cents: number;
+  unlabeled: number;
+  rare_labeled: number;
+  rare_closed: number;
+};
+export type Learning = { days: LearningDay[]; since: number | null; teacher: TeacherSummary };

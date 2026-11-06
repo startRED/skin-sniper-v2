@@ -12,6 +12,8 @@ const GAP: i64 = 60;
 const TTL: i64 = 30 * 60;
 /// Livro mais velho que isso não vira sugestão: o topo da fila já pode ter mudado.
 pub const STALE: i64 = 60 * 60;
+/// Livro lido sem mudança é registrado de novo depois disso: o professor precisa saber o menor anúncio de cada dia.
+const LOG_HEARTBEAT: i64 = 12 * 3600;
 
 /// `true` = gastou a vaga desta volta com um livro (deu certo ou não).
 pub async fn maybe_step(h: &Hunt) -> bool {
@@ -25,32 +27,46 @@ pub async fn maybe_step(h: &Hunt) -> bool {
         if now - s.book_at < GAP {
             return false;
         }
-        let pick = s
-            .queue
-            .tasks()
-            .into_iter()
-            .filter(|t| !t.rare())
-            .map(|t| (s.books.get(&t.name).map_or(0, |b| b.0), t.name))
-            .filter(|(at, _)| now - at >= TTL)
-            .min();
-        let Some((_, name)) = pick else {
-            return false;
-        };
-        s.book_at = now;
-        name
+        // o livro que o professor pede para rotular uma compra virtual (dias 7–9) vem antes
+        if let Some(name) = s.label_books.pop() {
+            s.book_at = now;
+            (name, true)
+        } else {
+            let pick = s
+                .queue
+                .tasks()
+                .into_iter()
+                .filter(|t| !t.rare())
+                .map(|t| (s.books.get(&t.name).map_or(0, |b| b.0), t.name))
+                .filter(|(at, _)| now - at >= TTL)
+                .min();
+            let Some((_, name)) = pick else {
+                return false;
+            };
+            s.book_at = now;
+            (name, false)
+        }
     };
+    let (name, force) = name;
     // Falha também entra (sem livro): o alvo vai para o fim da fila e a sugestão velha some.
     let b = book::fetch_book(&h.steam, &name)
         .await
         .inspect_err(|e| tracing::warn!("livro de pedidos de {name} falhou: {e}"))
         .ok();
-    remember_book(h, &name, now, b).await;
+    remember_book(h, &name, now, b, force).await;
     true
 }
 
 /// Guarda a leitura em `Shared::books` (o que os pedidos e o teto usam) e, quando o topo mudou (maior pedido,
-/// número de anúncios ou os degraus de venda), no registro do livro (`book_snapshots`). Devolve a leitura anterior.
-pub(crate) async fn remember_book(h: &Hunt, name: &str, now: i64, b: Option<Book>) -> Option<Book> {
+/// número de anúncios ou os degraus de venda), no registro do livro (`book_snapshots`); sem mudança, registra de
+/// novo a cada `LOG_HEARTBEAT` ou quando `force` (leitura pedida pelo professor). Devolve a leitura anterior.
+pub(crate) async fn remember_book(
+    h: &Hunt,
+    name: &str,
+    now: i64,
+    b: Option<Book>,
+    force: bool,
+) -> Option<Book> {
     let before = h
         .lock()
         .books
@@ -64,7 +80,13 @@ pub(crate) async fn remember_book(h: &Hunt, name: &str, now: i64, b: Option<Book
         (p.max_buy_cents, p.sell_orders, &p.sell_levels)
             == (b.max_buy_cents, b.sell_orders, &b.sell_levels)
     });
-    if !same {
+    let stale = h
+        .lock()
+        .book_logged
+        .get(name)
+        .is_none_or(|&at| now - at >= LOG_HEARTBEAT);
+    if !same || force || stale {
+        h.lock().book_logged.insert(name.to_string(), now);
         let (n, levels) = (
             name.to_string(),
             serde_json::to_string(&b.sell_levels).unwrap_or_default(),

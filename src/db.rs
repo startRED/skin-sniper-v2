@@ -112,6 +112,27 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE hourly_activity ADD COLUMN books INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS evaluations_at ON evaluations(at);
     "#,
+    // Mina de ouro, Fase 1: compras virtuais rotuladas pelo mercado (`hunt::teacher`) e vendas do CSFloat guardadas.
+    r#"
+    CREATE TABLE ghosts (
+        listing_id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, grp TEXT,
+        bought_at INTEGER NOT NULL, price_cents INTEGER NOT NULL, mid_price_cents INTEGER NOT NULL,
+        mid_net_cents INTEGER NOT NULL, base_cents INTEGER, approved INTEGER NOT NULL,
+        fast_at INTEGER, fast_share REAL, fast_median_cents INTEGER, fast_sold INTEGER, fast_closed INTEGER,
+        status TEXT NOT NULL DEFAULT 'aguardando', labeled_at INTEGER, sell_cents INTEGER, net_cents INTEGER,
+        profit_cents INTEGER, closed INTEGER, label_source TEXT
+    );
+    CREATE INDEX ghosts_status ON ghosts(status, bought_at);
+    CREATE INDEX ghosts_fast ON ghosts(fast_at, bought_at);
+    CREATE TABLE csfloat_sales (
+        name TEXT NOT NULL, sold_at INTEGER NOT NULL, price_usd_cents INTEGER NOT NULL,
+        base_usd_cents INTEGER NOT NULL, multiple REAL NOT NULL, seed INTEGER, "float" REAL, paint_index INTEGER,
+        grp TEXT, PRIMARY KEY (name, sold_at, price_usd_cents)
+    );
+    CREATE INDEX csfloat_sales_grp ON csfloat_sales(grp, sold_at);
+    CREATE TABLE refit_log (at INTEGER NOT NULL, key TEXT NOT NULL, old REAL, new REAL, why TEXT NOT NULL);
+    CREATE INDEX book_snapshots_name ON book_snapshots(name, at);
+    "#,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -201,6 +222,8 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
     conn.execute("DELETE FROM observations WHERE last_seen < ?1", [learn])?;
     conn.execute("DELETE FROM book_snapshots WHERE at < ?1", [learn])?;
     conn.execute("DELETE FROM evaluations WHERE at < ?1", [learn])?;
+    conn.execute("DELETE FROM ghosts WHERE bought_at < ?1", [learn])?;
+    conn.execute("DELETE FROM csfloat_sales WHERE sold_at < ?1", [learn])?;
     conn.execute(
         "DELETE FROM activity_seen WHERE last_seen < ?1",
         [now - 3 * DAY],
@@ -275,7 +298,10 @@ mod tests {
     fn patterns_branch_db_gets_evaluations_after_the_merge() {
         // banco instalado pela branch de patterns: `learned_sales` na posição que no main é `evaluations`
         let mut conn = Connection::open_in_memory().unwrap();
-        let n = MIGRATIONS.len() - 2;
+        let n = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE evaluations ("))
+            .unwrap();
         for sql in &MIGRATIONS[..n] {
             conn.execute_batch(sql).unwrap();
         }

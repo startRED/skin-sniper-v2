@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './api';
-  import { day } from './format';
+  import { day, money, signed } from './format';
   import type { Learning } from './types';
 
   let data = $state<Learning | null>(null);
@@ -24,6 +24,9 @@
   const today = $derived(data?.days[0] ?? null);
   const min = (m: number | null) => (m == null ? '—' : m < 1 ? '< 1 min' : m < 120 ? `${Math.round(m)} min` : `${(m / 60).toFixed(1).replace('.', ',')} h`);
   const label = (d: string) => d.split('-').reverse().slice(0, 2).join('/');
+  const t = $derived(data?.teacher ?? null);
+  const of = (a: number, b: number) => (b ? `${a} de ${b}` : '—');
+  const ratio = (r: number | null) => (r == null ? '—' : `${r.toFixed(2).replace('.', ',')}×`);
   const days = $derived((data?.days ?? []).filter((d, i) => i === 0 || d.queries + d.books + d.new_listings > 0));
 </script>
 
@@ -38,6 +41,15 @@
       aprende quanto um achado dura e o que fecha de verdade.{#if data?.since}{' '}Registro desde {day(data.since)}.{/if}
     </p>
     {#if error}<p class="amber">{error}</p>{/if}
+    {#if t && t.ghosts}
+      <div class="teacher" aria-label="Professor">
+        <div><span class="muted">Compras virtuais</span><b>{t.ghosts}</b><small class="muted">{t.waiting} esperando o resultado</small></div>
+        <div title="Nas 48 h depois do aviso, vendeu a pelo menos o preço que o app previu?"><span class="muted">Avisos que venderiam em 48 h</span><b>{of(t.fast_alerts_closed, t.fast_alerts)}</b><small class="muted">quase-achados: {of(t.fast_near_closed, t.fast_near)}</small></div>
+        <div title="Mediana do preço real das 48 h dividido pelo previsto. Abaixo de 1 = o app prevê alto."><span class="muted">Real ÷ previsto</span><b class:amber={t.fast_ratio != null && t.fast_ratio < 0.95}>{ratio(t.fast_ratio)}</b><small class="muted">comuns, 48 h</small></div>
+        <div title="Vendendo depois dos 7 dias de trava, pelo menor entre o histórico e o livro"><span class="muted">Lucro virtual (7 dias)</span><b class:up={t.profit_cents > 0}>{t.final_alerts ? signed(t.profit_cents) : '—'}</b><small class="muted">{t.final_alerts ? `${of(t.final_alerts_won, t.final_alerts)} com lucro · previsto ${money(t.predicted_cents)}` : 'primeiro resultado no 10º dia'}</small></div>
+        {#if t.rare_labeled}<div><span class="muted">Raros que fecharam</span><b>{of(t.rare_closed, t.rare_labeled)}</b><small class="muted">em 14 dias</small></div>{/if}
+      </div>
+    {/if}
     {#if days.length}
       <div class="table" role="table" aria-label="Placar do aprendizado por dia">
         <div class="head grid" role="row">
@@ -72,6 +84,11 @@
   .body { padding: 0 0 8px; }
   .sub { margin: 0 16px 10px; max-width: 110ch; }
   .amber { color: var(--amber); margin: 0 16px 8px; }
+  .teacher { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 16px; margin: 0 16px 12px; }
+  .teacher div { display: flex; flex-direction: column; gap: 2px; }
+  .teacher span, .teacher small { font-size: 12px; }
+  .teacher b { font-size: 18px; }
+  .teacher b.amber { margin: 0; }
   .grid {
     display: grid; align-items: center; column-gap: 12px; padding: 0 16px;
     grid-template-columns: minmax(60px, 0.6fr) repeat(6, minmax(90px, 1fr));
