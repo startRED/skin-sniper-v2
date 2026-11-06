@@ -47,7 +47,8 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
 | `web/` | rotas, SSE, guarda de Host, arquivos embutidos |
 
-Tabelas de pattern copiadas do projeto antigo para `assets/patterns/` (ver `conhecimento.md` 4.5).
+Tabelas de pattern copiadas do projeto antigo para `assets/patterns/` (ver `conhecimento.md` 4.5). `floats.json` traz o
+menor e o maior float de cada skin (ByMykel/CSGO-API, via `skins.json` do projeto antigo; facas e luvas fora).
 
 ## Contrato da API (o frontend depende só disto)
 
@@ -82,7 +83,7 @@ Opportunity = {
   name: string,                  // market_hash_name
   icon_url: string, steam_url: string, inspect_url: string | null,
   wear: string | null, float: number | null, seed: number | null,
-  group: string | null,          // ex.: "T1 Center Star", "Ruby", "Fade 99%"
+  group: string | null,          // ex.: "T1 Center Star", "Ruby", "Fade 99%", "Float ≤ 0.173"
   kind: "desconto" | "raro",
   price_cents: number,           // total que o comprador paga
   sell: Sell,
@@ -99,11 +100,11 @@ Opportunity = {
 WatchRow = {
   name: string, icon_url: string,
   floor_cents: number | null,      // menor anúncio visto na última consulta; null se ainda não consultou / página vazia
-  max_buy_cents: number | null,    // maior preço que ainda dá lucro >= R$ 0,20 e >= 5 % no preço médio;
+  max_buy_cents: number | null,    // maior preço que ainda dá lucro >= R$ 1,00 e >= 10 % no preço médio;
                                    // null sem estimativa e sempre null em item raro (o teto depende do grupo)
   sales_per_day: number, kind: "desconto" | "raro", group: string | null,
   last_checked_at: number | null,  // ordem: (floor - max_buy) crescente; sem os dois, por último
-  mode: "barato" | "seed", // modo de busca do alvo (a mesma skin pode aparecer em mais de um modo)
+  mode: "barato" | "seed" | "float", // modo de busca do alvo (a mesma skin pode aparecer em mais de um modo)
   score: number,                   // lucro esperado por consulta gasta, em centavos, aprendido (0 sem dados)
   reason: string                   // por que a agenda dá consultas a ele, em palavras curtas: "rendeu R$ 1,20 em
                                    // 30 consultas", "testando alvo novo", "quase deu lucro 3 vezes",
@@ -139,9 +140,11 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    (até 10: quem compra uma unidade não ganha com giro maior) × lucro possível em reais × (1 + acertos recentes). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
-   por (skin com tabela × desgaste) cujo piso cabe no saldo (`propertyFilters` por faixa de seed dos tiers; a
-   tarefa percorre as faixas em rodízio, uma por consulta). Até 24 raros, os que mais vendem por dia primeiro
-   (sem venda medida conta 1/dia): giro alto traz anúncio novo, e a revenda sai mais rápido.
+   por skin com tabela (código G, **sem filtro de desgaste**: a mesma consulta traz todos os desgastes, StatTrak e
+   Souvenir da faixa) cujo piso, no desgaste mais barato, cabe no saldo (`propertyFilters` por faixa de seed dos
+   tiers; a tarefa percorre as faixas em rodízio, uma por consulta). Até 24 raros, os que mais vendem por dia
+   primeiro (soma dos desgastes; sem venda medida conta 1/dia): giro alto traz anúncio novo, e a revenda sai mais
+   rápido. Antes era uma tarefa por desgaste: o Moonrise ocupava 5 vagas e cada faixa era revista 5× menos.
    - **Piso:** o do anúncio visto na última consulta da tarefa (vale 6 h); sem consulta ainda, USD × razão medida,
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
      o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
@@ -157,8 +160,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      24 h; a nota vale metade a cada 4 h sem nenhuma recompensa. O saldo e a taxa continuam decidindo quem
      entra (regras acima); a nota-base do catálogo só desempata braços ainda não testados. A busca e as consultas de anúncios dividem o mesmo limitador global. As notas ficam no banco (`arm_stats`, retenção 14 dias
      e no máximo 2000 linhas) e sobrevivem a reinício. Os parâmetros (12,5 %, meias-vidas, 15 %) são hipóteses de calibração, não medidas.
-   - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 0,20 e 5 % depois da taxa
-     (hoje ≈ R$ 1,45). Abaixo disso a taxa mínima de 1 + 1 centavo come o lucro. Os 30 % são hipótese, não medida.
+   - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 1,00 e 10 % depois da taxa
+     (hoje ≈ R$ 7,57). Abaixo disso a taxa come o lucro: até 06/11, 9 000 consultas em skins de R$ 1,60–8,50 deram
+     um achado de R$ 0,32. Os 30 % são hipótese, não medida.
 3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios ou histórico) não pausa: as leituras seguem sem login por 6 h. Um 429
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até o piso aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso (até 20 s), e cada 6 h sem 429 desce um degrau até 6 s (a 6 s fixos a Steam bloqueava a cada 1–2 h, e cada série custava até 2 h paradas). O degrau da pausa só volta a 60 s após 60 min sem 429.
    Pausa, intervalo e piso aprendido do último 429 ficam salvos (`steam_pace`) e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. Breaker por endpoint.
@@ -185,7 +189,22 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   (quem compra leva o mais barato: vender acima do concorrente já à venda não é o mais provável).
   Concorrente = mesmo nome e mesmo grupo raro (ou ambos comuns); no raro conta também o menor anúncio do grupo
   visto nas outras faixas de seed da mesma skin nas últimas 6 h, porque a página de uma faixa não mostra as outras.
-- Raro: o grupo do anúncio (tier, fase, faixa de fade) busca vendas do CSFloat do mesmo grupo
+- Float de elite: anúncio comum cujo float está nos 10 % melhores do desgaste (a partir do menor float da skin) é
+  raro do grupo `float:<skin>:<desgaste>` (pattern vence float). O prêmio vem das vendas do CSFloat da mesma faixa,
+  pela mesma regra do raro abaixo; sem 3 vendas, não há prêmio. Medido em 06/11 (157 skins, ~6 000 vendas do
+  CSFloat): os 10 % melhores saíram de 1,3× a 2,8× a mediana em várias skins (XM1014 Zombie Offensive FN 2,8×, USP-S
+  Tropical Breeze FN 2,3×, M4A1-S Solitude MW 1,7×); no Moonrise FT as duas vendas da faixa saíram a ~1,0×. Os 10 %
+  são recorte de hipótese, não calibração.
+- Pattern aprendido (`src/hunt/patterns.rs`): as tabelas só cobrem 4 skins de pattern, e nas vendas do CSFloat de
+  06/11 apareceram seeds caros fora delas (MP7 Amberline 890 a 5–10×, M4A4 Etch Lord 158 a 18×). Um coletor lê as
+  vendas do CSFloat de uma skin do catálogo a cada 2 min (a de mais vendas/dia com piso ≤ saldo, ≥ 5 vendas/dia, cada
+  skin no máximo 1×/24 h; não gasta consulta da Steam). Com ≥ 10 vendas limpas, guarda em `learned_sales` cada venda
+  sem adesivo, fora de tabela e float de elite, que saiu entre 2× e o teto do múltiplo raro sobre a mediana da skin.
+  Com 3 vendas assim do mesmo seed (somando desgastes e StatTrak, últimos 60 dias) o seed vira grupo
+  `learned:<skin>:<seed>` ("Pattern #seed"), o prêmio são as razões guardadas, e entra nas faixas de seed da busca
+  rara da skin junto com as da tabela. Os limites (2×, 3 vendas, 60 dias) são hipóteses, não calibração; demora
+  dias para juntar prova.
+- Raro: o grupo do anúncio (tier, fase, faixa de fade, float de elite) busca vendas do CSFloat do mesmo grupo
   (`price / reference.base_price`). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
   prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
   usa a base comum e escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço.
@@ -212,7 +231,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   limites são hipóteses para priorização, não calibração com vendas reais.
 - Combinação: usa lucro esperado ajustado ao risco positivo; sem estimativa ou com resultado ≤ 0, o item não entra. Se a de maior lucro tiver uma única skin, prefere duas ou três de nomes distintos quando
   o lucro delas alcançar pelo menos 90 % do ótimo e couber no saldo.
-- Entra na lista: lucro no `mid` ≥ R$ 0,20 e margem ≥ 5 % (o risco aparece na linha; a lista não esconde por ele).
+- Entra na lista: lucro no `mid` ≥ R$ 1,00, margem ≥ 10 % e lucro esperado ajustado ao risco ≥ 0 quando medido
+  (decisão do Erick em 06/11: R$ 0,30 por uma semana travada não vale o risco). O risco aparece na linha.
   `safe` quando lucro no `quick` > 0. Combinação e aviso exigem lucro esperado ajustado ao risco positivo.
   Aviso no Windows (toast, sai com o painel fechado; clicar abre o anúncio), Telegram e som: lucro esperado ajustado ao risco positivo e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00). Não exige `safe`: raro quase nunca é `safe`, e um flip de R$ 10,75 escapou sem aviso por isso.
 - Calibração: cada compra grava os três preços previstos; quando o Erick vender, o realizado entra numa
@@ -259,13 +279,20 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
 
 ## Desvios registrados (caça, implementação)
 
+- Braço de float (`f:<nome>`, modo `float`): até 16 skins comuns × desgaste com faixa de float conhecida, ≥ 20 vendas/dia
+  e piso que cabe no saldo, as que mais vendem primeiro; consulta com o desgaste e o filtro de float da faixa de elite
+  (propriedade 2). Faixa vista acima do saldo sai até a consulta envelhecer (6 h). Não usa o piso mínimo de desconto:
+  o prêmio de float paga a taxa mesmo em skin barata. Um braço de float anterior (removido no #32) consultava a faixa
+  mas avaliava como comum, sem prêmio, então nunca podia achar lucro de float.
+
 - Varredura limitada a 6 páginas do topo (60 itens) e 6 amostras da cauda por categoria por ciclo, intercaladas
   entre as categorias: cada página é uma consulta e o catálogo tem milhares. A cauda pega uma página por faixa de
   popularidade que dobra (60–120 … 1920–3840), outra a cada dia: é onde ficam as de giro lento. Os candidatos vêm só do que a varredura viu.
 - A razão BRL/USD é a mediana de até 3 amostras (menor anúncio em BRL ÷ menor ask em USD do mesmo item, de US$ 1 a
   US$ 20), guardada em `settings` (`usd_brl_ratio`) e remedida a cada 24 h.
-- Consulta de desconto e de raro levam o filtro de desgaste do nome (`Exterior`); o código cobre todos os
-  desgastes e qualidades, então StatTrak/Souvenir do mesmo código aparecem na consulta rara e são avaliados.
+- Consulta de desconto leva o filtro de desgaste do nome (`Exterior`); a rara não leva: o código cobre todos os
+  desgastes e qualidades, então todos eles (StatTrak/Souvenir inclusive) aparecem na consulta rara e são avaliados
+  pelo próprio nome.
 - Skins com tabela (cspatterns, blue gem, fade de arma) ficam longe do topo de popularidade (o Moonrise está na
   posição ~1900 das pistolas), então a descoberta faz uma busca por nome de cada uma (`table_skins`, 1 consulta
   por skin a cada ciclo de 24 h) e grava todos os desgastes no catálogo. Faca e fase Doppler não entram (a busca
@@ -280,7 +307,7 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   e apaga o livro; raro nunca). `/api/watch` sugere `bid_cents` = maior pedido + 1 centavo quando o livro tem ≤ 1 h,
   cabe no saldo, fica abaixo do menor anúncio (o visto na caça e o do próprio livro, que também limita a revenda e o
   "compraria até"), entra na lista
-  (lucro ≥ R$ 0,20 e margem ≥ 5 % no preço médio) e o lucro com o risco dos 7 dias é positivo. Os livros ficam só em
+  (lucro ≥ R$ 1,00 e margem ≥ 10 % no preço médio) e o lucro com o risco dos 7 dias é positivo. Os livros ficam só em
   memória: reiniciar começa do zero.
 - Concorrência do `quick` e do `mid`: só conta outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns); um
   comum barato não limita a venda de um T1.

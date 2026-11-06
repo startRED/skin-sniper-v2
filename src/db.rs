@@ -72,6 +72,22 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX evaluations_reason ON evaluations(reason, at);
     "#,
+    // Patterns aprendidos: venda do CSFloat de um seed fora das tabelas que saiu bem acima da mediana da skin.
+    // IF NOT EXISTS nas duas: a branch de patterns instalou `learned_sales` na posição que no main é `evaluations`.
+    r#"
+    CREATE TABLE IF NOT EXISTS learned_sales (
+        name TEXT NOT NULL, seed INTEGER NOT NULL, ratio REAL NOT NULL, sold_at INTEGER NOT NULL,
+        PRIMARY KEY (name, seed, sold_at)
+    );
+    CREATE TABLE IF NOT EXISTS evaluations (
+        id INTEGER PRIMARY KEY, at INTEGER NOT NULL, listing_id TEXT NOT NULL, name TEXT NOT NULL,
+        price_cents INTEGER NOT NULL, "float" REAL, seed INTEGER, paint_index INTEGER, rare_group TEXT,
+        stickers_json TEXT, keychains_json TEXT, inspect_url TEXT, steam_url TEXT NOT NULL,
+        others_min_cents INTEGER, mid_profit_cents INTEGER, quick_profit_cents INTEGER,
+        reason TEXT NOT NULL, detail TEXT
+    );
+    CREATE INDEX IF NOT EXISTS evaluations_reason ON evaluations(reason, at);
+    "#,
 ];
 
 pub fn now_unix() -> i64 {
@@ -157,6 +173,10 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
         "DELETE FROM activity_seen WHERE last_seen < ?1",
         [now - 3 * DAY],
     )?;
+    conn.execute(
+        "DELETE FROM learned_sales WHERE sold_at < ?1",
+        [now - 60 * DAY],
+    )?;
     conn.execute_batch("PRAGMA incremental_vacuum;")?;
     Ok(r)
 }
@@ -218,6 +238,32 @@ pub mod tempfile_dir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patterns_branch_db_gets_evaluations_after_the_merge() {
+        // banco instalado pela branch de patterns: `learned_sales` na posição que no main é `evaluations`
+        let mut conn = Connection::open_in_memory().unwrap();
+        let n = MIGRATIONS.len() - 2;
+        for sql in &MIGRATIONS[..n] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "CREATE TABLE learned_sales (name TEXT NOT NULL, seed INTEGER NOT NULL, ratio REAL NOT NULL,
+             sold_at INTEGER NOT NULL, PRIMARY KEY (name, seed, sold_at));
+             INSERT INTO learned_sales VALUES ('x', 216, 2.1, 1);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", n as i64 + 1)
+            .unwrap();
+        migrate(&mut conn).unwrap();
+        let kept: i64 = conn
+            .query_row("SELECT count(*) FROM learned_sales", [], |r| r.get(0))
+            .unwrap();
+        let evals: i64 = conn
+            .query_row("SELECT count(*) FROM evaluations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((kept, evals), (1, 0));
+    }
 
     #[test]
     fn migrates_and_is_idempotent() {

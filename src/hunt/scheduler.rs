@@ -52,6 +52,7 @@ const SAVE_EVERY_SECS: i64 = 30;
 pub enum Mode {
     Cheap,
     Seed,
+    Float,
 }
 
 impl Mode {
@@ -59,6 +60,7 @@ impl Mode {
         match self {
             Mode::Cheap => "barato",
             Mode::Seed => "seed",
+            Mode::Float => "float",
         }
     }
 }
@@ -66,8 +68,8 @@ impl Mode {
 /// Uma consulta recorrente: `QueryListingsForItem` do código, com desgaste e/ou faixa de seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Task {
-    /// `d:<market_hash_name>` (mais barato) ou `r:<código>:<desgaste>`
-    /// (raro: uma tarefa por skin × desgaste).
+    /// `d:<market_hash_name>` (mais barato) ou `r:<código>`
+    /// (raro: uma tarefa por skin, todos os desgastes).
     pub id: String,
     /// `market_hash_name` com o desgaste, para log e para filtrar a resposta.
     pub name: String,
@@ -76,23 +78,30 @@ pub struct Task {
     /// Raro: faixas de seed do tier 1/topo da tabela; cada consulta usa uma faixa, em rodízio
     /// (`Queue::focus`). Vazio = desconto.
     pub seeds: Vec<(u16, u16)>,
+    /// Float de elite: faixa `(de, até)` do filtro de float (`f:<market_hash_name>`). `None` nos outros modos.
+    pub float: Option<(f64, f64)>,
     /// Nota-base do catálogo (sem aprendizado): só desempata braços ainda não testados.
     pub score: f64,
 }
 
 impl Task {
     pub fn rare(&self) -> bool {
-        !self.seeds.is_empty()
+        !self.seeds.is_empty() || self.float.is_some()
     }
 
     pub fn mode(&self) -> Mode {
-        if self.rare() { Mode::Seed } else { Mode::Cheap }
+        match (self.seeds.is_empty(), self.float) {
+            (false, _) => Mode::Seed,
+            (true, Some(_)) => Mode::Float,
+            (true, None) => Mode::Cheap,
+        }
     }
 
     pub fn filters(&self) -> Vec<PropFilter> {
         self.seeds
             .first()
             .map(|&(lo, hi)| PropFilter::seed(lo, hi))
+            .or(self.float.map(|(lo, hi)| PropFilter::float(lo, hi)))
             .into_iter()
             .collect()
     }
@@ -336,7 +345,11 @@ impl Queue {
 
     /// A tarefa estreitada à próxima faixa de seed (rodízio); desconto volta igual.
     pub fn focus(&mut self, task: Task) -> Task {
-        let Some(e) = self.entries.get_mut(&task.id).filter(|_| task.rare()) else {
+        let Some(e) = self
+            .entries
+            .get_mut(&task.id)
+            .filter(|_| !task.seeds.is_empty())
+        else {
             return task;
         };
         let range = task.seeds[e.cursor % task.seeds.len()];
@@ -394,6 +407,8 @@ const NO_SALDO: &str = "sem saldo: informe um valor ou configure o cookie da Ste
 
 pub async fn tick(h: &Arc<Hunt>) -> Tick {
     detect::roll_cycle(h);
+    // patterns: só o CSFloat; roda também sem saldo e com a Steam em pausa (429), quando a caça para
+    super::patterns::maybe_step(h).await;
     if h.saldo() <= 0 {
         h.set_message(Some(NO_SALDO.into()));
         return Tick::Idle;
@@ -572,7 +587,7 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             if targets.iter().any(|t| t.id == other.id) {
                 continue;
             }
-            let focused = if other.rare() {
+            let focused = if !other.seeds.is_empty() {
                 let Some(entry) = s.queue.entries.get(&other.id) else {
                     continue;
                 };
@@ -756,6 +771,7 @@ mod tests {
             code: "G1234567".into(),
             wear: Some(2),
             seeds: vec![],
+            float: None,
             score,
         }
     }

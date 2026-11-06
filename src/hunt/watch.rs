@@ -13,7 +13,7 @@ use rusqlite::OptionalExtension;
 
 const DAY: i64 = 86_400;
 
-/// Maior preço de compra que ainda entra na lista (lucro ≥ R$ 0,20 e margem ≥ 5 % no preço médio).
+/// Maior preço de compra que ainda entra na lista (lucro ≥ R$ 1,00 e margem ≥ 10 % no preço médio).
 fn max_buy(net_mid: i64) -> i64 {
     let by_margin = (net_mid as f64 * 100.0 / (100.0 + MIN_LIST_MARGIN_PCT)).floor() as i64;
     by_margin.min(net_mid - MIN_LIST_PROFIT_CENTS)
@@ -82,7 +82,15 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
             let group = t
                 .seeds
                 .first()
-                .and_then(|&(lo, _)| group_of(&t.name, Some(u32::from(lo)), None));
+                .and_then(|&(lo, _)| group_of(&t.name, Some(u32::from(lo)), None, None))
+                .or_else(|| {
+                    t.float
+                        .and_then(|(lo, _)| group_of(&t.name, None, None, Some(lo)))
+                })
+                .or_else(|| {
+                    let seed = t.seeds.first().map(|r| r.0);
+                    super::patterns::group(&h.lock().learned, &t.name, seed).map(|(g, _)| g)
+                });
             let (icon, spd, mut pts) = match f {
                 Some((_, i, s, p)) => (i, s, p),
                 None => (String::new(), 0.0, vec![]),
@@ -161,7 +169,7 @@ fn rare_multiples(h: &Hunt, name: &str, group_key: &str) -> Vec<f64> {
             .iter()
             .filter(|x| !x.has_stickers)
             .filter(|x| {
-                group_of(name, x.seed.map(u32::from), x.paint_index)
+                group_of(name, x.seed.map(u32::from), x.paint_index, x.float)
                     .is_some_and(|g| g.key == group_key)
             })
             .map(|x| x.multiple)

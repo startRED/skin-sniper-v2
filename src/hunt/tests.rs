@@ -4,7 +4,8 @@
 //! As capturas reais são usadas como estão, com estas alterações feitas no teste (a captura de 03/11 não
 //! tem anúncio com lucro): o primeiro anúncio da página de listagens passa a custar R$ 4,00, o segundo
 //! recebe seed 59 (tier 1 do Moonrise) e custa R$ 7,00, e a primeira entrada da busca vira o Moonrise FT
-//! a US$ 1,00. No CSFloat, três vendas sem adesivo ganham seeds do tier 1 e preço ×1,5.
+//! a US$ 1,00. No CSFloat, três vendas sem adesivo ganham seeds do tier 1 e preço ×1,5, e quatro vendas com float
+//! de elite do FT (0,155–0,173; duas já eram reais e saíram a ~1,0×) passam a ×2.
 
 use super::detect::points_for;
 use super::scheduler::{Task, Tick, tick};
@@ -37,12 +38,26 @@ fn fixture(name: &str) -> Value {
 
 fn listings_body() -> Value {
     let mut v = fixture("steam_listings_moonrise_sorted_price.json");
-    let l = &mut v["data"]["listings"];
-    l[0]["unPrice"] = json!(348);
-    l[0]["unFee"] = json!(52);
-    l[1]["unPrice"] = json!(609);
-    l[1]["unFee"] = json!(91);
+    let l = v["data"]["listings"].as_array_mut().unwrap();
+    // preços em dobro (como o histórico): a R$ 6 o Moonrise não chega à régua de R$ 1,00 de lucro
+    for x in l.iter_mut() {
+        for k in ["unPrice", "unFee"] {
+            x[k] = json!(x[k].as_i64().unwrap() * 2);
+        }
+    }
+    l[0]["unPrice"] = json!(696);
+    l[0]["unFee"] = json!(104);
+    l[1]["unPrice"] = json!(870);
+    l[1]["unFee"] = json!(130);
     l[1]["asset"]["asset_properties"][0]["int_value"] = json!("59");
+    v
+}
+
+fn history_body() -> Value {
+    let mut v = fixture("steam_pricehistory_moonrise_ft.json");
+    for p in v["data"]["prices"].as_array_mut().unwrap() {
+        p["price_median"] = json!(p["price_median"].as_f64().unwrap() * 2.0);
+    }
     v
 }
 
@@ -50,7 +65,7 @@ fn search_body() -> Value {
     let mut v = fixture("steam_search_render_pistol_p1900.json");
     v["results"][0]["hash_name"] = json!(MOON);
     v["results"][0]["name"] = json!(MOON);
-    v["results"][0]["sell_price"] = json!(100);
+    v["results"][0]["sell_price"] = json!(200);
     v
 }
 
@@ -60,6 +75,11 @@ fn csfloat_body() -> Value {
         let price = v[i]["price"].as_i64().unwrap();
         v[i]["price"] = json!(price * 3 / 2);
         v[i]["item"]["paint_seed"] = json!(seed);
+    }
+    for (i, float) in [(4, 0.1628), (6, 0.155), (7, 0.16), (8, 0.1728)] {
+        let price = v[i]["price"].as_i64().unwrap();
+        v[i]["price"] = json!(price * 2);
+        v[i]["item"]["float_value"] = json!(float);
     }
     v
 }
@@ -75,7 +95,7 @@ struct Bodies {
 async fn serve() -> (String, Arc<Bodies>) {
     let b = Arc::new(Bodies {
         listings: Mutex::new(listings_body()),
-        history: fixture("steam_pricehistory_moonrise_ft.json"),
+        history: history_body(),
         search: Mutex::new(search_body()),
         listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
@@ -99,6 +119,21 @@ async fn serve() -> (String, Arc<Bodies>) {
                         .retain(|l| {
                             let seed = l["asset"]["asset_properties"][0]["int_value"].as_str();
                             seed.and_then(|v| v.parse::<i64>().ok())
+                                .is_some_and(|v| (lo..=hi).contains(&v))
+                        });
+                }
+                // e a faixa de float (propriedade 2), em número
+                if let Some(f) = qp[0]["propertyFilters"].get("2") {
+                    let (lo, hi) = (
+                        f["float_min"].as_f64().unwrap(),
+                        f["float_max"].as_f64().unwrap(),
+                    );
+                    body["data"]["listings"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|l| {
+                            l["asset"]["asset_properties"][1]["float_value"]
+                                .as_f64()
                                 .is_some_and(|v| (lo..=hi).contains(&v))
                         });
                 }
@@ -189,7 +224,7 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     assert_eq!(h.lock().ratio.map(|r| r.0), Some(4.0));
 
     let (cheap, t1) = (&found[0], &found[1]);
-    assert_eq!((cheap.id.as_str(), cheap.price_cents), (ID_CHEAP, 400));
+    assert_eq!((cheap.id.as_str(), cheap.price_cents), (ID_CHEAP, 800));
     assert_eq!(cheap.kind, Kind::Desconto);
     assert_eq!(cheap.group, None);
     assert_eq!(cheap.wear.as_deref(), Some("Field-Tested"));
@@ -202,32 +237,32 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         "{}",
         t1.evidence
     );
-    // números conferidos à mão: mediana ~R$ 5,9 com queda de 2 %; 5,78 → líquido 5,03 (taxa 15 %)
+    // números conferidos à mão: mediana ~R$ 11,8 com queda de 2 %; 11,57 → líquido 10,07 (taxa 15 %)
     let tiers = |o: &Opportunity| {
         [&o.sell.quick, &o.sell.mid, &o.sell.high]
             .map(|t| (t.price_cents, t.net_cents, t.profit_cents))
     };
     assert_eq!(
         tiers(cheap),
-        [(561, 489, 89), (578, 503, 103), (591, 515, 115)]
+        [(1124, 979, 179), (1157, 1007, 207), (1184, 1030, 230)]
     );
-    assert_eq!((cheap.margin_pct, cheap.safe), (25.75, true));
+    assert_eq!((cheap.margin_pct, cheap.safe), (25.875, true));
     assert_eq!(cheap.confidence, Confidence::Alta);
     assert_eq!(
         cheap.evidence,
         "339 vendas/dia nos últimos 7 dias · preço em queda, descontado 2%"
     );
-    // a venda rápida não conta com o prêmio do CSFloat: sem ele o T1 a R$ 7,00 perde, então não é seguro
+    // a venda rápida não conta com o prêmio do CSFloat: sem ele o T1 a R$ 10,00 perde, então não é seguro
     assert_eq!(
         tiers(t1),
-        [(561, 489, -211), (887, 772, 72), (911, 793, 93)]
+        [(1124, 979, -21), (1776, 1545, 545), (1826, 1589, 589)]
     );
-    assert!((t1.margin_pct - 10.2857).abs() < 1e-3 && !t1.safe);
+    assert!((t1.margin_pct - 54.5).abs() < 1e-3 && !t1.safe);
     assert_eq!(t1.confidence, Confidence::Media);
     for o in &found {
         assert_eq!(o.name, MOON);
         assert!(o.steam_url.contains(&format!("detail={}", o.id)));
-        assert!(o.sell.mid.profit_cents >= 20 && o.margin_pct >= 5.0);
+        assert!(o.sell.mid.profit_cents >= 100 && o.margin_pct >= 10.0);
         assert!(o.sell.quick.price_cents <= o.sell.mid.price_cents);
         assert!(o.sell.mid.price_cents <= o.sell.high.price_cents);
     }
@@ -246,26 +281,28 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     let l: Listing = serde_json::from_str(&lj).unwrap();
     assert_eq!(
         (l.listing_id.as_str(), l.price_cents, l.seller_cents),
-        (ID_CHEAP, 400, 348)
+        (ID_CHEAP, 800, 696)
     );
     assert!(task.starts_with("d:") || task.starts_with("r:"));
 
-    // combo só com o seguro: o T1 depende do prêmio, fica na lista mas fora da compra sugerida
+    // combo pelo lucro esperado com risco: os dois cabem no saldo e os dois têm lucro esperado positivo
     let st = h.state();
-    assert_eq!(st.combo.cost_cents, 400);
-    assert_eq!(st.combo.ids, vec![ID_CHEAP.to_string()]);
+    assert_eq!(st.combo.cost_cents, 1800);
+    let mut ids = st.combo.ids.clone();
+    ids.sort();
+    assert_eq!(ids, vec![ID_CHEAP.to_string(), ID_T1.to_string()]);
     assert!(st.hunt.watching >= 10, "watching {}", st.hunt.watching);
 
-    // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 0,20 e 5 %) e ritmo
+    // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 1,00 e 10 %) e ritmo
     let watch = watch::list(&h).await.unwrap();
     assert_eq!(watch.len(), st.hunt.watching as usize);
     // o Moonrise (aqui raro por seed) aparece com o piso visto e o teto do prêmio do grupo: 3 vendas do
-    // CSFloat → mid R$ 8,87 → líquido 7,72 → compraria até 7,35 (5 % de margem)
+    // CSFloat → mid R$ 17,76 → líquido 15,45 → compraria até 14,04 (10 % de margem)
     let raro = watch
         .iter()
-        .find(|r| r.kind == Kind::Raro && r.floor_cents == Some(700))
-        .unwrap_or_else(|| panic!("piso R$ 7,00 visto na faixa 58-59: {watch:#?}"));
-    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(735)));
+        .find(|r| r.kind == Kind::Raro && r.floor_cents == Some(1000))
+        .unwrap_or_else(|| panic!("piso R$ 10,00 visto na faixa 58-59: {watch:#?}"));
+    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(1404)));
     assert_eq!(raro.last_checked_at, Some(NOW));
     // mais perto de compensar primeiro
     let gaps: Vec<i64> = watch
@@ -303,7 +340,7 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_CHEAP));
-    assert!(h.state().combo.ids.is_empty());
+    assert_eq!(h.state().combo.ids, vec![ID_T1.to_string()]);
     let gone_at: Option<i64> = db
         .call(|c| {
             c.query_row(
@@ -315,6 +352,55 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         .await
         .unwrap();
     assert_eq!(gone_at, Some(NOW));
+}
+
+#[tokio::test]
+async fn elite_float_listing_is_priced_by_the_premium_of_its_band() {
+    const ID_FLOAT: &str = "6932893052431123649";
+    let (base, bodies) = serve().await;
+    {
+        let mut b = bodies.listings.lock().unwrap();
+        let l = &mut b["data"]["listings"][12];
+        l["asset"]["asset_properties"][1]["float_value"] = json!(0.152);
+        l["unPrice"] = json!(1044);
+        l["unFee"] = json!(156);
+    }
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let mut hit = None;
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Opportunity(o) = ev
+                && o.id == ID_FLOAT
+            {
+                hit = Some(o);
+            }
+        }
+        if hit.is_some() {
+            break;
+        }
+    }
+    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; com float 0,152 a faixa vendeu a ~2× (3 vendas: a de seed 95 é tier do Moonrise, pattern vence float)
+    let o = hit.expect("float de elite vira oportunidade");
+    assert_eq!(
+        (o.kind, o.group.as_deref()),
+        (Kind::Raro, Some("Float ≤ 0.173"))
+    );
+    assert!(
+        o.evidence.contains("grupo raro: 3 vendas"),
+        "{}",
+        o.evidence
+    );
+    assert!(o.sell.mid.profit_cents >= 100 && !o.safe, "{:?}", o.sell);
+    // a agenda tem braços de float, com o filtro de float na consulta
+    let tasks = h.lock().queue.tasks();
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.id == format!("f:{MOON}") && t.float.is_some())
+    );
 }
 
 /// Roda a caça até aparecerem as duas oportunidades da fixture.
@@ -359,8 +445,8 @@ async fn cheaper_competitor_reevaluates_known_opportunity() {
     {
         let mut b = bodies.listings.lock().unwrap();
         let other = &mut b["data"]["listings"][2];
-        other["unPrice"] = json!(348);
-        other["unFee"] = json!(52);
+        other["unPrice"] = json!(696);
+        other["unFee"] = json!(104);
     }
     let mut gone = None;
     for _ in 0..400 {
@@ -400,6 +486,7 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
         code: "G1".into(),
         wear: None,
         seeds,
+        float: None,
         score: 1.0,
     };
     let only = |l: Listing| {
@@ -415,7 +502,7 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
     let mut gone = None;
     // R$ 9,50 fica acima do médio (R$ 8,87): nada muda. R$ 8,00 limita o médio a R$ 7,99, líquido abaixo dos
     // R$ 7,00 pagos, e o T1 deixa de ser oportunidade.
-    for price in [950, 800] {
+    for price in [1900, 1250] {
         rival.price_cents = price;
         detect::process(&h, &rare(vec![(lo, hi)]), &only(rival.clone()))
             .await
@@ -429,9 +516,9 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
                 gone = Some(id);
             }
         }
-        if price == 950 {
+        if price == 1900 {
             assert_eq!(gone, None);
-            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, 887);
+            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, 1776);
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_T1));
@@ -460,13 +547,13 @@ async fn search_skips_expensive_and_deduplicates_affordable_listings() {
         s.floors.clear();
         s.cycle.saved_listings = 0;
     }
-    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(10000);
+    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(20000);
     let before = bodies.listing_queries.load(Ordering::Relaxed);
     scheduler::run_task(&h, &task).await.unwrap();
     assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), before);
     assert_eq!(h.lock().cycle.saved_listings, 2);
 
-    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(100);
+    bodies.search.lock().unwrap()["results"][0]["sell_price"] = json!(200);
     scheduler::run_task(&h, &task).await.unwrap();
     assert_eq!(bodies.listing_queries.load(Ordering::Relaxed), before + 1);
     let s = h.lock();
@@ -549,6 +636,7 @@ async fn hourly_listings_include_above_balance_without_counting_repeats() {
         code: "G1".into(),
         wear: None,
         seeds: vec![],
+        float: None,
         score: 1.0,
     };
     let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
@@ -594,6 +682,7 @@ async fn empty_pages_counter_saturates() {
         code: "G1".into(),
         wear: None,
         seeds: vec![],
+        float: None,
         score: 1.0,
     };
     let page = crate::steam::listings::ListingsPage {
@@ -704,6 +793,7 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
         code: "G1".into(),
         wear: None,
         seeds: vec![],
+        float: None,
         score: 1.0,
     };
     {
@@ -958,6 +1048,7 @@ async fn orders_read_one_book_per_gap_oldest_common_first() {
         code: "G1".into(),
         wear: None,
         seeds,
+        float: None,
         score: 1.0,
     };
     h.lock().queue.set_tasks(vec![
@@ -980,4 +1071,73 @@ async fn orders_read_one_book_per_gap_oldest_common_first() {
     assert_eq!(h.lock().books["B"], (NOW, None));
     h.lock().book_at = NOW - 61;
     assert!(!orders::maybe_step(&h).await); // tudo novo; o raro nunca entra
+}
+
+#[tokio::test]
+async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
+    const ID_LEARNED: &str = "341565526995940199"; // seed 269: fora das tabelas do Moonrise
+    let (base, bodies) = serve().await;
+    {
+        let mut b = bodies.listings.lock().unwrap();
+        let l = &mut b["data"]["listings"][14];
+        l["unPrice"] = json!(1044);
+        l["unFee"] = json!(156);
+    }
+    let (db, _dir) = temp_db();
+    // três vendas guardadas pelo coletor (dois desgastes): sobrevivem a reinício pelo banco
+    db.call(|c| {
+        for (name, ratio, at) in [
+            (MOON, 2.0, 1),
+            (MOON, 2.4, 2),
+            ("Glock-18 | Moonrise (Minimal Wear)", 2.2, 3),
+        ] {
+            c.execute(
+                "INSERT INTO learned_sales(name, seed, ratio, sold_at) VALUES (?1, 269, ?2, ?3)",
+                rusqlite::params![name, ratio, at],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.load().await.unwrap();
+    assert_eq!(
+        patterns::active(&h.lock().learned, "Glock-18 | Moonrise"),
+        vec![269]
+    );
+    h.set_saldo(3608, SaldoSource::Manual);
+    let mut hit = None;
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Opportunity(o) = ev
+                && o.id == ID_LEARNED
+            {
+                hit = Some(o);
+            }
+        }
+        if hit.is_some() {
+            break;
+        }
+    }
+    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; o pattern aprendido vendeu a 2,0–2,4×
+    let o = hit.expect("pattern aprendido vira oportunidade");
+    assert_eq!(
+        (o.kind, o.group.as_deref()),
+        (Kind::Raro, Some("Pattern #269"))
+    );
+    assert!(
+        o.evidence.contains("grupo raro: 3 vendas"),
+        "{}",
+        o.evidence
+    );
+    assert!(o.sell.mid.profit_cents >= 100, "{:?}", o.sell);
+    // e o seed entra na busca rara do Moonrise
+    let tasks = h.lock().queue.tasks();
+    assert!(
+        tasks
+            .iter()
+            .any(|t| t.seeds.iter().any(|&(lo, hi)| (lo..=hi).contains(&269)))
+    );
 }

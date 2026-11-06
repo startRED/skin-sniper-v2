@@ -13,6 +13,13 @@ const CSPATTERNS: &str = include_str!("../../assets/patterns/cspatterns.json");
 const BLUEGEM: &str = include_str!("../../assets/patterns/bluegem.json");
 const FADE: &str = include_str!("../../assets/patterns/fade.json");
 const PHASES: &str = include_str!("../../assets/patterns/phases.json");
+const FLOATS: &str = include_str!("../../assets/patterns/floats.json");
+
+/// Float de elite: a fração do desgaste (a partir do menor float possível da skin) que conta como "float
+/// baixo". Em 06/11, nas vendas do CSFloat de 157 skins, os 10 % melhores de cada desgaste saíram de 1,3× a 2,8×
+/// a mediana em várias delas (XM1014 Zombie Offensive FN, USP-S Tropical Breeze FN, M4A1-S Solitude MW).
+/// Hipótese de recorte, não calibração: o prêmio de cada skin vem das vendas da mesma faixa (n ≥ 3).
+const FLOAT_ELITE_SHARE: f64 = 0.10;
 
 /// Fade: só entra quem tem ao menos este % E está nas primeiras posições do rank da tabela.
 const FADE_MIN_PCT: f64 = 99.0;
@@ -48,6 +55,11 @@ struct FadeTable {
     rank: Vec<Option<u32>>,
 }
 #[derive(Deserialize)]
+struct FloatsFile {
+    /// "Glock-18 | Moonrise" → [menor float, maior float].
+    skins: HashMap<String, (f64, f64)>,
+}
+#[derive(Deserialize)]
 struct PhasesFile {
     phases: HashMap<u32, Phase>,
 }
@@ -62,6 +74,7 @@ struct Tables {
     blue: BlueFile,
     fade: FadeFile,
     phases: PhasesFile,
+    floats: FloatsFile,
 }
 
 fn tables() -> &'static Tables {
@@ -77,6 +90,7 @@ fn tables() -> &'static Tables {
             blue: load(BLUEGEM),
             fade: load(FADE),
             phases: load(PHASES),
+            floats: load(FLOATS),
         }
     })
 }
@@ -122,9 +136,49 @@ fn cs_label(pattern: &str, tier: u32) -> String {
     }
 }
 
-/// Grupo raro do anúncio, ou `None` se não há tabela para a skin / a seed não está nela.
-/// `seed` e `paint_index` vêm das propriedades da listagem.
+/// Limites de float do desgaste no nome: "(Field-Tested)" → (0,15, 0,38).
+fn wear_range(market_hash_name: &str) -> Option<(&'static str, f64, f64)> {
+    [
+        ("Factory New", 0.0, 0.07),
+        ("Minimal Wear", 0.07, 0.15),
+        ("Field-Tested", 0.15, 0.38),
+        ("Well-Worn", 0.38, 0.45),
+        ("Battle-Scarred", 0.45, 1.0),
+    ]
+    .into_iter()
+    .find(|(w, _, _)| market_hash_name.ends_with(&format!("({w})")))
+}
+
+/// Faixa de float de elite `(de, até)` do item: os `FLOAT_ELITE_SHARE` melhores do desgaste, começando no menor
+/// float que a skin tem. `None` sem desgaste no nome, sem tabela de float ou se a skin não chega no desgaste.
+pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
+    let (_, lo, hi) = wear_range(market_hash_name)?;
+    let (min, max) = *tables().floats.skins.get(split_name(market_hash_name).0)?;
+    let (lo, hi) = (lo.max(min), hi.min(max));
+    (lo < hi).then_some((lo, lo + (hi - lo) * FLOAT_ELITE_SHARE))
+}
+
+/// Grupo raro do anúncio, ou `None` se não há tabela para a skin / a seed não está nela e o float não é de elite.
+/// `seed`, `paint_index` e `float` vêm das propriedades da listagem. Pattern vence float.
 pub fn group_of(
+    market_hash_name: &str,
+    seed: Option<u32>,
+    paint_index: Option<u32>,
+    float: Option<f64>,
+) -> Option<Group> {
+    pattern_group(market_hash_name, seed, paint_index).or_else(|| {
+        let (lo, hi) = float_band(market_hash_name)?;
+        float.filter(|f| (lo..=hi).contains(f))?;
+        let (base, _, _) = split_name(market_hash_name);
+        let (wear, _, _) = wear_range(market_hash_name)?;
+        Some(Group {
+            key: format!("float:{base}:{wear}"),
+            label: format!("Float ≤ {hi:.3}"),
+        })
+    })
+}
+
+fn pattern_group(
     market_hash_name: &str,
     seed: Option<u32>,
     paint_index: Option<u32>,
@@ -193,6 +247,12 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
                 .map(|i| i as u16),
         );
     }
+    ranges(seeds)
+}
+
+/// Seeds em faixas `(de, até)` inclusivas, juntando as consecutivas, ordenadas.
+pub fn ranges(seeds: impl IntoIterator<Item = u16>) -> Vec<(u16, u16)> {
+    let seeds: BTreeSet<u16> = seeds.into_iter().collect();
     let mut out: Vec<(u16, u16)> = Vec::new();
     for s in seeds {
         match out.last_mut() {
@@ -201,6 +261,11 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
         }
     }
     out
+}
+
+/// "StatTrak™ Glock-18 | Moonrise (Field-Tested)" → "Glock-18 | Moonrise".
+pub fn skin_base(market_hash_name: &str) -> &str {
+    split_name(market_hash_name).0
 }
 
 /// Skins (sem desgaste) de todas as tabelas que o mercado de armas pode ter: cspatterns, blue gem e fade.
@@ -274,6 +339,38 @@ mod tests {
     }
 
     #[test]
+    fn elite_float_band_and_group() {
+        // Moonrise vai de 0 a 0,65: FT é 0,15–0,38 e a elite são os 10 % do começo
+        let (lo, hi) = float_band(MOON).unwrap();
+        assert!(
+            (lo - 0.15).abs() < 1e-9 && (hi - 0.173).abs() < 1e-9,
+            "{lo} {hi}"
+        );
+        let g = group_of(MOON, Some(1), None, Some(0.152)).unwrap();
+        assert_eq!(
+            (g.key.as_str(), g.label.as_str()),
+            ("float:Glock-18 | Moonrise:Field-Tested", "Float ≤ 0.173")
+        );
+        // StatTrak cai no mesmo grupo (as vendas do CSFloat são por nome, então o prêmio é medido à parte)
+        let st = "StatTrak™ Glock-18 | Moonrise (Field-Tested)";
+        assert_eq!(group_of(st, None, None, Some(0.16)).unwrap().key, g.key);
+        assert_eq!(group_of(MOON, Some(1), None, Some(0.2)), None);
+        assert_eq!(group_of(MOON, Some(1), None, None), None);
+        // pattern vence float
+        assert_eq!(
+            group_of(MOON, Some(59), None, Some(0.152)).unwrap().label,
+            "T1 Center Star"
+        );
+        // a skin começa acima do começo do desgaste: a faixa começa no menor float dela
+        let (min, max) = tables().floats.skins["AK-47 | Slate"];
+        assert_eq!((min, max), (0.0, 1.0));
+        let (lo, _) = float_band("AWP | Asiimov (Field-Tested)").unwrap();
+        assert!(lo >= 0.18, "Asiimov começa em 0,18: {lo}");
+        assert_eq!(float_band("AWP | Asiimov (Factory New)"), None);
+        assert_eq!(float_band("Sealed Terminal"), None);
+    }
+
+    #[test]
     fn split_name_variants() {
         assert_eq!(
             split_name("★ StatTrak™ Karambit | Fade (Factory New)"),
@@ -314,25 +411,25 @@ mod tests {
         // Divergência registrada: um guia antigo põe 958 em T1. Tabela e consenso dizem T2; seguimos o consenso.
         assert!(!tiers["1"].contains(&958) && tiers["2"].contains(&958));
         assert_eq!(
-            group_of(MOON, Some(958), Some(0)).unwrap().label,
+            group_of(MOON, Some(958), Some(0), None).unwrap().label,
             "T2 Moonrise"
         );
     }
 
     #[test]
     fn moonrise_groups_and_ranges() {
-        let g = group_of(MOON, Some(59), None).unwrap();
+        let g = group_of(MOON, Some(59), None, None).unwrap();
         assert_eq!(
             (g.key.as_str(), g.label.as_str()),
             ("cs:Glock-18 | Moonrise:t1", "T1 Center Star")
         );
         // vale para qualquer desgaste
-        assert!(group_of("Glock-18 | Moonrise (Battle-Scarred)", Some(59), None).is_some());
-        assert_eq!(group_of(MOON, Some(1), None), None); // seed fora das tabelas
-        assert_eq!(group_of(MOON, None, None), None);
-        assert_eq!(group_of(MOON, Some(70_000), None), None);
+        assert!(group_of("Glock-18 | Moonrise (Battle-Scarred)", Some(59), None, None).is_some());
+        assert_eq!(group_of(MOON, Some(1), None, None), None); // seed fora das tabelas
+        assert_eq!(group_of(MOON, None, None, None), None);
+        assert_eq!(group_of(MOON, Some(70_000), None, None), None);
         assert_eq!(
-            group_of("AK-47 | Redline (Field-Tested)", Some(59), None),
+            group_of("AK-47 | Redline (Field-Tested)", Some(59), None, None),
             None
         );
         assert_eq!(
@@ -356,19 +453,27 @@ mod tests {
     #[test]
     fn doppler_phase_by_paint_index() {
         let n = "★ Karambit | Doppler (Factory New)";
-        assert_eq!(group_of(n, Some(1), Some(415)).unwrap().label, "Ruby");
-        assert_eq!(group_of(n, Some(1), Some(416)).unwrap().label, "Sapphire");
+        assert_eq!(group_of(n, Some(1), Some(415), None).unwrap().label, "Ruby");
         assert_eq!(
-            group_of(n, None, Some(419)).unwrap().label,
+            group_of(n, Some(1), Some(416), None).unwrap().label,
+            "Sapphire"
+        );
+        assert_eq!(
+            group_of(n, None, Some(419), None).unwrap().label,
             "Doppler Phase 2"
         );
-        assert_eq!(group_of(n, Some(1), Some(1)), None);
+        assert_eq!(group_of(n, Some(1), Some(1), None), None);
         // 568 é Emerald de Gamma Doppler, não de Doppler
-        assert_eq!(group_of(n, None, Some(568)), None);
+        assert_eq!(group_of(n, None, Some(568), None), None);
         assert_eq!(
-            group_of("★ Karambit | Gamma Doppler (Factory New)", None, Some(568))
-                .unwrap()
-                .label,
+            group_of(
+                "★ Karambit | Gamma Doppler (Factory New)",
+                None,
+                Some(568),
+                None
+            )
+            .unwrap()
+            .label,
             "Emerald"
         );
         assert!(seed_ranges(n).is_empty());
@@ -378,48 +483,56 @@ mod tests {
     fn fade_only_the_top() {
         // Glock Fade: seed 763 = 100 % (rank 1); 412 = 80 % (rank 1, mas é o extremo ruim)
         let n = "Glock-18 | Fade (Factory New)";
-        let g = group_of(n, Some(763), Some(0)).unwrap();
+        let g = group_of(n, Some(763), Some(0), None).unwrap();
         assert_eq!(
             (g.key.as_str(), g.label.as_str()),
             ("fade:Fade:Glock-18", "Fade 99%+")
         );
-        assert_eq!(group_of(n, Some(412), None), None);
-        assert_eq!(group_of(n, Some(10), None), None);
+        assert_eq!(group_of(n, Some(412), None, None), None);
+        assert_eq!(group_of(n, Some(10), None, None), None);
         let r = seed_ranges(n);
         assert!(r.iter().any(|&(a, b)| a <= 763 && 763 <= b));
         assert!(count(&r) <= 5);
         // Acid Fade da SSG 08; o flip real da seed 872 (98,85 %, rank 21) fica de fora do topo
         let ssg = "SSG 08 | Acid Fade (Factory New)";
         assert_eq!(
-            group_of(ssg, Some(576), None).unwrap().label,
+            group_of(ssg, Some(576), None, None).unwrap().label,
             "Acid Fade 99%+"
         );
-        assert_eq!(group_of(ssg, Some(872), None), None);
+        assert_eq!(group_of(ssg, Some(872), None, None), None);
         // faca com ★ e StatTrak (a tabela da Karambit tem 412 no topo, o inverso da Glock)
-        assert!(group_of("★ StatTrak™ Karambit | Fade (Factory New)", Some(412), None).is_some());
+        assert!(
+            group_of(
+                "★ StatTrak™ Karambit | Fade (Factory New)",
+                Some(412),
+                None,
+                None
+            )
+            .is_some()
+        );
     }
 
     #[test]
     fn blue_gem_and_heat_treated() {
         let ak = "AK-47 | Case Hardened (Field-Tested)";
         let t1 = tables().blue.weapons["AK-47"]["1"].clone();
-        let g = group_of(ak, Some(t1[0].into()), None).unwrap();
+        let g = group_of(ak, Some(t1[0].into()), None, None).unwrap();
         assert_eq!(g.label, "Blue Gem T1");
         assert_eq!(count(&seed_ranges(ak)), t1.len());
         // Case Hardened sem tabela da arma: nada
         assert_eq!(
-            group_of("MP9 | Case Hardened (Field-Tested)", Some(1), None),
+            group_of("MP9 | Case Hardened (Field-Tested)", Some(1), None, None),
             None
         );
         let ht = "Five-SeveN | Heat Treated (Field-Tested)";
         // o guia aponta 904 como "best" da Five-SeveN HT (ask 47×), mas 904 não está em nenhum tier da tabela
-        assert_eq!(group_of(ht, Some(904), None), None);
+        assert_eq!(group_of(ht, Some(904), None, None), None);
         assert_eq!(
-            group_of(ht, Some(48), None).unwrap().label,
+            group_of(ht, Some(48), None, None).unwrap().label,
             "T1 Heat Treated"
         );
         assert_eq!(
-            group_of(ht, Some(7), None).unwrap().label,
+            group_of(ht, Some(7), None, None).unwrap().label,
             "T4 Heat Treated"
         );
         assert!(!seed_ranges(ht).is_empty());

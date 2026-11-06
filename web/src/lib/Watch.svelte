@@ -5,7 +5,7 @@
 
   let { collapsed = false }: { collapsed?: boolean } = $props();
 
-  const modes = { barato: 'Barato', seed: 'Seed' } as const;
+  const modes = { barato: 'Barato', seed: 'Seed', float: 'Float' } as const;
   type Row = WatchRow & { modes: WatchRow[] };
   // Uma linha por skin (e grupo raro): os modos viram etiquetas. Menor anúncio e "conferido" vêm da mesma
   // consulta (a do menor anúncio; sem nenhum, a mais recente), para não juntar preço velho com horário novo.
