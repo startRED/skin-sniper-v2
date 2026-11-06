@@ -135,12 +135,14 @@ pub(crate) fn roll_cycle(h: &Hunt) {
         "{text}"
     );
     // Para medir o que dispara os bloqueios longos (quantidade ou tempo seguido): o robô antigo gravava cada chamada.
-    let [main, extra] = h.steam.take_calls();
+    let [main, extra, book] = h.steam.take_calls();
     tracing::info!(
         principal_ok = main.ok,
         principal_429 = main.limited,
         extra_ok = extra.ok,
         extra_429 = extra.limited,
+        livro_ok = book.ok,
+        livro_429 = book.limited,
         "Steam em 10 min"
     );
     for n in &c.near {

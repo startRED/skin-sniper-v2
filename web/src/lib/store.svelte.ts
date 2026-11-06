@@ -257,5 +257,12 @@ export const steamBlocked = () => {
   return h.last_ok_at == null || app.now - h.last_ok_at >= 600;
 };
 
+// Com a leitura de anúncios barrada, a caça segue pelo livro de ofertas (outro limite da Steam) enquanto ele
+// responde: mesmo prazo de 3 min do servidor (`BOOK_LANE_FRESH_SECS`).
+export const bookLane = () => {
+  const h = app.state?.hunt;
+  return steamBlocked() && h?.book_ok_at != null && app.now - h.book_ok_at < 180;
+};
+
 export const readingSaldo = () =>
   app.state?.saldo_source === 'none' && app.state.keys.steam.ok === null && app.state.keys.steam.detail === 'verificando…';

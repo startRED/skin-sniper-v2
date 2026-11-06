@@ -9,6 +9,7 @@ export type State = {
     last_query_at: number | null;
     paused_until: number | null;
     last_ok_at: number | null;
+    book_ok_at: number | null;
     message: string | null;
   };
   combo: { ids: string[]; cost_cents: number; profit_cents: number };

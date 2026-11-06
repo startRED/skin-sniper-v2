@@ -19,7 +19,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const NOW: i64 = 1_793_754_060; // um minuto depois do último ponto da captura de histórico
@@ -90,6 +90,11 @@ struct Bodies {
     search: Mutex<Value>,
     listing_queries: AtomicUsize,
     csfloat: Value,
+    /// Livro de ofertas (captura real do Negev; o menor anúncio é trocado pelos testes).
+    book: Mutex<Value>,
+    book_queries: AtomicUsize,
+    /// A leitura de anúncios responde 429 (bloqueio de horas da Steam).
+    listings_429: AtomicBool,
 }
 
 async fn serve() -> (String, Arc<Bodies>) {
@@ -99,14 +104,21 @@ async fn serve() -> (String, Arc<Bodies>) {
         search: Mutex::new(search_body()),
         listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
+        book: Mutex::new(fixture("steam_orderbook_negev_2026-11.json")),
+        book_queries: AtomicUsize::new(0),
+        listings_429: AtomicBool::new(false),
     });
     async fn actions(
         AxState(b): AxState<Arc<Bodies>>,
         Query(q): Query<HashMap<String, String>>,
-    ) -> Json<Value> {
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
         match q.get("q").map(String::as_str) {
             Some("QueryListingsForItem") => {
                 b.listing_queries.fetch_add(1, Ordering::Relaxed);
+                if b.listings_429.load(Ordering::Relaxed) {
+                    return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+                }
                 let mut body = b.listings.lock().unwrap().clone();
                 // como a Valve: faixa de seed (propriedade 1) filtra os anúncios
                 let qp: Value = serde_json::from_str(q.get("qp").unwrap()).unwrap();
@@ -137,14 +149,21 @@ async fn serve() -> (String, Arc<Bodies>) {
                                 .is_some_and(|v| (lo..=hi).contains(&v))
                         });
                 }
-                Json(body)
+                Json(body).into_response()
             }
-            Some("QueryPriceHistory") => Json(b.history.clone()),
+            Some("QueryPriceHistory") => Json(b.history.clone()).into_response(),
             other => panic!("consulta inesperada: {other:?}"),
         }
     }
     let app = Router::new()
         .route("/market/actions", get(actions))
+        .route(
+            "/market/orderbook",
+            get(|AxState(b): AxState<Arc<Bodies>>| async move {
+                b.book_queries.fetch_add(1, Ordering::Relaxed);
+                Json(b.book.lock().unwrap().clone())
+            }),
+        )
         .route(
             "/market/search/render/",
             get(|AxState(b): AxState<Arc<Bodies>>| async move {
@@ -561,6 +580,106 @@ async fn search_skips_expensive_and_deduplicates_affordable_listings() {
     assert!(s.floors.contains_key(&duplicate.id));
 }
 
+/// Moonrise FT sozinho na vigia (sem outra versão para a busca cobrir): o passo vai pelo livro.
+async fn lone_moonrise(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Task {
+    h.set_saldo(3608, SaldoSource::Manual);
+    run_until_two(h, rx).await;
+    let task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    let mut s = h.lock();
+    s.queue.set_tasks(vec![task.clone()]);
+    s.active.clear();
+    s.floors.clear();
+    s.cycle.saved_listings = 0;
+    task
+}
+
+fn set_lowest_ask(b: &Bodies, cents: i64) {
+    b.book.lock().unwrap()["data"]["data"]["amtMinSellOrder"] = json!(cents);
+}
+
+#[tokio::test]
+async fn book_skips_listings_when_the_lowest_ask_is_above_the_ceiling() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let task = lone_moonrise(&h, &mut rx).await;
+    let listings = || bodies.listing_queries.load(Ordering::Relaxed);
+    let books = || bodies.book_queries.load(Ordering::Relaxed);
+    let (l0, b0) = (listings(), books());
+
+    set_lowest_ask(&bodies, 20000); // R$ 200: nenhum anúncio cabe no teto
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!((listings(), books()), (l0, b0 + 1), "só o livro");
+    assert_eq!(h.lock().cycle.saved_listings, 1);
+    assert_eq!(
+        h.lock().books[MOON].1.as_ref().unwrap().min_sell_cents,
+        Some(20000),
+        "o livro lido serve também aos pedidos sugeridos"
+    );
+
+    // R$ 2: cabe, então lê os anúncios, mesmo que o pedido sugerido tenha lido esse livro antes (o próprio
+    // menor anúncio não concorre com ele mesmo no teto)
+    set_lowest_ask(&bodies, 200);
+    h.lock()
+        .books
+        .get_mut(MOON)
+        .unwrap()
+        .1
+        .as_mut()
+        .unwrap()
+        .min_sell_cents = Some(200);
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!((listings(), books()), (l0 + 1, b0 + 2));
+}
+
+#[tokio::test]
+async fn blocked_listings_keep_the_book_lane_without_waiting() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let task = lone_moonrise(&h, &mut rx).await;
+    let listings = || bodies.listing_queries.load(Ordering::Relaxed);
+    let books = || bodies.book_queries.load(Ordering::Relaxed);
+
+    // a leitura de anúncios leva 429: pausa só esse balde
+    bodies.listings_429.store(true, Ordering::Relaxed);
+    set_lowest_ask(&bodies, 200);
+    assert!(scheduler::run_task(&h, &task).await.is_err());
+    assert!(h.steam.blocked(crate::steam::client::Endpoint::Listings));
+    let (l0, b0) = (listings(), books());
+
+    // o livro segue; preço bom não tenta os anúncios barrados nem segura o passo
+    let quick = Duration::from_secs(5);
+    tokio::time::timeout(quick, scheduler::run_task(&h, &task))
+        .await
+        .expect("não espera a pausa dos anúncios")
+        .unwrap();
+    assert_eq!((listings(), books()), (l0, b0 + 1));
+    set_lowest_ask(&bodies, 20000);
+    tokio::time::timeout(quick, scheduler::run_task(&h, &task))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((listings(), books()), (l0, b0 + 2));
+
+    // e a agenda deixa os raros (que só os anúncios servem) de fora enquanto dura o bloqueio
+    let mut rare = task.clone();
+    rare.id = "r:teste".into();
+    rare.seeds = vec![(59, 59)];
+    let mut s = h.lock();
+    s.queue.set_tasks(vec![rare, task.clone()]);
+    for _ in 0..5 {
+        let t = s.queue.next_matching(NOW, |t| !t.rare()).unwrap();
+        assert_eq!(t.id, task.id);
+    }
+}
+
 #[tokio::test]
 async fn seen_listing_is_reevaluated_when_history_changes() {
     let (base, _bodies) = serve().await;
@@ -854,6 +973,7 @@ async fn watch_row_for_common_item_has_exact_max_buy() {
         let mut s = h.lock();
         s.queue.set_tasks(vec![task.clone()]);
         s.floors.clear();
+        s.books.clear(); // o livro de teste é de outra skin: não concorre aqui
     }
     // antes da primeira consulta: sem piso nem horário, mas com teto e ritmo
     let w = watch::list(&h).await.unwrap();
@@ -1116,13 +1236,14 @@ async fn orders_read_one_book_per_gap_oldest_common_first() {
     h.lock().book_at = NOW - 61;
     h.lock().books.insert("A".into(), fresh(NOW - 3600));
     h.lock().books.insert("B".into(), fresh(NOW - 1800));
-    assert!(orders::maybe_step(&h).await); // A, o mais velho (o servidor de teste não tem livro: falha)
+    assert!(orders::maybe_step(&h).await); // A, o mais velho
     assert_eq!(h.lock().book_at, NOW);
-    assert_eq!(h.lock().books["A"], (NOW, None)); // a falha manda A para o fim da fila
+    assert_eq!(h.lock().books["A"].0, NOW); // lido: A vai para o fim da fila
+    assert!(h.lock().books["A"].1.is_some());
     assert!(!orders::maybe_step(&h).await); // dentro da vaga
     h.lock().book_at = NOW - 61;
     assert!(orders::maybe_step(&h).await); // agora B
-    assert_eq!(h.lock().books["B"], (NOW, None));
+    assert_eq!(h.lock().books["B"].0, NOW);
     h.lock().book_at = NOW - 61;
     assert!(!orders::maybe_step(&h).await); // tudo novo; o raro nunca entra
 }

@@ -75,6 +75,7 @@ impl AppState {
                 last_query_at: None,
                 paused_until: None,
                 last_ok_at: None,
+                book_ok_at: None,
                 message: Some("caça ainda não ligada".into()),
             },
             combo: Combo {

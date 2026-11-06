@@ -23,6 +23,16 @@ fn max_buy(net_mid: i64) -> i64 {
 type Facts = (String, String, f64, Vec<PricePoint>);
 
 pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
+    rows(h, true).await
+}
+
+/// Teto para os filtros que olham o menor anúncio antes de ler a página (busca e livro): ali o menor anúncio
+/// do livro é o próprio candidato, e como concorrente ele derrubaria o teto abaixo de si mesmo.
+pub async fn list_for_scan(h: &Hunt) -> Result<Vec<WatchRow>> {
+    rows(h, false).await
+}
+
+async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
     let now = h.now();
     let (tasks, floors, learned) = {
         let s = h.lock();
@@ -115,7 +125,7 @@ pub async fn list(h: &Hunt) -> Result<Vec<WatchRow>> {
                 .and_then(|(_, b)| b.as_ref());
             let rival = floor
                 .into_iter()
-                .chain(fresh.and_then(|b| b.min_sell_cents))
+                .chain(fresh.filter(|_| book_rival).and_then(|b| b.min_sell_cents))
                 .min()
                 .filter(|_| !rare);
             let est = (!rare || evidence.is_some())
