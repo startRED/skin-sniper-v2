@@ -74,6 +74,7 @@ State = {
   saldo_cents: number, saldo_source: "steam" | "manual" | "none",
   hunt: { watching: number, queries_per_min: number, last_query_at: number | null,
           paused_until: number | null, last_ok_at: number | null,   // última resposta sem 429
+          book_ok_at: number | null,   // última resposta boa do livro de ofertas ou da busca (outro balde)
           message: string | null },
   combo: { ids: string[], cost_cents: number, profit_cents: number },   // melhor combinação no saldo
   keys: { steam: KeyStatus, csfloat: KeyStatus, telegram: KeyStatus }
@@ -175,18 +176,29 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 1,00 e 10 % depois da taxa
      (hoje ≈ R$ 7,57). Abaixo disso a taxa come o lucro: até 06/11, 9 000 consultas em skins de R$ 1,60–8,50 deram
      um achado de R$ 0,32. Os 30 % são hipótese, não medida.
-3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios ou histórico) não pausa: as leituras seguem sem login por 6 h. Um 429
+3. **Ritmo:** dois baldes, como a Steam conta: leitura de anúncios e histórico num, livro de ofertas e busca no
+   outro (medido em 06/11: com `/market/actions` em 429 havia horas, `orderbook`, `search/render` e
+   `priceoverview` respondiam 200 no mesmo IP). Entre duas consultas quaisquer pela principal há no mínimo 3 s, de
+   qualquer balde: nunca rajada. Cada balde tem o próprio intervalo e a própria pausa por 429; o do livro e da busca
+   fica só em memória (reiniciar volta a 6 s). Com um balde em pausa e a saída extra sem vaga, a consulta falha na hora
+   em vez de segurar a caça, e a caça segue pelo outro balde: com os anúncios barrados, só alvos comuns pelo livro,
+   sem descoberta, e os raros esperam; com o livro barrado, sem pedidos sugeridos. Com os dois barrados, a caça para.
+   O balde de anúncios e histórico: começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios ou histórico) não pausa: as leituras seguem sem login por 6 h. Um 429
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até o piso aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso (até 20 s), e cada 6 h sem 429 desce um degrau até 6 s (a 6 s fixos a Steam bloqueava a cada 1–2 h, e cada série custava até 2 h paradas). O degrau da pausa só volta a 60 s após 60 min sem 429.
    Pausa, intervalo, piso aprendido e a última resposta sem 429 ficam salvos (`steam_pace`) e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar.
    **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
-   Starlink por um celular com Tailscale) dá outro IP público e outra cota. Leva só leitura de mercado (anúncios,
-   histórico, livro, busca), sempre sem login; compra, sessão e login nunca passam por ele. Tem limitador próprio,
+   Starlink por um celular com Tailscale) dá outro IP público e outra cota. Leva só leitura de anúncios e histórico
+   (livro e busca já têm o balde deles), sempre sem login; compra, sessão e login nunca passam por ele. Tem limitador próprio,
    só em memória (reiniciar volta a 6 s). A principal tem a preferência: a extra só pega a vaga quando a principal
    está esperando. Recusa, erro de rede ou 429 na extra não tocam no breaker nem no limitador da principal: a
    consulta volta para a fila dela, e a extra descansa 5 min (rede/recusa) ou pausa pelo próprio 429. Consultas por
    minuto somam as duas; a caça só aparece em pausa quando as duas estão paradas. Sem o proxy ligado, nada muda.
-4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
+4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas.
+   Alvo comum sem outra versão para a busca cobrir e com teto lê antes o livro de ofertas (menor anúncio em R$, no
+   outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e o menor anúncio novo
+   ensina a agenda como um anúncio que não passou. O teto desses dois filtros não conta o menor anúncio do livro como
+   concorrente: ele é o próprio candidato, e derrubaria o teto abaixo de si mesmo. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
 
 ## Precificação (o coração)

@@ -17,8 +17,9 @@
 //! - **Decaimento** (meia-vida `HALF_LIFE`): o passado antigo pesa menos, o mercado muda.
 //! - **Seca** (`DRY_HALF_LIFE`): a média vale pela metade a cada 4 h sem recompensa nenhuma.
 
-use super::{Hunt, catalog, detect, watch};
-use crate::steam::client::Error as SteamError;
+use super::{Hunt, catalog, detect, learn, watch};
+use crate::steam::book;
+use crate::steam::client::{Endpoint, Error as SteamError};
 use crate::steam::listings::{self, PropFilter};
 use crate::steam::search;
 use std::collections::{HashMap, HashSet};
@@ -276,7 +277,12 @@ impl Queue {
     /// Decide o próximo alvo e já conta a consulta (como antes: reagenda antes de consultar, uma falha não
     /// deixa o mesmo alvo ocupando a frente). Uma chamada = uma consulta; rende crédito à descoberta.
     pub fn next(&mut self, now: i64) -> Option<Task> {
-        if self.entries.is_empty() {
+        self.next_matching(now, |_| true)
+    }
+
+    /// `next` só entre os alvos que `keep` aceita (sem os raros enquanto a leitura de anúncios está barrada).
+    pub fn next_matching(&mut self, now: i64, keep: impl Fn(&Task) -> bool) -> Option<Task> {
+        if !self.entries.values().any(|e| keep(&e.task)) {
             return None;
         }
         for id in self.entries.keys() {
@@ -304,27 +310,35 @@ impl Queue {
         let pick = if exploring {
             // O slot de exploração gira entre os modos presentes (piso por modo, qualquer que seja o número de
             // braços de cada um) e, dentro do modo, vai para o menos testado (consultas decaídas).
-            let mut modes: Vec<Mode> = self.entries.values().map(|e| e.task.mode()).collect();
+            let mut modes: Vec<Mode> = self
+                .entries
+                .values()
+                .filter(|e| keep(&e.task))
+                .map(|e| e.task.mode())
+                .collect();
             modes.sort();
             modes.dedup();
             let mode = modes[self.explore_turn % modes.len()];
             self.explore_turn = self.explore_turn.wrapping_add(1);
             self.entries
                 .values()
-                .filter(|e| e.task.mode() == mode)
+                .filter(|e| keep(&e.task) && e.task.mode() == mode)
                 .min_by(|a, b| {
                     n_of(self, &a.task.id)
                         .total_cmp(&n_of(self, &b.task.id))
                         .then_with(|| tie(a, b))
                 })
         } else {
-            self.entries.values().min_by(|a, b| {
-                let (ia, ib) = (
-                    self.index(&a.task.id, now, total_n, scale),
-                    self.index(&b.task.id, now, total_n, scale),
-                );
-                ib.total_cmp(&ia).then_with(|| tie(a, b))
-            })
+            self.entries
+                .values()
+                .filter(|e| keep(&e.task))
+                .min_by(|a, b| {
+                    let (ia, ib) = (
+                        self.index(&a.task.id, now, total_n, scale),
+                        self.index(&b.task.id, now, total_n, scale),
+                    );
+                    ib.total_cmp(&ia).then_with(|| tie(a, b))
+                })
         };
         let id = pick?.task.id.clone();
         if exploring {
@@ -467,14 +481,22 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     if cleared {
         h.publish_state();
     }
-    if let Err(e) = catalog::maybe_reselect(h).await {
+    // Cada balde da Steam tem a sua pausa: com a leitura de anúncios barrada, a caça segue pelo livro de ofertas.
+    let listings_blocked = h.steam.blocked(Endpoint::Listings);
+    let book_blocked = h.steam.blocked(Endpoint::Book);
+    if listings_blocked && book_blocked {
+        set_idle_message(h);
+        return Tick::Idle;
+    }
+    if !listings_blocked && let Err(e) = catalog::maybe_reselect(h).await {
         tracing::warn!("seleção falhou: {e:#}");
     }
     let (may_discover, empty) = {
         let s = h.lock();
         (s.queue.may_discover(), s.queue.len() == 0)
     };
-    if may_discover || empty {
+    // a descoberta lê busca e histórico (os dois baldes)
+    if (may_discover || empty) && !listings_blocked && !book_blocked {
         match catalog::step(h).await {
             Ok(true) => {
                 h.lock().queue.spend_discovery();
@@ -488,20 +510,34 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             }
         }
     }
-    if super::orders::maybe_step(h).await {
+    if !book_blocked && super::orders::maybe_step(h).await {
         return Tick::Book;
     }
     // `next` já conta a consulta: uma falha não deixa o mesmo alvo ocupando a frente.
-    let next = h.lock().queue.next(h.now());
+    // shortcut: um alvo pulado sem consulta (anúncios barrados, sem teto) também conta; some quando o bloqueio passa
+    let next = {
+        let now = h.now();
+        let mut s = h.lock();
+        if listings_blocked {
+            s.queue.next_matching(now, |t| !t.rare())
+        } else {
+            s.queue.next(now)
+        }
+    };
     let Some(task) = next else {
         set_idle_message(h);
         return Tick::Idle;
     };
+    let sent = h.steam.sent();
     match run_task(h, &task).await {
         Ok(()) => {
             set_idle_message(h);
         }
         Err(e) => backoff(h, &e).await,
+    }
+    // nada saiu para a Steam (ex.: anúncios barrados e o livro sem teto): o laço descansa em vez de girar em falso
+    if h.steam.sent() == sent {
+        return Tick::Idle;
     }
     Tick::Watched(task.id)
 }
@@ -545,7 +581,7 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         )
     };
     let Some(ratio) = ratio.filter(|r| r.is_finite() && *r > 0.0) else {
-        return query_group(h, &task, tasks).await;
+        return book_then_listings(h, &task, tasks, &active).await;
     };
     let base = base_name(&task.name);
     let group: Vec<Task> = tasks
@@ -555,7 +591,7 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         .collect();
     // Uma busca só economiza quando cobre duas ou mais versões vigiadas; com uma só, ela custaria a mais.
     if group.len() < 2 {
-        return query_group(h, &task, tasks).await;
+        return book_then_listings(h, &task, tasks, &active).await;
     }
     let q = [
         ("query", base.replace(" | ", " ")),
@@ -576,7 +612,7 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         )
         .await?;
     let page = search::parse_page(&v)?;
-    let limits: HashMap<String, Option<i64>> = watch::list(h)
+    let limits: HashMap<String, Option<i64>> = watch::list_for_scan(h)
         .await?
         .into_iter()
         .filter(|r| r.mode == "barato")
@@ -617,6 +653,82 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         query_group(h, &t, targets).await?;
     }
     Ok(())
+}
+
+/// Alvo comum sem outra versão para a busca cobrir: o livro de ofertas diz o menor anúncio em reais, e a Steam o
+/// conta num balde à parte da leitura de anúncios (o que leva os bloqueios de horas). Acima do teto de compra, os
+/// anúncios não são lidos; sem teto, com o livro barrado ou com oportunidade ativa, lê como antes.
+async fn book_then_listings(
+    h: &Arc<Hunt>,
+    task: &Task,
+    tasks: Vec<Task>,
+    active: &HashSet<String>,
+) -> anyhow::Result<()> {
+    let mut lead = None;
+    if !active.contains(&task.id) && !h.steam.blocked(Endpoint::Book) {
+        let max = watch::list_for_scan(h)
+            .await?
+            .into_iter()
+            .find(|r| r.name == task.name && r.mode == "barato")
+            .and_then(|r| r.max_buy_cents);
+        if let Some(max) = max {
+            match book::fetch_book(&h.steam, &task.name).await {
+                Ok(b) => {
+                    let now = h.now();
+                    let lowest = b.min_sell_cents;
+                    let mut s = h.lock();
+                    // o livro lido também serve aos pedidos sugeridos (`orders`) e ao teto (concorrente)
+                    let before = s
+                        .books
+                        .insert(task.name.clone(), (now, Some(b)))
+                        .and_then(|(_, b)| b)
+                        .and_then(|b| b.min_sell_cents);
+                    match lowest {
+                        None => {
+                            s.cycle.saved_listings += 1;
+                            return Ok(());
+                        }
+                        Some(p) if !affordable(p, max) => {
+                            // menor anúncio novo ensina a agenda como um anúncio que não passou: g ≈ (teto − preço) ÷ preço
+                            let near_credit = if before == Some(p) {
+                                0.0
+                            } else {
+                                learn::closeness_credit(
+                                    p,
+                                    catalog::min_profit(p) + max - p,
+                                    s.closeness_scale,
+                                )
+                            };
+                            s.cycle.saved_listings += 1;
+                            s.queue.reward(
+                                &task.id,
+                                now,
+                                Found {
+                                    near_credit,
+                                    ..Found::default()
+                                },
+                            );
+                            return Ok(());
+                        }
+                        Some(p) => lead = Some((p, max)),
+                    }
+                }
+                Err(e) => tracing::warn!("livro de {} falhou; lê os anúncios: {e}", task.name),
+            }
+        }
+    }
+    if h.steam.blocked(Endpoint::Listings) {
+        if let Some((p, max)) = lead {
+            tracing::info!(
+                preco = p,
+                teto = max,
+                "livro: {} tem anúncio que cabe no teto, mas a leitura de anúncios está barrada pela Steam",
+                task.name
+            );
+        }
+        return Ok(());
+    }
+    query_group(h, task, tasks).await
 }
 
 async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Result<()> {

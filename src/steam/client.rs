@@ -47,6 +47,8 @@ const PAUSE_MAX: Duration = Duration::from_secs(30 * 60);
 const PAUSE_RESET_AFTER: Duration = Duration::from_secs(60 * 60); // maior que PAUSE_MAX, senão a escalada zera sozinha
 // Leitura logada levou 429: anúncios e histórico vão sem login por este tempo. Em 04/11 o logado tomou 429
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
+/// Espaço mínimo entre duas consultas quaisquer pela principal, somando os baldes (nunca rajada).
+const MIN_SPACING: Duration = Duration::from_secs(3);
 const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Saída extra: proxy local que sai por outro IP público (o `saida-celular` deste PC, pela Starlink). Leva só
@@ -180,6 +182,8 @@ pub struct Stats {
     pub gap_ms: u64,
     /// Última resposta que não foi 429: diz há quanto tempo a Steam barra a caça.
     pub last_ok_at: Option<i64>,
+    /// Última resposta boa do livro de ofertas ou da busca (o outro balde).
+    pub book_ok_at: Option<i64>,
 }
 
 /// Respostas por saída desde a última leitura (`take_calls`): `ok` é tudo que não foi 429.
@@ -242,6 +246,11 @@ impl Limiter {
             self.gap = self.gap.mul_f64(SHORTEN_FACTOR).max(floor);
             self.last_adjust += SHORTEN_EVERY;
         }
+    }
+
+    /// Fim da pausa por 429 em curso.
+    fn pause_end(&self, now: Instant) -> Option<Instant> {
+        self.paused_until.filter(|p| *p > now)
     }
 
     /// `Ok` toma a vaga (e conta a consulta); `Err(espera)` diz quanto falta.
@@ -323,6 +332,7 @@ impl Limiter {
             paused_until: self.paused_until.filter(|p| *p > now).map(unix_of),
             gap_ms: self.gap.as_millis() as u64,
             last_ok_at: self.last_ok.map(unix_of),
+            book_ok_at: None,
         }
     }
 }
@@ -391,8 +401,35 @@ struct Inner {
     alt_limiter: Limiter,
     /// Saída extra recusou ou falhou na rede: fica de lado até aqui.
     alt_down_until: Option<Instant>,
-    /// [principal, extra], para o balanço de 10 min no log.
-    calls: [Calls; 2],
+    /// Livro de ofertas e busca: a Steam conta à parte da leitura de anúncios (medido em 06/11: com
+    /// `/market/actions` em 429 havia horas, `orderbook`, `search/render` e `priceoverview` respondiam 200).
+    // shortcut: ritmo só em memória (reiniciar volta a 6 s); salvar como `steam_pace` se esse balde também levar horas
+    side: Limiter,
+    /// Próxima vaga de qualquer consulta pela principal, de qualquer balde (`MIN_SPACING`).
+    next_any: Instant,
+    spacing: Duration,
+    /// [principal, extra, livro e busca], para o balanço de 10 min no log.
+    calls: [Calls; 3],
+    sent: u64,
+}
+
+/// Endpoints do balde do livro de ofertas e da busca (`Inner::side`).
+fn side(ep: Endpoint) -> bool {
+    matches!(ep, Endpoint::Book | Endpoint::Search)
+}
+
+impl Inner {
+    fn bucket(&mut self, ep: Endpoint) -> &mut Limiter {
+        if side(ep) {
+            &mut self.side
+        } else {
+            &mut self.limiter
+        }
+    }
+
+    fn alt_held(&self, now: Instant) -> bool {
+        self.alt_down_until.is_some_and(|t| now < t) || self.alt_limiter.pause_end(now).is_some()
+    }
 }
 
 pub struct SteamClient {
@@ -469,7 +506,11 @@ impl SteamClient {
                 on_pace: None,
                 anon_reads_until: None,
                 alt_limiter: Limiter::new(Instant::now()),
-                calls: [Calls::default(); 2],
+                side: Limiter::new(Instant::now()),
+                next_any: Instant::now(),
+                spacing: MIN_SPACING,
+                calls: [Calls::default(); 3],
+                sent: 0,
                 alt_down_until: None,
             }),
         })
@@ -560,7 +601,23 @@ impl SteamClient {
     /// Só para teste: encurta o intervalo do limitador para não dormir 3 s por consulta.
     #[cfg(test)]
     pub(crate) fn set_gap_for_test(&self, gap: Duration) {
-        self.inner.lock().unwrap().limiter.gap = gap;
+        let mut g = self.inner.lock().unwrap();
+        g.limiter.gap = gap;
+        g.side.gap = gap;
+        g.spacing = gap;
+    }
+
+    /// `true` = uma consulta desse endpoint agora falharia sem ir à Steam: o balde dele está em pausa por 429 e a
+    /// saída extra não pode ler. A caça usa isto para não esperar pausas de até 30 min no meio de um passo.
+    pub fn blocked(&self, ep: Endpoint) -> bool {
+        let now = Instant::now();
+        let mut g = self.inner.lock().unwrap();
+        g.bucket(ep).pause_end(now).is_some() && !(self.alt_reads(ep) && !g.alt_held(now))
+    }
+
+    /// Consultas enviadas desde que o cliente subiu (todas as saídas e baldes).
+    pub fn sent(&self) -> u64 {
+        self.inner.lock().unwrap().sent
     }
 
     /// Consultas somam as duas saídas; a caça só está em pausa se a extra também não pode ler.
@@ -568,6 +625,10 @@ impl SteamClient {
         let now = Instant::now();
         let mut g = self.inner.lock().unwrap();
         let mut s = g.limiter.stats(now);
+        let side = g.side.stats(now);
+        s.queries_per_min += side.queries_per_min;
+        s.last_query_at = s.last_query_at.max(side.last_query_at);
+        s.book_ok_at = side.last_ok_at;
         if self.alt.is_some() {
             let a = g.alt_limiter.stats(now);
             s.queries_per_min += a.queries_per_min;
@@ -580,8 +641,8 @@ impl SteamClient {
         s
     }
 
-    /// Respostas de cada saída desde a última chamada; zera a contagem.
-    pub fn take_calls(&self) -> [Calls; 2] {
+    /// Respostas de cada saída (e do balde do livro) desde a última chamada; zera a contagem.
+    pub fn take_calls(&self) -> [Calls; 3] {
         std::mem::take(&mut self.inner.lock().unwrap().calls)
     }
 
@@ -829,12 +890,37 @@ impl SteamClient {
                     });
                 }
                 // A principal (logada, ritmo salvo) tem a preferência; a extra só pega a vaga que a principal não tem.
-                match g.limiter.try_acquire(now) {
-                    Ok(()) => Slot::Main,
+                let main = if now < g.next_any {
+                    Err(g.next_any - now)
+                } else {
+                    g.bucket(ep).try_acquire(now)
+                };
+                match main {
+                    Ok(()) => {
+                        g.next_any = now + g.spacing;
+                        g.sent += 1;
+                        Slot::Main
+                    }
                     Err(w) => match self.alt_slot(&mut g, ep, now) {
-                        Some(Ok(())) => Slot::Alt,
-                        Some(Err(a)) => Slot::Wait(w.min(a)),
-                        None => Slot::Wait(w),
+                        Some(Ok(())) => {
+                            g.sent += 1;
+                            Slot::Alt
+                        }
+                        alt => {
+                            // Balde em pausa por 429 e a extra sem vaga: falha já, em vez de segurar quem chamou
+                            // por até 30 min (a caça segue pelo outro balde).
+                            if let Some(end) = g.bucket(ep).pause_end(now)
+                                && (alt.is_none() || g.alt_held(now))
+                            {
+                                return Err(Error::RateLimited {
+                                    until: unix_in(end - now),
+                                });
+                            }
+                            Slot::Wait(match alt {
+                                Some(Err(a)) => w.min(a),
+                                _ => w,
+                            })
+                        }
                     },
                 }
             };
@@ -882,17 +968,18 @@ impl SteamClient {
         ep: Endpoint,
         now: Instant,
     ) -> Option<std::result::Result<(), Duration>> {
-        let read = matches!(
-            ep,
-            Endpoint::Listings | Endpoint::History | Endpoint::Book | Endpoint::Search
-        );
-        if self.alt.is_none() || !read {
+        if !self.alt_reads(ep) {
             return None;
         }
         match g.alt_down_until {
             Some(t) if now < t => Some(Err(t - now)),
             _ => Some(g.alt_limiter.try_acquire(now)),
         }
+    }
+
+    /// A extra lê anúncios e histórico (o balde da principal); livro e busca já têm o balde deles.
+    fn alt_reads(&self, ep: Endpoint) -> bool {
+        self.alt.is_some() && matches!(ep, Endpoint::Listings | Endpoint::History)
     }
 
     /// Leitura pela saída extra, sempre sem login (o pedido é clonado antes do cookie). `None` = recusa, rede ou
@@ -966,7 +1053,7 @@ impl SteamClient {
         if status == StatusCode::TOO_MANY_REQUESTS {
             let retry = retry_after(&resp);
             let mut g = self.inner.lock().unwrap();
-            g.calls[0].limited += 1; // o 429 da extra não chega aqui
+            g.calls[if side(ep) { 2 } else { 0 }].limited += 1; // o 429 da extra não chega aqui
             if sent_by.is_some()
                 && matches!(ep, Endpoint::Listings | Endpoint::History | Endpoint::Book)
             {
@@ -983,13 +1070,15 @@ impl SteamClient {
                     until: unix_in(Duration::ZERO),
                 });
             }
-            g.limiter.on_429(now, retry);
+            g.bucket(ep).on_429(now, retry);
             let until = g
-                .limiter
+                .bucket(ep)
                 .stats(now)
                 .paused_until
                 .unwrap_or_else(|| unix_in(PAUSE_START));
-            Self::notify_pace(&mut g, now);
+            if !side(ep) {
+                Self::notify_pace(&mut g, now);
+            }
             drop(g);
             // Qual consulta levou o 429 (e se ia logada): sem isso não dá para saber o que a Steam segura.
             tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(), "Steam: 429");
@@ -1002,11 +1091,18 @@ impl SteamClient {
         let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
         {
             let mut g = self.inner.lock().unwrap();
-            g.calls[usize::from(via_alt)].ok += 1;
+            let i = if via_alt {
+                1
+            } else if side(ep) {
+                2
+            } else {
+                0
+            };
+            g.calls[i].ok += 1;
             if via_alt {
                 g.alt_limiter.on_ok(now);
             } else {
-                g.limiter.on_ok(now);
+                g.bucket(ep).on_ok(now);
             }
             if status.is_server_error() || status == StatusCode::FORBIDDEN || bad_envelope.is_some()
             {
@@ -1386,14 +1482,104 @@ mod tests {
         assert_eq!(last_ok(&c), ok_instant); // 429 não conta como resposta
         assert_eq!(
             c.take_calls(),
-            [Calls { ok: 1, limited: 1 }, Calls::default()]
+            [
+                Calls { ok: 1, limited: 1 },
+                Calls::default(),
+                Calls::default()
+            ]
         );
-        assert_eq!(c.take_calls(), [Calls::default(); 2]); // ler zera
+        assert_eq!(c.take_calls(), [Calls::default(); 3]); // ler zera
         // reiniciar no meio do bloqueio ainda sabe desde quando a Steam não responde
         let again = SteamClient::new().unwrap();
         again.restore_pace(&saved.lock().unwrap().clone().unwrap());
         let restored = again.stats().last_ok_at.unwrap();
         assert!((restored - ok_at).abs() <= 1); // segundos inteiros nos dois lados
+    }
+
+    #[tokio::test]
+    async fn listings_429_leaves_book_and_search_free_and_fails_fast() {
+        let book: Value = serde_json::from_str(include_str!(
+            "../../testdata/steam_orderbook_negev_2026-11.json"
+        ))
+        .unwrap();
+        let app = Router::new()
+            .route(
+                "/market/actions",
+                get(|| async { (AxStatus::TOO_MANY_REQUESTS, "") }),
+            )
+            .route(
+                "/market/orderbook",
+                get(move || {
+                    let b = book.clone();
+                    async move { axum::Json(b) }
+                }),
+            )
+            .route(
+                "/market/search/render/",
+                get(|| async { r#"{"success":true}"# }),
+            );
+        let c = fast(&serve(app).await);
+        let qp = serde_json::json!([{}]);
+        let r = c
+            .action(Endpoint::Listings, "QueryListingsForItem", &qp)
+            .await;
+        assert!(matches!(r, Err(Error::RateLimited { .. })));
+        assert!(c.blocked(Endpoint::Listings));
+        assert!(!c.blocked(Endpoint::Book) && !c.blocked(Endpoint::Search));
+        // livro e busca são outro balde da Steam: seguem sem esperar a pausa de 60 s dos anúncios
+        let quick = Duration::from_secs(5);
+        let b = tokio::time::timeout(quick, crate::steam::book::fetch_book(&c, "x"))
+            .await
+            .expect("o livro não espera a pausa dos anúncios")
+            .unwrap();
+        assert_eq!(b.min_sell_cents, Some(167));
+        tokio::time::timeout(
+            quick,
+            c.get_json(Endpoint::Search, "/market/search/render/", &[]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // e a leitura de anúncios em pausa falha na hora, sem ir à Steam nem segurar quem chamou
+        let again = tokio::time::timeout(
+            quick,
+            c.action(Endpoint::Listings, "QueryListingsForItem", &qp),
+        )
+        .await
+        .expect("falha na hora");
+        assert!(matches!(again, Err(Error::RateLimited { .. })));
+        assert_eq!(
+            c.take_calls(),
+            [
+                Calls { ok: 0, limited: 1 },
+                Calls::default(),
+                Calls { ok: 2, limited: 0 }
+            ]
+        );
+        let st = c.stats();
+        assert!(st.book_ok_at.is_some());
+        assert!(
+            st.paused_until.is_some(),
+            "o painel ainda mostra a pausa dos anúncios"
+        );
+        assert_eq!(
+            st.last_ok_at, None,
+            "resposta do livro não diz que os anúncios voltaram"
+        );
+    }
+
+    #[tokio::test]
+    async fn buckets_share_the_minimum_spacing() {
+        let app = Router::new().route("/ok", get(|| async { "{}" }));
+        let c = fast(&serve(app).await);
+        c.inner.lock().unwrap().spacing = Duration::from_millis(400);
+        let t = Instant::now();
+        c.get_json(Endpoint::History, "/ok", &[]).await.unwrap();
+        c.get_json(Endpoint::Search, "/ok", &[]).await.unwrap();
+        assert!(
+            t.elapsed() >= Duration::from_millis(400),
+            "baldes diferentes ainda respeitam o espaçamento mínimo"
+        );
     }
 
     #[test]
@@ -1509,7 +1695,7 @@ mod tests {
     // gap de 100 ms para os testes de rede não dormirem 3 s por consulta
     fn fast(base: &str) -> SteamClient {
         let c = SteamClient::with_base(base).unwrap();
-        c.inner.lock().unwrap().limiter.gap = Duration::from_millis(100);
+        c.set_gap_for_test(Duration::from_millis(100));
         c
     }
 
@@ -1536,10 +1722,20 @@ mod tests {
             .unwrap()
             .with_alt(alt_marked());
         let mut g = c.inner.lock().unwrap();
-        for ep in [Endpoint::Buy, Endpoint::Session, Endpoint::Auth] {
+        // livro e busca têm o balde deles na principal: a extra só alivia anúncios e histórico
+        for ep in [
+            Endpoint::Buy,
+            Endpoint::Session,
+            Endpoint::Auth,
+            Endpoint::Book,
+            Endpoint::Search,
+        ] {
             assert!(c.alt_slot(&mut g, ep, Instant::now()).is_none(), "{ep:?}");
         }
-        assert!(c.alt_slot(&mut g, Endpoint::Book, Instant::now()).is_some());
+        assert!(
+            c.alt_slot(&mut g, Endpoint::Listings, Instant::now())
+                .is_some()
+        );
     }
 
     #[tokio::test]

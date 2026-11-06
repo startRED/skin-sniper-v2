@@ -87,6 +87,9 @@ pub(crate) struct Shared {
     pub closeness_scale: f64,
 }
 
+/// Livro de ofertas "respondendo" = resposta boa há menos de 3 min (uma leitura a cada 6 s quando os anúncios estão barrados).
+const BOOK_LANE_FRESH_SECS: i64 = 180;
+
 pub struct Hunt {
     pub(crate) db: Db,
     pub(crate) steam: Arc<SteamClient>,
@@ -265,10 +268,15 @@ impl Hunt {
     }
 
     /// `State` completo: saldo, estado da caça, combo e chaves.
+    // o painel usa o mesmo prazo (`bookLane` em store.svelte.ts)
     pub fn state(&self) -> State {
         let stats = self.steam.stats();
         let s = self.lock();
         let paused = stats.paused_until;
+        // anúncios barrados, mas o livro respondeu há pouco: a caça segue por ele
+        let by_book = stats
+            .book_ok_at
+            .is_some_and(|t| self.now() - t < BOOK_LANE_FRESH_SECS);
         State {
             saldo_cents: s.saldo,
             saldo_source: s.source,
@@ -278,7 +286,10 @@ impl Hunt {
                 last_query_at: stats.last_query_at,
                 paused_until: paused,
                 last_ok_at: stats.last_ok_at,
-                message: if paused.is_some() {
+                book_ok_at: stats.book_ok_at,
+                message: if paused.is_some() && by_book {
+                    Some("a Steam barrou a leitura de anúncios (429); a caça segue pelo livro de ofertas".into())
+                } else if paused.is_some() {
                     Some("a Steam pediu calma (429); caça em pausa".into())
                 } else {
                     let now = self.now();

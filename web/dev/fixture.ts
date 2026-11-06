@@ -112,7 +112,7 @@ function combo(): State['combo'] {
 function state(): State {
   return {
     saldo_cents: saldoSource === 'none' ? 0 : saldoCents, saldo_source: saldoSource,
-    hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, last_ok_at: lastQuery, message: '20 anúncios conferidos em 1 min; nenhum deu lucro, o mais perto dava R$ 0,78 de prejuízo (exemplo do modo dev)', ...huntExample },
+    hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, last_ok_at: lastQuery, book_ok_at: lastQuery, message: '20 anúncios conferidos em 1 min; nenhum deu lucro, o mais perto dava R$ 0,78 de prejuízo (exemplo do modo dev)', ...huntExample },
     combo: combo(),
     keys: keyExamples ?? {
       steam: { set: !!settings.steam_login_secure, ok: !!settings.steam_login_secure, detail: settings.steam_login_secure ? 'Conta exemplo_erick' : null },

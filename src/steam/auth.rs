@@ -1114,13 +1114,11 @@ mod tests {
         assert!(login.start_qr().await.is_err());
         assert!(steam.stats().last_query_at.is_some(), "contou no limitador");
         assert!(steam.stats().paused_until.is_some(), "429 pausou tudo");
-        // com tudo pausado, a segunda tentativa nem sai (breaker/limitador devolvem erro de pausa)
-        let t = Instant::now();
+        // com tudo pausado, a segunda tentativa nem sai: o limitador devolve o erro de pausa na hora
+        let sent = steam.sent();
         let second = tokio::time::timeout(Duration::from_millis(500), login.start_qr()).await;
-        assert!(
-            second.is_err() || t.elapsed() >= Duration::from_millis(400),
-            "esperou a pausa"
-        );
+        assert!(second.expect("não segura quem chamou").is_err());
+        assert_eq!(steam.sent(), sent, "a segunda nem saiu");
     }
 
     /// AO VIVO: um único `BeginAuthSessionViaQR` para ver se a Steam aceita o pedido. Não completa login.

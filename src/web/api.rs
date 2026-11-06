@@ -25,6 +25,8 @@ pub struct Hunt {
     pub paused_until: Option<i64>,
     /// Última resposta da Steam que não foi 429 (qualquer saída).
     pub last_ok_at: Option<i64>,
+    /// Última resposta boa do livro de ofertas ou da busca, que a Steam limita à parte da leitura de anúncios.
+    pub book_ok_at: Option<i64>,
     pub message: Option<String>,
 }
 
