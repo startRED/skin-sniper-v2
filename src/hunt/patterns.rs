@@ -104,6 +104,7 @@ pub async fn load(h: &Hunt) -> Result<()> {
 /// Lê as vendas da próxima skin do catálogo, se é hora. Não gasta consulta da Steam: só o CSFloat.
 pub async fn maybe_step(h: &Hunt) {
     let now = h.now();
+    // saldo desconhecido (0): qualquer piso; aprender não compra nada
     let (saldo, seen) = {
         let mut s = h.lock();
         // a primeira leitura só depois de `GAP` ligado: a caça começa antes
@@ -120,7 +121,7 @@ pub async fn maybe_step(h: &Hunt) {
         .db
         .call(move |c| {
             c.prepare(
-                "SELECT name FROM items WHERE floor_cents <= ?1 AND sales_per_day >= ?2 AND name LIKE '%|%(%)'
+                "SELECT name FROM items WHERE (floor_cents <= ?1 OR ?1 <= 0) AND sales_per_day >= ?2 AND name LIKE '%|%(%)'
                  AND name NOT LIKE '★%' ORDER BY sales_per_day DESC",
             )?
             .query_map(params![saldo, MIN_SALES_PER_DAY], |r| r.get(0))?

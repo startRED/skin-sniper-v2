@@ -407,6 +407,8 @@ const NO_SALDO: &str = "sem saldo: informe um valor ou configure o cookie da Ste
 
 pub async fn tick(h: &Arc<Hunt>) -> Tick {
     detect::roll_cycle(h);
+    // patterns: só o CSFloat; roda também sem saldo e com a Steam em pausa (429), quando a caça para
+    super::patterns::maybe_step(h).await;
     if h.saldo() <= 0 {
         h.set_message(Some(NO_SALDO.into()));
         return Tick::Idle;
@@ -445,8 +447,6 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             }
         }
     }
-    // patterns: só o CSFloat, não gasta a vez da Steam
-    super::patterns::maybe_step(h).await;
     if super::orders::maybe_step(h).await {
         return Tick::Book;
     }
