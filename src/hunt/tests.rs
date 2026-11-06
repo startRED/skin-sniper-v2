@@ -695,6 +695,36 @@ async fn new_listings_teach_the_agenda_once() {
 }
 
 #[tokio::test]
+async fn closeness_scale_defaults_then_learns_from_evaluations() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    learn::refresh_scale(&h).await.unwrap();
+    assert_eq!(h.lock().closeness_scale, learn::DEFAULT_SCALE);
+    // 300 avaliações a R$ 10,00 com lucro no médio de 0, −1, −2 … centavos
+    db.call(|c| {
+        for k in 0..300_i64 {
+            c.execute(
+                "INSERT INTO evaluations(at, listing_id, name, price_cents, steam_url, mid_profit_cents, reason)
+                 VALUES (0, ?1, 'x', 1000, 'u', ?2, 'r')",
+                rusqlite::params![k.to_string(), -k],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    learn::refresh_scale(&h).await.unwrap();
+    let mut gaps: Vec<f64> = (0..300_i64)
+        .map(|k| (-k - catalog::min_profit(1000)) as f64 / 1000.0)
+        .collect();
+    let expected = learn::tail_scale(&mut gaps).unwrap();
+    let scale = h.lock().closeness_scale;
+    assert!((scale - expected).abs() < 1e-12, "{scale} {expected}");
+    assert_ne!(scale, learn::DEFAULT_SCALE);
+}
+
+#[tokio::test]
 async fn empty_pages_counter_saturates() {
     let (base, _bodies) = serve().await;
     let (db, _dir) = temp_db();
