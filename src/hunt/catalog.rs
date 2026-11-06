@@ -5,7 +5,7 @@
 //!    busca por nome de cada skin com tabela de pattern (raras ficam longe do topo da popularidade);
 //! 2. razão BRL/USD medida entre um anúncio em BRL e o preço USD do mesmo item (nunca fixa no código);
 //! 3. `QueryPriceHistory` dos candidatos com piso ≤ saldo (cache de 6 h);
-//! 4. seleção por nota = vendas/dia × lucro possível × (1 + acertos), mais uma consulta de grupo raro por
+//! 4. seleção por nota = vendas/dia × lucro possível × fator aprendido (`Queue::boosts`), mais uma consulta de grupo raro por
 //!    skin com tabela (todos os desgastes numa consulta). A nota só escolhe quem
 //!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
 //!    caber no saldo.
@@ -15,7 +15,7 @@
 
 use super::patterns::{self, Learned};
 use super::scheduler::Task;
-use super::{Hunt, detect};
+use super::{Hunt, detect, learn};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
 use crate::pricing::groups::{float_band, ranges, seed_ranges, skin_base, table_skins};
@@ -230,7 +230,8 @@ pub struct Ctx<'a> {
     pub ratio: f64,
     pub saldo: i64,
     pub now: i64,
-    pub hits: &'a HashMap<String, u32>,
+    /// Fator aprendido por alvo `d:` (`Queue::boosts`); ausente = 1.
+    pub boost: &'a HashMap<String, f64>,
     /// `Shared::floors`: pisos vistos nas consultas.
     pub floors: &'a HashMap<String, (Option<i64>, i64)>,
     /// Patterns aprendidos: seeds com prova entram na busca rara da skin junto com os da tabela.
@@ -256,9 +257,9 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
                 return None;
             }
             let base = score(spd, profit);
-            let with_hits = base * (1.0 + f64::from(c.hits.get(&id).copied().unwrap_or(0)));
+            let boosted = base * c.boost.get(&id).copied().unwrap_or(1.0);
             Some((
-                with_hits,
+                boosted,
                 Task {
                     id,
                     name: i.name.clone(),
@@ -819,12 +820,15 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         return Ok(());
     };
     let items = load_items(&h.db).await?;
-    let hits = recent_hits(&h.db, now).await?;
+    if let Err(error) = learn::refresh_scale(h).await {
+        tracing::warn!(%error, "escala de proximidade não atualizada; segue a anterior");
+    }
+    let boost = h.lock().queue.boosts(now);
     let ctx = Ctx {
         ratio,
         saldo,
         now,
-        hits: &hits,
+        boost: &boost,
         floors: &floors,
         learned: &learned,
     };
@@ -871,20 +875,6 @@ pub async fn load_items(db: &Db) -> Result<Vec<Item>> {
         .collect()
     })
     .await
-}
-
-/// Acertos das últimas 24 h por tarefa.
-async fn recent_hits(db: &Db, now: i64) -> Result<HashMap<String, u32>> {
-    let rows: Vec<(String, u32)> = db
-        .call(move |c| {
-            c.prepare(
-                "SELECT task, count(*) FROM opportunities WHERE task IS NOT NULL AND created_at >= ?1 GROUP BY task",
-            )?
-            .query_map([now - DAY], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect()
-        })
-        .await?;
-    Ok(rows.into_iter().collect())
 }
 
 pub(crate) async fn get_setting(db: &Db, key: &'static str) -> Result<Option<String>> {
@@ -991,18 +981,18 @@ mod tests {
         assert_eq!(window_stats(&pts, 1_600_000_000), None);
     }
 
-    const NO_HITS: fn() -> HashMap<String, u32> = HashMap::new;
+    const NO_BOOST: fn() -> HashMap<String, f64> = HashMap::new;
 
     fn ctx<'a>(
         saldo: i64,
-        hits: &'a HashMap<String, u32>,
+        boost: &'a HashMap<String, f64>,
         floors: &'a HashMap<String, (Option<i64>, i64)>,
     ) -> Ctx<'a> {
         Ctx {
             ratio: 5.5,
             saldo,
             now: 1_793_770_000,
-            hits,
+            boost,
             floors,
             learned: &NO_LEARNED,
         }
@@ -1013,7 +1003,7 @@ mod tests {
     #[test]
     fn learned_seeds_join_the_table_ranges_and_bring_new_skins() {
         let (items, saldo) = catalog_fixture();
-        let hit = NO_HITS();
+        let boost = NO_BOOST();
         let floors = HashMap::new();
         let mut learned = Learned::new();
         // Moonrise: seed 500 com prova soma às faixas da tabela; seed com 2 vendas ainda não
@@ -1032,7 +1022,7 @@ mod tests {
             .insert(77, vec![2.5, 3.0, 2.2]);
         let c = Ctx {
             learned: &learned,
-            ..ctx(saldo, &hit, &floors)
+            ..ctx(saldo, &boost, &floors)
         };
         let tasks = select(&items, &c);
         let moon = tasks
@@ -1051,7 +1041,7 @@ mod tests {
             .expect("AWP Duality com seed aprendido vira busca rara");
         assert_eq!(awp.seeds, vec![(77, 77)]);
         assert!(
-            select(&items, &ctx(saldo, &hit, &floors))
+            select(&items, &ctx(saldo, &boost, &floors))
                 .iter()
                 .all(|t| t.seeds.is_empty() || t.code != plain.code.clone().unwrap())
         );
@@ -1152,8 +1142,8 @@ mod tests {
         let (items, saldo) = catalog_fixture();
         assert_eq!(saldo, 3608);
         let floors = HashMap::new();
-        let hits = NO_HITS();
-        let tasks = select(&items, &ctx(saldo, &hits, &floors));
+        let boost = NO_BOOST();
+        let tasks = select(&items, &ctx(saldo, &boost, &floors));
         let (rare, common): (Vec<&Task>, Vec<&Task>) = tasks
             .iter()
             .filter(|t| t.float.is_none())
@@ -1222,8 +1212,8 @@ mod tests {
         spd("Glock-18 | Moonrise (Battle-Scarred)", 0.2, &mut items);
         spd("Glock-18 | Moonrise (Field-Tested)", 335.0, &mut items);
         spd("Five-SeveN | Case Hardened (Field-Tested)", 3.0, &mut items);
-        let hit = NO_HITS();
-        let rare: Vec<String> = select(&items, &ctx(saldo, &hit, &HashMap::new()))
+        let boost = NO_BOOST();
+        let rare: Vec<String> = select(&items, &ctx(saldo, &boost, &HashMap::new()))
             .into_iter()
             .filter(|t| t.rare())
             .map(|t| t.name)
@@ -1242,7 +1232,7 @@ mod tests {
     #[test]
     fn rare_floor_seen_above_balance_drops_the_task_until_it_gets_stale() {
         let (items, saldo) = catalog_fixture();
-        let hit = NO_HITS();
+        let boost = NO_BOOST();
         let heat = "Desert Eagle | Heat Treated (Field-Tested)";
         let id_of = |tasks: &[Task]| {
             tasks
@@ -1250,16 +1240,16 @@ mod tests {
                 .find(|t| t.rare() && t.name.starts_with("Desert Eagle | Heat Treated ("))
                 .map(|t| t.id.clone())
         };
-        let id = id_of(&select(&items, &ctx(saldo, &hit, &HashMap::new()))).unwrap();
+        let id = id_of(&select(&items, &ctx(saldo, &boost, &HashMap::new()))).unwrap();
         let n = seed_ranges(heat).len();
         let mut floors: HashMap<String, (Option<i64>, i64)> = (0..n)
             .map(|k| (format!("{id}#{k}-{k}"), (Some(28_000), 1_793_769_000)))
             .collect();
         // todas as faixas conferidas, todas caras: sai
-        assert_eq!(id_of(&select(&items, &ctx(saldo, &hit, &floors))), None);
+        assert_eq!(id_of(&select(&items, &ctx(saldo, &boost, &floors))), None);
         // uma faixa ainda sem consulta (ou vazia): continua, mas com peso menor que um raro ainda não visto
         floors.remove(&format!("{id}#0-0"));
-        let tasks = select(&items, &ctx(saldo, &hit, &floors));
+        let tasks = select(&items, &ctx(saldo, &boost, &floors));
         let score = |skin: &str| {
             tasks
                 .iter()
@@ -1270,13 +1260,13 @@ mod tests {
         assert!(id_of(&tasks).is_some());
         assert!(score("Desert Eagle | Heat Treated (") < score("Glock-18 | Moonrise (") / 2.0);
         floors.insert(format!("{id}#0-0"), (None, 1_793_769_000));
-        assert!(id_of(&select(&items, &ctx(saldo, &hit, &floors))).is_some());
+        assert!(id_of(&select(&items, &ctx(saldo, &boost, &floors))).is_some());
         // uma faixa barata: continua
         floors.insert(format!("{id}#0-0"), (Some(900), 1_793_769_000));
-        assert!(id_of(&select(&items, &ctx(saldo, &hit, &floors))).is_some());
+        assert!(id_of(&select(&items, &ctx(saldo, &boost, &floors))).is_some());
         // consulta velha não vale: volta a ser conferida
         floors.insert(format!("{id}#0-0"), (Some(28_000), 1_793_769_000));
-        let mut late = ctx(saldo, &hit, &floors);
+        let mut late = ctx(saldo, &boost, &floors);
         late.now += FLOOR_TTL;
         assert!(id_of(&select(&items, &late)).is_some());
     }
@@ -1284,10 +1274,10 @@ mod tests {
     #[test]
     fn common_floor_seen_above_balance_drops_the_task() {
         let (items, saldo) = catalog_fixture();
-        let hit = NO_HITS();
+        let boost = NO_BOOST();
         let name = "AWP | Duality (Field-Tested)";
         let has = |floors: &HashMap<_, _>| {
-            select(&items, &ctx(saldo, &hit, floors))
+            select(&items, &ctx(saldo, &boost, floors))
                 .iter()
                 .any(|t| t.name == name)
         };
@@ -1299,7 +1289,7 @@ mod tests {
     #[test]
     fn selected_arms_include_discounts_rares_and_elite_floats() {
         let (items, saldo) = catalog_fixture();
-        let tasks = select(&items, &ctx(saldo, &NO_HITS(), &HashMap::new()));
+        let tasks = select(&items, &ctx(saldo, &NO_BOOST(), &HashMap::new()));
         assert!(tasks.iter().any(|t| t.id.starts_with("d:")));
         assert!(tasks.iter().any(|t| t.id.starts_with("r:")));
         let floats: Vec<&Task> = tasks.iter().filter(|t| t.id.starts_with("f:")).collect();
@@ -1316,7 +1306,7 @@ mod tests {
         // faixa vista acima do saldo: sai
         let id = floats[0].id.clone();
         let seen = HashMap::from([(id.clone(), (Some(saldo + 1), 1_793_769_000))]);
-        let again = select(&items, &ctx(saldo, &NO_HITS(), &seen));
+        let again = select(&items, &ctx(saldo, &NO_BOOST(), &seen));
         assert!(again.iter().all(|t| t.id != id));
     }
 
@@ -1326,11 +1316,11 @@ mod tests {
             .map(|i| item(&format!("F{i} (Field-Tested)"), 300, i, 600.0, 0.15))
             .collect();
         items.push(item("Slow (Field-Tested)", 300, 99, 1.0, 0.3));
-        let tasks = select(&items, &ctx(100_000, &NO_HITS(), &HashMap::new()));
+        let tasks = select(&items, &ctx(100_000, &NO_BOOST(), &HashMap::new()));
         assert!(tasks.iter().any(|t| t.id == "d:Slow (Field-Tested)"));
         // abaixo de 1 venda/dia não entra
         items.last_mut().unwrap().sales_per_day = Some(0.9);
-        let tasks = select(&items, &ctx(100_000, &NO_HITS(), &HashMap::new()));
+        let tasks = select(&items, &ctx(100_000, &NO_BOOST(), &HashMap::new()));
         assert!(tasks.iter().all(|t| t.id != "d:Slow (Field-Tested)"));
     }
 
@@ -1347,19 +1337,22 @@ mod tests {
                 )
             })
             .collect();
-        let (floors, hits) = (HashMap::new(), NO_HITS());
+        let (floors, boost) = (HashMap::new(), NO_BOOST());
         let commons = |tasks: Vec<Task>| -> Vec<Task> {
             tasks
                 .into_iter()
                 .filter(|t| t.id.starts_with("d:"))
                 .collect()
         };
-        let tasks = commons(select(&items, &ctx(100_000, &hits, &floors)));
+        let tasks = commons(select(&items, &ctx(100_000, &boost, &floors)));
         assert_eq!(tasks.len(), WATCH_MAX);
-        // mais vendas (abaixo do teto), mais nota; acertos recentes sobem
+        // mais vendas (abaixo do teto), mais nota; o fator aprendido sobe quem rende e desce quem não rende
         assert_eq!(tasks[0].id, "d:S99 (Field-Tested)");
-        let hits = HashMap::from([("d:S0 (Field-Tested)".to_string(), 1000)]);
-        let tasks = commons(select(&items, &ctx(100_000, &hits, &floors)));
+        let boost = HashMap::from([("d:S0 (Field-Tested)".to_string(), 4.0)]);
+        let tasks = commons(select(&items, &ctx(100_000, &boost, &floors)));
         assert_eq!(tasks[0].id, "d:S0 (Field-Tested)");
+        let boost = HashMap::from([("d:S99 (Field-Tested)".to_string(), 0.25)]);
+        let tasks = commons(select(&items, &ctx(100_000, &boost, &floors)));
+        assert_ne!(tasks[0].id, "d:S99 (Field-Tested)");
     }
 }

@@ -137,7 +137,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    categorias de arma, sem faca/luva, até cobrir os itens com piso ≤ saldo. Para cada candidato,
    `QueryPriceHistory` (cache 6 h) dá vendas/dia e dispersão.
 2. **Seleção:** vigia itens com piso entre o mínimo viável e o saldo e ≥ 1 venda/dia. Nota = vendas/dia
-   (até 10: quem compra uma unidade não ganha com giro maior) × lucro possível em reais × (1 + acertos recentes). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
+   (até 10: quem compra uma unidade não ganha com giro maior) × lucro possível em reais × fator aprendido do alvo (abaixo). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
    por skin com tabela (código G, **sem filtro de desgaste**: a mesma consulta traz todos os desgastes, StatTrak e
@@ -152,14 +152,25 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
      A seleção é refeita a cada 15 min para isso valer.
    - **Agenda que aprende (bandido de vários braços):** cada alvo (skin × desgaste × modo: `barato` ou `seed`) é um braço com uma nota que se atualiza sozinha = lucro esperado (preço médio) achado por consulta
-     gasta; quase-lucro (anúncio que faltou até R$ 0,30 ou 10 % do preço para entrar na lista) conta 15 % do
-     lucro mínimo, para a nota não começar do zero. A agenda é **UCB1** (determinístico, sem crate de aleatórios):
+     gasta; além do achado, cada anúncio **novo** avaliado que não passou rende `lucro mínimo × e^(g/τ)`, com
+     g = (lucro no médio − lucro mínimo) ÷ preço, limitado a 0: todo anúncio visto ensina, e a nota não começa do
+     zero. Só o anúncio novo rende; reavaliar o mesmo (o histórico mudou) não rende de novo. τ = excesso médio de g
+     acima do percentil 90 das últimas 5 000 avaliações com estimativa (`evaluations`), recalculado a cada seleção
+     (mínimo 200 avaliações, entre 1 e 10 pontos; sem dados, 3 pontos, medidos em 4 850 anúncios de 04–06/11). O
+     contador "quase deu lucro" do painel continua com a janela de R$ 0,30 ou 10 % do preço. A agenda é **UCB1** (determinístico, sem crate de aleatórios):
      quem rende por consulta ganha mais consultas, e a frequência de cada alvo é essa alocação. Regras que não
      mudam: 12,5 % das consultas vão sempre ao braço menos testado, com o slot girando entre os dois modos (cada
      modo tem piso próprio, qualquer que seja o número de braços); consultas e recompensa pesam metade a cada
      24 h; a nota vale metade a cada 4 h sem nenhuma recompensa. O saldo e a taxa continuam decidindo quem
      entra (regras acima); a nota-base do catálogo só desempata braços ainda não testados. A busca e as consultas de anúncios dividem o mesmo limitador global. As notas ficam no banco (`arm_stats`, retenção 14 dias
-     e no máximo 2000 linhas) e sobrevivem a reinício. Os parâmetros (12,5 %, meias-vidas, 15 %) são hipóteses de calibração, não medidas.
+     e no máximo 2000 linhas) e sobrevivem a reinício. Os parâmetros (12,5 %, meias-vidas, 5 000, 200, 1–10 pontos, 3 pontos) são hipóteses de calibração, não medidas.
+   - **Fator aprendido na seleção (desconto):** no lugar de `(1 + acertos recentes)`. Referência = mediana de `r/n`
+     (recompensa por consulta, com decaimento) dos alvos `d:` com ≥ 10 consultas; média encolhida do alvo =
+     `(r + 20 × referência) / (n + 20)`; fator = média encolhida ÷ referência, entre 0,25 e 4. Sem consulta ou sem
+     referência (ninguém rendeu ainda), o fator é 1. Quem rende pouco perde a vaga (`WATCH_MAX`) para uma skin do
+     catálogo ainda não testada, que entra com fator 1 e é testada logo. O alvo que saiu guarda a nota, que decai
+     (24 h), então o fator volta para perto de 1 em poucos dias e ele pode voltar a disputar a vaga. Raro e float
+     seguem por vendas/dia. Os números (10 consultas, 20, 0,25–4) são hipóteses de calibração, não medidas.
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 1,00 e 10 % depois da taxa
      (hoje ≈ R$ 7,57). Abaixo disso a taxa come o lucro: até 06/11, 9 000 consultas em skins de R$ 1,60–8,50 deram
      um achado de R$ 0,32. Os 30 % são hipótese, não medida.
@@ -237,6 +248,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
   Aviso no Windows (toast, sai com o painel fechado; clicar abre o anúncio), Telegram e som: lucro esperado ajustado ao risco positivo e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00). Não exige `safe`: raro quase nunca é `safe`, e um flip de R$ 10,75 escapou sem aviso por isso.
 - Calibração: cada compra grava os três preços previstos; quando o Erick vender, o realizado entra numa
   tabela para conferir o erro (v1 só grava; o ajuste fino vem depois com dados).
+  Conferida em 06/11 contra o mercado 7–9 dias depois (7 525 casos, 493 skins): real ÷ previsto no médio com
+  mediana 1,000 (p10 0,914, p90 1,104), 50 % do volume ≥ médio e 70 % ≥ rápido, erro médio 6,6 %.
 - Venda manual aceita preço entre 1 e 10.000.000 centavos, depois da liberação, e permite corrigir o valor. O valor é o
   preço pago pelo comprador, incluindo taxas, igual aos três preços previstos. `mean_error_pct` é a média do
   erro absoluto e `bias_pct` a média do erro com sinal, ambos `(realizado − médio previsto) / médio previsto`.
