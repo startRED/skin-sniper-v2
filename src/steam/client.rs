@@ -49,6 +49,12 @@ const PAUSE_RESET_AFTER: Duration = Duration::from_secs(60 * 60); // maior que P
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
 const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Saída extra: proxy local que sai por outro IP público (o `saida-celular` deste PC, pela Starlink). Leva só
+/// leitura de mercado, sem login, com limitador próprio. Desligado, ele recusa na hora e a saída descansa
+/// `ALT_DOWN`; ligado fora da rede certa, responde 503 e dá no mesmo.
+pub const ALT_PROXY: &str = "http://127.0.0.1:1056";
+const ALT_DOWN: Duration = Duration::from_secs(5 * 60);
+
 const BREAKER_THRESHOLD: u32 = 3;
 const BREAKER_OPEN_START: Duration = Duration::from_secs(30);
 const BREAKER_OPEN_MAX: Duration = Duration::from_secs(10 * 60);
@@ -367,12 +373,48 @@ struct Inner {
     on_pace: Option<PaceHook>,
     /// Até quando `action` lê sem login (depois de um 429 logado).
     anon_reads_until: Option<Instant>,
+    /// Ritmo da saída extra: outro IP, outra cota. Fica só em memória.
+    // shortcut: reiniciar volta a 6 s nessa saída; se a Steam castigar esse IP por horas, salvar como `steam_pace`
+    alt_limiter: Limiter,
+    /// Saída extra recusou ou falhou na rede: fica de lado até aqui.
+    alt_down_until: Option<Instant>,
 }
 
 pub struct SteamClient {
     http: reqwest::Client,
+    /// Saída extra (`ALT_PROXY`); `None` nos testes e enquanto ninguém liga.
+    alt: Option<reqwest::Client>,
     base: String,
     inner: Mutex<Inner>,
+}
+
+enum Slot {
+    Main,
+    Alt,
+    Wait(Duration),
+}
+
+fn http_builder() -> reqwest::ClientBuilder {
+    // Sem `accept-language`: em 04/11 o mesmo `/market/actions`, do mesmo IP e no mesmo minuto, deu 429
+    // com `en-US,…` e 200 sem o cabeçalho, repetido em itens diferentes. Sem ele a Steam respondeu em inglês.
+    let mut h = HeaderMap::new();
+    h.insert(
+        "referer",
+        HeaderValue::from_static("https://steamcommunity.com/market/"),
+    );
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .default_headers(h)
+        .redirect(redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+}
+
+fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    resp.headers()
+        .get(RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 /// Escapa tudo que não é seguro num segmento de caminho.
@@ -400,21 +442,9 @@ impl SteamClient {
     }
 
     pub(crate) fn with_base(base: &str) -> anyhow::Result<Self> {
-        // Sem `accept-language`: em 04/11 o mesmo `/market/actions`, do mesmo IP e no mesmo minuto, deu 429
-        // com `en-US,…` e 200 sem o cabeçalho, repetido em itens diferentes. Sem ele a Steam respondeu em inglês.
-        let mut h = HeaderMap::new();
-        h.insert(
-            "referer",
-            HeaderValue::from_static("https://steamcommunity.com/market/"),
-        );
-        let http = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .default_headers(h)
-            .redirect(redirect::Policy::none())
-            .timeout(Duration::from_secs(30))
-            .build()?;
         Ok(Self {
-            http,
+            http: http_builder().build()?,
+            alt: None,
             base: base.trim_end_matches('/').to_string(),
             inner: Mutex::new(Inner {
                 limiter: Limiter::new(Instant::now()),
@@ -423,8 +453,20 @@ impl SteamClient {
                 extra: Vec::new(),
                 on_pace: None,
                 anon_reads_until: None,
+                alt_limiter: Limiter::new(Instant::now()),
+                alt_down_until: None,
             }),
         })
+    }
+
+    /// Liga a saída extra pelo proxy HTTP em `url` (ver `ALT_PROXY`).
+    pub fn with_alt_proxy(self, url: &str) -> anyhow::Result<Self> {
+        Ok(self.with_alt(http_builder().proxy(reqwest::Proxy::all(url)?).build()?))
+    }
+
+    fn with_alt(mut self, http: reqwest::Client) -> Self {
+        self.alt = Some(http);
+        self
     }
 
     /// Troca (ou remove) o cookie em tempo de execução. Vale para as próximas requisições `auth`.
@@ -505,8 +547,20 @@ impl SteamClient {
         self.inner.lock().unwrap().limiter.gap = gap;
     }
 
+    /// Consultas somam as duas saídas; a caça só está em pausa se a extra também não pode ler.
     pub fn stats(&self) -> Stats {
-        self.inner.lock().unwrap().limiter.stats(Instant::now())
+        let now = Instant::now();
+        let mut g = self.inner.lock().unwrap();
+        let mut s = g.limiter.stats(now);
+        if self.alt.is_some() {
+            let a = g.alt_limiter.stats(now);
+            s.queries_per_min += a.queries_per_min;
+            s.last_query_at = s.last_query_at.max(a.last_query_at);
+            if g.alt_down_until.is_none_or(|t| now >= t) {
+                s.paused_until = s.paused_until.zip(a.paused_until).map(|(m, x)| m.min(x));
+            }
+        }
+        s
     }
 
     /// Avisa o gancho de ritmo ainda sob o lock: a ordem dos avisos é a ordem dos 429 (o gancho não pode
@@ -735,7 +789,7 @@ impl SteamClient {
         reset_on_success: bool,
     ) -> Result<(Parts, Vec<u8>)> {
         loop {
-            let wait = {
+            let slot = {
                 let now = Instant::now();
                 let mut g = self.inner.lock().unwrap();
                 if let Some(t) = g.breakers[ep.idx()].check(now) {
@@ -744,11 +798,24 @@ impl SteamClient {
                         until: unix_in(t - now),
                     });
                 }
-                g.limiter.try_acquire(now).err()
+                // A principal (logada, ritmo salvo) tem a preferência; a extra só pega a vaga que a principal não tem.
+                match g.limiter.try_acquire(now) {
+                    Ok(()) => Slot::Main,
+                    Err(w) => match self.alt_slot(&mut g, ep, now) {
+                        Some(Ok(())) => Slot::Alt,
+                        Some(Err(a)) => Slot::Wait(w.min(a)),
+                        None => Slot::Wait(w),
+                    },
+                }
             };
-            match wait {
-                None => break,
-                Some(w) => tokio::time::sleep(w).await,
+            match slot {
+                Slot::Main => break,
+                Slot::Wait(w) => tokio::time::sleep(w).await,
+                Slot::Alt => {
+                    if let Some(r) = self.send_alt(ep, &req, check, reset_on_success).await {
+                        return r;
+                    }
+                }
             }
         }
         // Sessão que mandou a consulta: cookies da resposta só valem para ela (o login pode mudar no meio).
@@ -767,22 +834,93 @@ impl SteamClient {
                 req = req.header(COOKIE, h);
             }
         }
-        let result = req.send().await;
-        let now = Instant::now();
-        let resp = match result {
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
-                self.inner.lock().unwrap().breakers[ep.idx()].on_fail(now);
+                self.inner.lock().unwrap().breakers[ep.idx()].on_fail(Instant::now());
                 return Err(Error::Transport(e.without_url().to_string()));
             }
         };
+        self.finish(ep, resp, sent_by, check, reset_on_success, false)
+            .await
+    }
+
+    /// Vaga na saída extra: só leitura de mercado, com a saída ligada. Descansando, devolve quanto falta.
+    fn alt_slot(
+        &self,
+        g: &mut Inner,
+        ep: Endpoint,
+        now: Instant,
+    ) -> Option<std::result::Result<(), Duration>> {
+        let read = matches!(
+            ep,
+            Endpoint::Listings | Endpoint::History | Endpoint::Book | Endpoint::Search
+        );
+        if self.alt.is_none() || !read {
+            return None;
+        }
+        match g.alt_down_until {
+            Some(t) if now < t => Some(Err(t - now)),
+            _ => Some(g.alt_limiter.try_acquire(now)),
+        }
+    }
+
+    /// Leitura pela saída extra, sempre sem login (o pedido é clonado antes do cookie). `None` = recusa, rede ou
+    /// 429 nela: a consulta volta para a fila da principal sem tocar no breaker nem no limitador dela.
+    async fn send_alt(
+        &self,
+        ep: Endpoint,
+        req: &RequestBuilder,
+        check: Option<EnvelopeCheck>,
+        reset_on_success: bool,
+    ) -> Option<Result<(Parts, Vec<u8>)>> {
+        let alt = self.alt.as_ref()?;
+        let request = req.try_clone()?.build().ok()?;
+        match alt.execute(request).await {
+            Ok(r) if r.status() == StatusCode::TOO_MANY_REQUESTS => {
+                let retry = retry_after(&r);
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .alt_limiter
+                    .on_429(Instant::now(), retry);
+                tracing::warn!(endpoint = ?ep, "Steam: 429 na saída extra; ela pausa e a principal segue");
+                None
+            }
+            Ok(r) => Some(
+                self.finish(ep, r, None, check, reset_on_success, true)
+                    .await,
+            ),
+            Err(e) => {
+                let mut g = self.inner.lock().unwrap();
+                if g.alt_down_until.is_none_or(|t| Instant::now() >= t) {
+                    tracing::warn!(erro = %e.without_url(), "saída extra indisponível; tenta de novo em 5 min");
+                }
+                g.alt_down_until = Some(Instant::now() + ALT_DOWN);
+                None
+            }
+        }
+    }
+
+    /// Classifica a resposta de qualquer saída. `sent_by` é a sessão do cookie enviado (só ela guarda os cookies
+    /// da resposta); `via_alt` escolhe o limitador. O 429 da extra não chega aqui (`send_alt`).
+    async fn finish(
+        &self,
+        ep: Endpoint,
+        resp: reqwest::Response,
+        sent_by: Option<String>,
+        check: Option<EnvelopeCheck>,
+        reset_on_success: bool,
+        via_alt: bool,
+    ) -> Result<(Parts, Vec<u8>)> {
+        let now = Instant::now();
         let status = resp.status();
         let location = resp
             .headers()
             .get("location")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        if auth {
+        if sent_by.is_some() {
             let set: Vec<String> = resp
                 .headers()
                 .get_all("set-cookie")
@@ -797,12 +935,7 @@ impl SteamClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i32>().ok());
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry = resp
-                .headers()
-                .get(RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(Duration::from_secs);
+            let retry = retry_after(&resp);
             let mut g = self.inner.lock().unwrap();
             if sent_by.is_some()
                 && matches!(ep, Endpoint::Listings | Endpoint::History | Endpoint::Book)
@@ -839,7 +972,11 @@ impl SteamClient {
         let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
         {
             let mut g = self.inner.lock().unwrap();
-            g.limiter.on_ok(now);
+            if via_alt {
+                g.alt_limiter.on_ok(now);
+            } else {
+                g.limiter.on_ok(now);
+            }
             if status.is_server_error() || status == StatusCode::FORBIDDEN || bad_envelope.is_some()
             {
                 g.breakers[ep.idx()].on_fail(now);
@@ -1319,6 +1456,109 @@ mod tests {
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    // Saída extra de teste: sem proxy, marcada por cabeçalho para o servidor saber por onde a consulta veio.
+    fn alt_marked() -> reqwest::Client {
+        let mut h = HeaderMap::new();
+        h.insert("x-saida", HeaderValue::from_static("extra"));
+        reqwest::Client::builder()
+            .default_headers(h)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn alt_exit_never_takes_account_actions() {
+        let c = SteamClient::with_base("http://x")
+            .unwrap()
+            .with_alt(alt_marked());
+        let mut g = c.inner.lock().unwrap();
+        for ep in [Endpoint::Buy, Endpoint::Session, Endpoint::Auth] {
+            assert!(c.alt_slot(&mut g, ep, Instant::now()).is_none(), "{ep:?}");
+        }
+        assert!(c.alt_slot(&mut g, Endpoint::Book, Instant::now()).is_some());
+    }
+
+    #[tokio::test]
+    async fn alt_exit_takes_reads_the_main_cannot_without_login() {
+        let app = Router::new().route(
+            "/market/actions",
+            get(|h: axum::http::HeaderMap| async move {
+                let extra = h.contains_key("x-saida");
+                assert!(
+                    !(extra && h.contains_key("cookie")),
+                    "a saída extra nunca vai logada"
+                );
+                (AxStatus::OK, format!(r#"{{"data":{{"extra":{extra}}}}}"#))
+            }),
+        );
+        let base = serve(app).await;
+        let c = SteamClient::with_base(&base)
+            .unwrap()
+            .with_alt(alt_marked());
+        c.set_gap_for_test(Duration::from_secs(3600));
+        c.set_cookie(Some(Cookie {
+            steam_login_secure: "x".into(),
+            sessionid: None,
+        }));
+        let qp = serde_json::json!([1]);
+        let read = || c.action(Endpoint::Listings, "Q", &qp);
+        assert_eq!(
+            read().await.unwrap()["extra"],
+            false,
+            "a principal tem a preferência"
+        );
+        assert_eq!(
+            read().await.unwrap()["extra"],
+            true,
+            "principal só em 1 h: a extra lê"
+        );
+        assert_eq!(c.stats().queries_per_min, 2);
+    }
+
+    #[tokio::test]
+    async fn alt_exit_429_or_down_falls_back_without_touching_the_main() {
+        let app = Router::new().route(
+            "/market/actions",
+            get(|h: axum::http::HeaderMap| async move {
+                if h.contains_key("x-saida") {
+                    return (AxStatus::TOO_MANY_REQUESTS, String::new());
+                }
+                (AxStatus::OK, r#"{"data":{"ok":true}}"#.to_string())
+            }),
+        );
+        let base = serve(app).await;
+        let qp = serde_json::json!([1]);
+        // 429 na extra: pausa só ela, e a consulta sai pela principal quando ela volta.
+        let c = SteamClient::with_base(&base)
+            .unwrap()
+            .with_alt(alt_marked());
+        c.set_gap_for_test(Duration::from_millis(200));
+        for _ in 0..2 {
+            c.action(Endpoint::Listings, "Q", &qp).await.unwrap();
+        }
+        {
+            let g = c.inner.lock().unwrap();
+            assert!(
+                g.limiter.paused_until.is_none(),
+                "a principal não pausa pelo 429 da extra"
+            );
+            assert!(g.alt_limiter.paused_until.is_some());
+        }
+        assert_eq!(c.stats().paused_until, None, "a caça segue pela principal");
+        // Extra desligada (nada escutando): descansa, a principal segue e nenhum breaker abre.
+        let off = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        let c = SteamClient::with_base(&base).unwrap().with_alt(off);
+        c.set_gap_for_test(Duration::from_millis(200));
+        for _ in 0..3 {
+            c.action(Endpoint::Listings, "Q", &qp).await.unwrap();
+        }
+        assert!(c.inner.lock().unwrap().alt_down_until.is_some());
+        assert!(c.breaker_open_until(Endpoint::Listings).is_none());
     }
 
     #[tokio::test]
