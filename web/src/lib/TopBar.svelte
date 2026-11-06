@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { app, readingSaldo, setSaldo } from './store.svelte';
-  import { ago, centsToInput, money, parseBRL } from './format';
+  import { app, readingSaldo, setSaldo, steamBlocked } from './store.svelte';
+  import { ago, centsToInput, clock, money, parseBRL } from './format';
 
   let editing = $state(false);
   let draft = $state('');
@@ -80,6 +80,9 @@
         <span>Desconectado</span>
       {:else if !st}
         <span>Conectando…</span>
+      {:else if steamBlocked()}
+        <span>Caça parada{st.hunt.last_ok_at ? ' ' + ago(st.hunt.last_ok_at, app.now) : ''} · a Steam bloqueou este IP ·
+          tenta de novo às {clock(st.hunt.paused_until!)}</span>
       {:else if paused}
         <span>Em pausa · a Steam pediu calma · volta em {st.hunt.paused_until! - app.now} s</span>
       {:else if st.hunt.watching === 0}

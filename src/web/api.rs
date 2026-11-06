@@ -23,6 +23,8 @@ pub struct Hunt {
     pub queries_per_min: f64,
     pub last_query_at: Option<i64>,
     pub paused_until: Option<i64>,
+    /// Última resposta da Steam que não foi 429 (qualquer saída).
+    pub last_ok_at: Option<i64>,
     pub message: Option<String>,
 }
 

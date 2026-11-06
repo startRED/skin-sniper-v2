@@ -8,6 +8,7 @@ export type State = {
     queries_per_min: number;
     last_query_at: number | null;
     paused_until: number | null;
+    last_ok_at: number | null;
     message: string | null;
   };
   combo: { ids: string[]; cost_cents: number; profit_cents: number };

@@ -73,7 +73,8 @@ GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id} | "state
 State = {
   saldo_cents: number, saldo_source: "steam" | "manual" | "none",
   hunt: { watching: number, queries_per_min: number, last_query_at: number | null,
-          paused_until: number | null, message: string | null },
+          paused_until: number | null, last_ok_at: number | null,   // última resposta sem 429
+          message: string | null },
   combo: { ids: string[], cost_cents: number, profit_cents: number },   // melhor combinação no saldo
   keys: { steam: KeyStatus, csfloat: KeyStatus, telegram: KeyStatus }
 }
@@ -176,7 +177,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      um achado de R$ 0,32. Os 30 % são hipótese, não medida.
 3. **Ritmo:** um limitador global. Começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios ou histórico) não pausa: as leituras seguem sem login por 6 h. Um 429
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até o piso aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso (até 20 s), e cada 6 h sem 429 desce um degrau até 6 s (a 6 s fixos a Steam bloqueava a cada 1–2 h, e cada série custava até 2 h paradas). O degrau da pausa só volta a 60 s após 60 min sem 429.
-   Pausa, intervalo e piso aprendido do último 429 ficam salvos (`steam_pace`) e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. Breaker por endpoint.
+   Pausa, intervalo, piso aprendido e a última resposta sem 429 ficam salvos (`steam_pace`) e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar.
    **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
    Starlink por um celular com Tailscale) dá outro IP público e outra cota. Leva só leitura de mercado (anúncios,
@@ -334,6 +335,8 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   só para oportunidade nova. O mapa de avaliados vive em memória (reavalia tudo uma vez após reiniciar).
 - Balanço de 10 min: `State.hunt.message` diz quantos anúncios foram conferidos e o quanto o mais perto dava de
   lucro (ou prejuízo); o log INFO traz os 3 mais perto, com o lucro no preço médio e no rápido.
+  A mesma linha de 10 min conta as respostas da Steam por saída (`principal_ok`, `principal_429`, `extra_ok`,
+  `extra_429`): é o que mede se os bloqueios longos vêm da quantidade de consultas ou do tempo seguido caçando.
 - `QueryListingsForItem` com 200 sem `data` conta como falha do endpoint (breaker) e loga status, tamanho, nomes
   das chaves do topo e `success`; nunca o conteúdo.
 - Compra: uma por vez, do pedido até confirmar/terminar e ajustar o saldo; a segunda recebe 409 "termine a compra

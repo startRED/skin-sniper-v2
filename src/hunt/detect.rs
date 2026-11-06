@@ -134,6 +134,15 @@ pub(crate) fn roll_cycle(h: &Hunt) {
         recusas = %c.refused_text(),
         "{text}"
     );
+    // Para medir o que dispara os bloqueios longos (quantidade ou tempo seguido): o robô antigo gravava cada chamada.
+    let [main, extra] = h.steam.take_calls();
+    tracing::info!(
+        principal_ok = main.ok,
+        principal_429 = main.limited,
+        extra_ok = extra.ok,
+        extra_429 = extra.limited,
+        "Steam em 10 min"
+    );
     for n in &c.near {
         tracing::info!(
             "perto: {} a {}; no preço médio {}, no rápido {}",
