@@ -24,6 +24,10 @@ use tokio::sync::broadcast;
 const TRADE_LOCK_SECS: i64 = 7 * 86_400;
 /// Relê a carteira de tempos em tempos: o saldo muda por fora (vendas, depósitos).
 const WALLET_REFRESH: Duration = Duration::from_secs(600);
+/// Saldo lido da Steam, guardado em `settings` ("id,saldo,moeda,hora") para valer após um reinício.
+const WALLET_CACHE_KEY: &str = "steam_wallet_cache";
+/// Idade máxima do saldo guardado: além disso a carteira pode ter mudado demais para confiar.
+const WALLET_CACHE_MAX_AGE: i64 = 6 * 3600;
 const UNCERTAIN: &str =
     "A Steam não confirmou; confira seu inventário e o saldo antes de tentar de novo.";
 
@@ -31,6 +35,13 @@ const UNCERTAIN: &str =
 struct Wallet {
     balance: i64,
     currency: i32,
+    /// Quando a Steam respondeu (unix); o ajuste após uma compra não renova.
+    read_at: i64,
+}
+
+/// SteamID64 do cookie (`<id>%7C%7C<jwt>`): amarra o saldo guardado à conta que o leu.
+fn cookie_steamid(cookie: &str) -> &str {
+    cookie.split(['%', '|']).next().unwrap_or_default()
 }
 
 /// O que já foi aplicado, para só reagir ao que mudou.
@@ -154,16 +165,51 @@ impl Runtime {
         Ok(pending)
     }
 
-    /// Saldo: o manual vale; sem ele, a carteira da Steam; sem nenhum, zero.
+    /// Saldo: o manual vale; sem ele, a carteira da Steam; sem ela (ex.: leitura barrada pela pausa de
+    /// um 429 logo após reiniciar), o último saldo lido se ainda for recente; senão, zero.
     async fn apply_saldo(&self) -> Result<()> {
         let manual = self.settings.saldo().await?;
         let wallet = *self.wallet.lock().unwrap();
-        match (manual, wallet) {
-            (Some(m), _) => self.hunt.set_saldo(m, SaldoSource::Manual),
-            (None, Some(w)) => self.hunt.set_saldo(w.balance, SaldoSource::Steam),
-            (None, None) => self.hunt.set_saldo(0, SaldoSource::None),
+        let id = self
+            .steam
+            .cookie()
+            .map(|c| cookie_steamid(&c.steam_login_secure).to_string());
+        if let (Some(w), Some(id)) = (wallet, &id) {
+            let v = format!("{id},{},{},{}", w.balance, w.currency, w.read_at);
+            self.settings.set_raw(WALLET_CACHE_KEY, Some(v)).await?;
+        }
+        let cached = match (wallet, &id) {
+            // sessão recusada (ok == false) não herda saldo de antes
+            (None, Some(id)) if self.hunt.state().keys.steam.ok != Some(false) => {
+                self.cached_balance(id).await?
+            }
+            _ => None,
+        };
+        match (manual, wallet, cached) {
+            (Some(m), ..) => self.hunt.set_saldo(m, SaldoSource::Manual),
+            (None, Some(w), _) => self.hunt.set_saldo(w.balance, SaldoSource::Steam),
+            (None, None, Some(b)) => self.hunt.set_saldo(b, SaldoSource::Steam),
+            (None, None, None) => self.hunt.set_saldo(0, SaldoSource::None),
         }
         Ok(())
+    }
+
+    /// Saldo guardado da mesma conta e com no máximo `WALLET_CACHE_MAX_AGE` de idade.
+    async fn cached_balance(&self, id: &str) -> Result<Option<i64>> {
+        let raw = self
+            .settings
+            .get(WALLET_CACHE_KEY)
+            .await?
+            .unwrap_or_default();
+        let [cid, balance, _, at] = raw.split(',').collect::<Vec<_>>()[..] else {
+            return Ok(None);
+        };
+        let age = now_unix() - at.parse::<i64>().unwrap_or(0);
+        Ok(if cid == id && (0..=WALLET_CACHE_MAX_AGE).contains(&age) {
+            balance.parse().ok()
+        } else {
+            None
+        })
     }
 
     /// Aplica as configurações e verifica em segundo plano o que depende de rede.
@@ -201,6 +247,7 @@ impl Runtime {
                 *self.wallet.lock().unwrap() = Some(Wallet {
                     balance: info.wallet_balance_cents,
                     currency: info.wallet_currency,
+                    read_at: now_unix(),
                 });
                 self.buyer.set_tradefee_tax(0);
                 let name = info
