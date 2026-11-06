@@ -1,6 +1,6 @@
 # Compila o painel e o programa e instala na pasta do programa, religando-o sem janela.
 # Uso: powershell -File scripts/instalar.ps1 [-Destino <pasta>]
-param([string]$Destino = (Join-Path (Split-Path $PSScriptRoot -Parent | Split-Path -Parent) 'v2-app'))
+param([string]$Destino = 'E:\Documentos\ProjetosIA\SkinSniperV2\app')
 # Sem 'Stop' global: no PowerShell 5 o stderr do cargo/npm viraria erro; o código de saída decide.
 $raiz = Split-Path $PSScriptRoot -Parent
 

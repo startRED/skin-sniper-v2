@@ -323,3 +323,53 @@ async fn buy_guards_and_history() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn cached_wallet_stands_in_while_live_read_is_blocked() {
+    let (base, _f) = serve(vec![(200, "{}".into())]).await;
+    let (rt, _rx, _d) = runtime(&base);
+    let cache = |id: &str, age: i64| format!("{id},1234,7,{}", now_unix() - age);
+    let start = |rt: Arc<Runtime>, c: String| async move {
+        rt.settings
+            .apply(input(|i| {
+                i.steam_login_secure = Some(Some("76561198000000001%7C%7Cabcdef".into()));
+            }))
+            .await
+            .unwrap();
+        rt.settings
+            .set_raw(WALLET_CACHE_KEY, Some(c))
+            .await
+            .unwrap();
+        rt.apply_local().await.unwrap(); // sem rede: a leitura ao vivo ainda não aconteceu
+        let s = rt.hunt.state();
+        (s.saldo_cents, s.saldo_source)
+    };
+    // reinício logo após a leitura: o saldo guardado vale
+    let fresh = start(rt.clone(), cache("76561198000000001", 600)).await;
+    assert_eq!(fresh, (1234, SaldoSource::Steam));
+    // velho demais ou de outra conta: não vale
+    let old = start(rt.clone(), cache("76561198000000001", 7 * 3600)).await;
+    assert_eq!(old, (0, SaldoSource::None));
+    let other = start(rt.clone(), cache("76561198999999999", 600)).await;
+    assert_eq!(other, (0, SaldoSource::None));
+    // o manual continua mandando
+    rt.settings.set_saldo(Some(1500)).await.unwrap();
+    rt.settings
+        .set_raw(WALLET_CACHE_KEY, Some(cache("76561198000000001", 60)))
+        .await
+        .unwrap();
+    rt.apply_local().await.unwrap();
+    assert_eq!(rt.hunt.state().saldo_cents, 1500);
+    rt.settings.set_saldo(None).await.unwrap();
+    // a leitura ao vivo substitui o guardado e o regrava
+    rt.verify_session().await;
+    assert_eq!(rt.hunt.state().saldo_cents, 3608);
+    assert!(
+        rt.settings
+            .get(WALLET_CACHE_KEY)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains(",3608,7,")
+    );
+}
