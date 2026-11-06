@@ -3,8 +3,8 @@
 //! Docs/projeto.md, "Caça" 4 e "Precificação".
 
 use super::catalog::{FLOOR_TTL, HISTORY_TTL, min_profit, wear_label, window_stats};
-use super::scheduler::{Found, NEAR_WEIGHT, Task};
-use super::{Active, Hunt};
+use super::scheduler::{Found, Task};
+use super::{Active, Hunt, learn};
 use crate::notify::{Alert, NotifyError};
 use crate::pricing::groups::group_of;
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
@@ -150,15 +150,14 @@ pub struct Outcome {
     /// Oportunidades novas e se vale avisar (`notify` da avaliação).
     pub found: Vec<(Opportunity, bool)>,
     pub gone: Vec<String>,
-    /// O que a consulta rendeu à agenda (achados novos e quase-lucros).
+    /// O que a consulta rendeu à agenda (achados novos e a proximidade dos anúncios novos que não passaram).
     pub rewarded: Found,
 }
 
-/// Quase lucro: não entrou na lista, mas faltou pouco — até R$ 0,30 ou 10 % do preço, o que for maior.
-fn near_credit(n: &Near) -> Option<f64> {
-    let need = min_profit(n.price_cents);
-    let short = need - n.mid_cents;
-    (short > 0 && short <= 30.max(n.price_cents / 10)).then_some(NEAR_WEIGHT * need as f64)
+/// Quase lucro, só para o contador do painel: faltou até R$ 0,30 ou 10 % do preço, o que for maior.
+fn is_near(n: &Near) -> bool {
+    let short = min_profit(n.price_cents) - n.mid_cents;
+    short > 0 && short <= 30.max(n.price_cents / 10)
 }
 
 /// Baixa `QueryPriceHistory` do nome e grava em `price_points` e em `items` (vendas/dia, dispersão).
@@ -641,6 +640,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         .copied()
         .filter(|l| known.contains(&l.listing_id))
         .collect();
+    let scale = h.lock().closeness_scale;
     let mut audit: Vec<EvalRow> = Vec::new();
     for l in relevant.iter().copied() {
         let was_known = known.contains(&l.listing_id);
@@ -688,14 +688,13 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         audit.push(row);
         let hist_now = history_at(h, &l.name).await?.unwrap_or(0);
         {
-            if let Some(c) = judged
-                .near
-                .as_ref()
-                .and_then(near_credit)
-                .filter(|_| judged.found.is_none())
-            {
-                out.rewarded.near_hits += 1;
-                out.rewarded.near_credit += c;
+            if let Some(n) = judged.near.as_ref().filter(|_| judged.found.is_none()) {
+                out.rewarded.near_hits += u32::from(is_near(n));
+                // Só anúncio novo ensina: reavaliar o mesmo (histórico mudou) não rende de novo.
+                if !was_known {
+                    out.rewarded.near_credit +=
+                        learn::closeness_credit(n.price_cents, n.mid_cents, scale);
+                }
             }
             let mut s = h.lock();
             if s.evaluated.len() >= EVALUATED_MAX {

@@ -671,6 +671,30 @@ async fn hourly_listings_include_above_balance_without_counting_repeats() {
 }
 
 #[tokio::test]
+async fn new_listings_teach_the_agenda_once() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let task = Task {
+        id: "d:x".into(),
+        name: MOON.into(),
+        code: "G1".into(),
+        wear: None,
+        seeds: vec![],
+        float: None,
+        score: 1.0,
+    };
+    let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let first = detect::process(&h, &task, &page).await.unwrap();
+    assert!(first.rewarded.near_credit > 0.0, "{:?}", first.rewarded);
+    // a mesma página de novo: nenhum anúncio é novo, então não rende crédito de novo
+    let again = detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(again.rewarded.near_credit, 0.0);
+    assert_eq!(again.rewarded.finds, 0);
+}
+
+#[tokio::test]
 async fn empty_pages_counter_saturates() {
     let (base, _bodies) = serve().await;
     let (db, _dir) = temp_db();

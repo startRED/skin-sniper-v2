@@ -36,8 +36,6 @@ pub const EXPLORE_SHARE: f64 = 0.125;
 const HALF_LIFE: f64 = 24.0 * 3600.0;
 /// A média vale metade a cada 4 h sem recompensa.
 const DRY_HALF_LIFE: f64 = 4.0 * 3600.0;
-/// "Quase lucro" vale esta fração do que o anúncio renderia se tivesse passado (lucro mínimo da lista).
-pub const NEAR_WEIGHT: f64 = 0.15;
 /// Até aqui o alvo ainda é "novo" para o painel.
 const NEW_QUERIES: u64 = 10;
 /// Acima disto sem recompensa o painel diz "sem achar nada há N h".
@@ -302,8 +300,8 @@ impl Queue {
         self.entries.get(&id).map(|e| e.task.clone())
     }
 
-    /// Resultado da consulta: lucro esperado das oportunidades novas (centavos) e os quase-lucros (crédito
-    /// já ponderado por `NEAR_WEIGHT`).
+    /// Resultado da consulta: lucro esperado das oportunidades novas (centavos) e o crédito de proximidade
+    /// dos anúncios novos que não passaram (`learn::closeness_credit`).
     pub fn reward(&mut self, id: &str, now: i64, found: Found) {
         let Some(s) = self.stats.get_mut(id) else {
             return;
@@ -387,8 +385,9 @@ pub struct Found {
     pub finds: u32,
     /// Lucro esperado (preço médio) das oportunidades novas, em centavos.
     pub gain_cents: i64,
+    /// Anúncios que ficaram na janela de quase-lucro (R$ 0,30 ou 10 % do preço); só o texto do painel.
     pub near_hits: u32,
-    /// Soma do crédito dos quase-lucros, em centavos (`NEAR_WEIGHT` × lucro mínimo que faltou cobrir).
+    /// Soma do crédito de proximidade dos anúncios novos que não passaram, em centavos (`learn::closeness_credit`).
     pub near_credit: f64,
 }
 
@@ -899,7 +898,7 @@ mod tests {
             if id == "a" {
                 let near = Found {
                     near_hits: 1,
-                    near_credit: 3.0, // 15 % de 20 centavos
+                    near_credit: 3.0, // crédito de 3 centavos, escrito à mão
                     ..Found::default()
                 };
                 q.reward("a", t, near);

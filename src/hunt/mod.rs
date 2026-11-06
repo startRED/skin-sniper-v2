@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod detect;
+mod learn;
 pub mod orders;
 pub mod patterns;
 pub mod scheduler;
@@ -82,6 +83,8 @@ pub(crate) struct Shared {
     /// Última leitura do coletor de patterns (0 = ainda não ligou) e quando cada skin foi lida.
     pub learn_at: i64,
     pub learn_seen: HashMap<String, i64>,
+    /// Escala τ da proximidade (fração do preço): medida nas avaliações (`learn`), padrão enquanto faltam dados.
+    pub closeness_scale: f64,
 }
 
 pub struct Hunt {
@@ -153,6 +156,7 @@ impl Hunt {
                 learned: patterns::Learned::new(),
                 learn_at: 0,
                 learn_seen: HashMap::new(),
+                closeness_scale: learn::DEFAULT_SCALE,
             }),
         })
     }
