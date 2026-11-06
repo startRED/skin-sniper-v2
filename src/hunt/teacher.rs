@@ -482,8 +482,8 @@ pub struct Week {
 pub(crate) fn week(c: &Connection, from: i64, to: i64) -> rusqlite::Result<Week> {
     let (queries, finds, near) = c.query_row(
         "SELECT coalesce(sum(queries), 0), coalesce(sum(opportunities), 0), coalesce(sum(near), 0)
-         FROM hourly_activity WHERE hour_utc >= ?1 AND hour_utc < ?2",
-        params![from.div_euclid(HOUR), to.div_euclid(HOUR)],
+         FROM hourly_activity WHERE hour_utc * 3600 >= ?1 AND hour_utc * 3600 < ?2",
+        params![from, to],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let (alerts, alerts_closed) = c.query_row(
@@ -936,7 +936,7 @@ mod tests {
         exec(
             &db,
             "INSERT INTO hourly_activity(hour_utc, queries, near, opportunities) VALUES (?1, 10, 2, 1)",
-            vec![v(T / HOUR)],
+            vec![v(T / HOUR + 1)],
         )
         .await;
         let w = db.call(|c| week(c, T, T + 11 * DAY)).await.unwrap();
