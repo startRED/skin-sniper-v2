@@ -60,7 +60,12 @@ function genOpp(ageSec: number): Opportunity {
     profit_per_day_cents: kind === 'raro' ? null : Math.round(sell.mid.profit_cents / (7 + (sell.mid.eta_hours ?? 0) / 24)),
     risk: n % 4 === 0 ? 'alto' : conf === 'alta' ? 'baixo' : conf === 'media' ? 'medio' : 'alto',
     evidence: `${perDay} vendas/dia nos últimos 7 dias (exemplo)`,
-    seen_at: nowS() - ageSec
+    seen_at: nowS() - ageSec,
+    seal: kind !== 'raro' ? null : n % 2 === 0
+      ? { proven: true, sales: 14, parked: 1, p25_profit_cents: 180, open_cents: Math.round(mid * 1.2), floor_cents: mid,
+          text: 'comprovado: 14 vendas fechadas, o pior quartil ainda dá R$ 1,80 · 1 parado há mais de 48 h' }
+      : { proven: false, sales: 4, parked: 0, p25_profit_cents: -40, open_cents: Math.round(mid * 1.3), floor_cents: mid,
+          text: 'ainda não comprovado: 4 de 10 vendas fechadas' }
   };
 }
 

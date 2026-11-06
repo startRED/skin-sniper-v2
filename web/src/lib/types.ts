@@ -40,6 +40,16 @@ export type Opportunity = {
   evidence: string;
   seen_at: number;
   gone_at?: number | null; // sumiu da Steam: fica na lista de perdidas por um dia
+  seal?: Seal | null; // raro: "comprovado" ou "ainda não comprovado"
+};
+export type Seal = {
+  proven: boolean;
+  sales: number;
+  parked: number;
+  p25_profit_cents: number | null;
+  open_cents: number | null;
+  floor_cents: number | null;
+  text: string;
 };
 export type Purchase = {
   id: string;

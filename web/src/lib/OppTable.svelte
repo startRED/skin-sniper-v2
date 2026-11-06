@@ -88,6 +88,7 @@
                 {#if o.float != null}<span>float {floatTxt(o.float)}</span>{/if}
                 {#if o.seed != null}<span>seed {o.seed}</span>{/if}
                 {#if o.group}<span class="pill {o.kind === 'raro' ? 'warn' : 'mute'}">{o.group}</span>{/if}
+                {#if o.seal}<span class="pill {o.seal.proven ? 'ok' : 'mute'}" title={o.seal.text + (o.seal.open_cents != null && o.seal.floor_cents != null && o.seal.open_cents > o.seal.floor_cents ? ` · anuncie a ${money(o.seal.open_cents)}, desça até ${money(o.seal.floor_cents)}` : '')}>{o.seal.proven ? 'comprovado' : 'não comprovado'}</span>{/if}
               </span>
             </span>
             <svg class="chev" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -141,6 +142,7 @@
           </div>
           <div class="info">
             <p class="ev"><b>Por que confiar:</b> {o.evidence}</p>
+            {#if o.seal}<p class="ev"><b>Raro {o.seal.proven ? 'comprovado' : 'ainda não comprovado'}:</b> {o.seal.text.replace(/^(ainda não )?comprovado: /, '')}{#if o.seal.open_cents != null && o.seal.floor_cents != null && o.seal.open_cents > o.seal.floor_cents}. Anuncie a {money(o.seal.open_cents)} e desça até {money(o.seal.floor_cents)}.{/if}</p>{/if}
             <div class="tbl" role="table" aria-label="Preços para vender {o.name}">
               <div class="tr th" role="row"><span role="columnheader">Vender por</span><span role="columnheader">Você recebe</span><span role="columnheader">Lucro</span><span role="columnheader">Prazo</span></div>
               {#each TIERS as [label, key, hint]}

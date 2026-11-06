@@ -25,6 +25,8 @@ pub struct Alert {
     pub mid_profit_cents: i64,
     pub safe_profit_cents: i64,
     pub eta_hours: Option<f64>,
+    /// Raro: selo e preço sugerido, já em texto.
+    pub seal: Option<String>,
 }
 
 #[derive(Debug)]
@@ -288,6 +290,9 @@ pub fn format_message(a: &Alert, panel_url: Option<&str>) -> String {
         brl(a.safe_profit_cents),
         eta(a.eta_hours)
     ));
+    if let Some(s) = a.seal.as_deref().filter(|s| !s.is_empty()) {
+        m.push_str(&format!("\n{}", escape_html(s)));
+    }
     if let Some(u) = panel_url.map(str::trim).filter(|u| !u.is_empty()) {
         let href = format!("{}/#{}", u.trim_end_matches('/'), a.id);
         m.push_str(&format!(
@@ -351,6 +356,7 @@ mod tests {
             mid_profit_cents: 312,
             safe_profit_cents: -5,
             eta_hours: Some(18.4),
+            seal: Some("ainda não comprovado: 4 de 10 vendas fechadas".into()),
         }
     }
 
@@ -359,7 +365,7 @@ mod tests {
         let m = format_message(&alert("527"), Some("http://192.168.0.10:8788/"));
         assert_eq!(
             m,
-            "<b>Glock-18 | Moonrise (Field-Tested)</b> · T1 Center Star\nPreço R$ 14,39 · lucro R$ 3,12 (médio) / -R$ 0,05 (seguro)\nPrazo ~18 h\n<a href=\"http://192.168.0.10:8788/#527\">abrir no painel</a>"
+            "<b>Glock-18 | Moonrise (Field-Tested)</b> · T1 Center Star\nPreço R$ 14,39 · lucro R$ 3,12 (médio) / -R$ 0,05 (seguro)\nPrazo ~18 h\nainda não comprovado: 4 de 10 vendas fechadas\n<a href=\"http://192.168.0.10:8788/#527\">abrir no painel</a>"
         );
     }
 
@@ -380,8 +386,9 @@ mod tests {
         let mut a = alert("9");
         a.group = None;
         a.eta_hours = None;
+        a.seal = None;
         let m = format_message(&a, None);
-        assert!(!m.contains("T1"));
+        assert!(!m.contains("T1") && !m.contains("comprovado"));
         assert!(m.contains("prazo incerto") && !m.contains("href"));
         assert_eq!(eta(Some(72.0)), "~3 dias");
         assert_eq!(eta(Some(0.2)), "~1 h");

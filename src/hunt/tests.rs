@@ -460,6 +460,11 @@ async fn elite_float_listing_is_priced_by_the_premium_of_its_band() {
         o.evidence
     );
     assert!(o.sell.mid.profit_cents >= 100 && !o.safe, "{:?}", o.sell);
+    // o raro chega com selo: 3 vendas fechadas do grupo (CSFloat guardado) não comprovam
+    let seal = o.seal.as_ref().expect("raro tem selo");
+    assert_eq!((seal.proven, seal.sales), (false, 3), "{seal:?}");
+    assert_eq!(seal.text, "ainda não comprovado: 3 de 10 vendas fechadas");
+    assert!(seal.open_cents.is_some() && seal.floor_cents.is_some());
     // a agenda tem braços de float, com o filtro de float na consulta
     let tasks = h.lock().queue.tasks();
     assert!(
