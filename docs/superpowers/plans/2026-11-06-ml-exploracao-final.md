@@ -1,6 +1,6 @@
 # Melhorias do aprendizado com exploração — plano consolidado
 
-Data: 06/11/2026. Estado: núcleo implementado e validado localmente; ganho de mercado e ampliações condicionais aguardam dados do piloto. O executável em produção não é substituído por esta alteração de código.
+Data: 06/11/2026. Estado: núcleo implementado e validado localmente; ganho de mercado e ampliações condicionais aguardam dados do piloto.
 Código inspecionado: `main` em `0dcccd9`. O [plano base v0](2026-11-06-ml-exploracao.md) foi escrito antes das três revisões GPT 6.1 Terra e fica preservado para comparação. Este documento prevalece sobre as propostas daquele rascunho.
 
 ## Recomendação
