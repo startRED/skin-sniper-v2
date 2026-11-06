@@ -147,6 +147,19 @@ Cada fase entrega algo útil sozinha, e cada uma usa o que a anterior guardou.
 
 Cada aviso e cada quase-achado ganha um resultado medido pelo mercado, não pelo palpite do app.
 
+**Por que existe:** "mal precificada" é o julgamento do app, não um fato. No robô antigo, a P2000 Amber Fade
+parecia barata, foi comprada a R$ 4,15 e vendeu 11 dias depois a R$ 3,25 (prejuízo de R$ 1,32: o prêmio
+era fantasma). Além disso, a Steam trava por 7 dias o que é comprado no Mercado: todo anúncio traz
+`market_marketable_restriction: 7`. O lucro só é garantido se o preço não cair nesse prazo. O professor
+confere cada julgamento para o app parar de avisar o tipo que não fecha.
+
+**O rápido vem primeiro:**
+- o sumiço responde em minutos;
+- a venda de exemplares do mesmo grupo (raro) responde em horas a dias;
+- a conta do dia 7 é só a confirmação final, porque é o primeiro dia em que a Steam deixa vender.
+
+A Fase 4 aprende com o sinal rápido assim que ele chega.
+
 1. **Sumiu rápido = alguém comprou.**
    - Sumiço sem relistagem registra o tempo de vida do anúncio.
    - Para comum, os degraus consumidos no livro também contam: um degrau que some entre duas leituras e cujo
