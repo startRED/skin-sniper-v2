@@ -457,6 +457,7 @@ pub struct SteamClient {
     http: reqwest::Client,
     /// Saída extra (`ALT_PROXY`); `None` nos testes e enquanto ninguém liga.
     alt: Option<reqwest::Client>,
+    alt_public_only: bool,
     base: String,
     inner: Mutex<Inner>,
     research_db: Mutex<Option<crate::db::Db>>,
@@ -530,6 +531,7 @@ impl SteamClient {
             alt_send_pace: tokio::sync::Mutex::new(SendPace::default()),
             http: http_builder().build()?,
             alt: None,
+            alt_public_only: false,
             base: base.trim_end_matches('/').to_string(),
             inner: Mutex::new(Inner {
                 limiter: Limiter::new(Instant::now()),
@@ -592,7 +594,7 @@ impl SteamClient {
                             until: unix_in(t - now),
                         });
                     }
-                    (Duration::ZERO, inner.alt_limiter.gap)
+                    (inner.spacing, inner.alt_limiter.gap)
                 } else {
                     if let Some(t) = inner.bucket(ep).pause_end(now) {
                         return Err(Error::RateLimited {
@@ -648,6 +650,30 @@ impl SteamClient {
     /// Liga a saída extra pelo proxy HTTP em `url` (ver `ALT_PROXY`).
     pub fn with_alt_proxy(self, url: &str) -> anyhow::Result<Self> {
         Ok(self.with_alt(http_builder().proxy(reqwest::Proxy::all(url)?).build()?))
+    }
+
+    /// Saída extra somente para livro e anúncios públicos da interface antiga.
+    pub fn with_public_alt_proxy(self, url: &str) -> anyhow::Result<Self> {
+        let mut c = self.with_alt_proxy(url)?;
+        c.alt_public_only = true;
+        Ok(c)
+    }
+
+    /// Há uma vaga imediata na saída pública enquanto a leitura nativa espera na principal.
+    pub fn prefer_public_listings(&self) -> bool {
+        if !self.alt_public_only || self.alt.is_none() {
+            return false;
+        }
+        let Ok(pace) = self.alt_send_pace.try_lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        let g = self.inner.lock().unwrap();
+        !g.alt_held(now)
+            && g.alt_limiter.next_at <= now
+            && pace.last_any.is_none_or(|t| t + g.spacing <= now)
+            && pace.last_bucket[1].is_none_or(|t| t + g.alt_limiter.gap <= now)
+            && (g.next_any > now || g.limiter.next_at > now || g.limiter.pause_end(now).is_some())
     }
 
     fn with_alt(mut self, http: reqwest::Client) -> Self {
@@ -766,8 +792,12 @@ impl SteamClient {
             let a = g.alt_limiter.stats(now);
             s.queries_per_min += a.queries_per_min;
             s.last_query_at = s.last_query_at.max(a.last_query_at);
-            s.last_ok_at = s.last_ok_at.max(a.last_ok_at);
-            if g.alt_down_until.is_none_or(|t| now >= t) {
+            if self.alt_public_only {
+                s.book_ok_at = s.book_ok_at.max(a.last_ok_at);
+            } else {
+                s.last_ok_at = s.last_ok_at.max(a.last_ok_at);
+            }
+            if !self.alt_public_only && g.alt_down_until.is_none_or(|t| now >= t) {
                 s.paused_until = s.paused_until.zip(a.paused_until).map(|(m, x)| m.min(x));
             }
         }
@@ -777,7 +807,7 @@ impl SteamClient {
                 .last_ok_at
                 .max(Some(unix_in(Duration::ZERO) - age.as_secs() as i64));
             if age < Duration::from_secs(600)
-                && g.side.pause_end(now).is_none()
+                && (g.side.pause_end(now).is_none() || (self.alt_public_only && !g.alt_held(now)))
                 && g.breakers[Endpoint::Legacy.idx()].check(now).is_none()
             {
                 s.paused_until = None;
@@ -1074,35 +1104,46 @@ impl SteamClient {
                         until: unix_in(t - now),
                     });
                 }
-                // A principal (logada, ritmo salvo) tem a preferência; a extra só pega a vaga que a principal não tem.
-                let main = if now < g.next_any {
-                    Err(g.next_any - now)
+                // No modo público, usa a vaga extra primeiro, sem encaminhar histórico autenticado.
+                if self.alt_public_only
+                    && !(ep == Endpoint::Legacy && auth)
+                    && matches!(self.alt_slot(&mut g, ep, now), Some(Ok(())))
+                {
+                    Slot::Alt
                 } else {
-                    g.bucket(ep).try_acquire(now)
-                };
-                match main {
-                    Ok(()) => {
-                        g.next_any = now + g.spacing;
-                        Slot::Main
-                    }
-                    Err(w) => match self.alt_slot(&mut g, ep, now) {
-                        Some(Ok(())) => Slot::Alt,
-                        alt => {
-                            // Balde em pausa por 429 e a extra sem vaga: falha já, em vez de segurar quem chamou
-                            // por até 30 min (a caça segue pelo outro balde).
-                            if let Some(end) = g.bucket(ep).pause_end(now)
-                                && (alt.is_none() || g.alt_held(now))
-                            {
-                                return Err(Error::RateLimited {
-                                    until: unix_in(end - now),
-                                });
-                            }
-                            Slot::Wait(match alt {
-                                Some(Err(a)) => w.min(a),
-                                _ => w,
-                            })
+                    let main = if now < g.next_any {
+                        Err(g.next_any - now)
+                    } else {
+                        g.bucket(ep).try_acquire(now)
+                    };
+                    match main {
+                        Ok(()) => {
+                            g.next_any = now + g.spacing;
+                            Slot::Main
                         }
-                    },
+                        Err(w) => match if ep == Endpoint::Legacy && auth {
+                            None
+                        } else {
+                            self.alt_slot(&mut g, ep, now)
+                        } {
+                            Some(Ok(())) => Slot::Alt,
+                            alt => {
+                                // Balde em pausa por 429 e a extra sem vaga: falha já, em vez de segurar quem chamou
+                                // por até 30 min (a caça segue pelo outro balde).
+                                if let Some(end) = g.bucket(ep).pause_end(now)
+                                    && (alt.is_none() || g.alt_held(now))
+                                {
+                                    return Err(Error::RateLimited {
+                                        until: unix_in(end - now),
+                                    });
+                                }
+                                Slot::Wait(match alt {
+                                    Some(Err(a)) => w.min(a),
+                                    _ => w,
+                                })
+                            }
+                        },
+                    }
                 }
             };
             match slot {
@@ -1178,9 +1219,14 @@ impl SteamClient {
         }
     }
 
-    /// A extra lê anúncios e histórico (o balde da principal); livro e busca já têm o balde deles.
+    /// A saída pública aceita só livro e anúncios antigos; o modo genérico atende leituras nativas.
     fn alt_reads(&self, ep: Endpoint) -> bool {
-        self.alt.is_some() && matches!(ep, Endpoint::Listings | Endpoint::History)
+        self.alt.is_some()
+            && if self.alt_public_only {
+                matches!(ep, Endpoint::Book | Endpoint::Legacy)
+            } else {
+                matches!(ep, Endpoint::Listings | Endpoint::History)
+            }
     }
 
     /// Leitura pela saída extra, sempre sem login (o pedido é clonado antes do cookie). `None` = recusa, rede ou
@@ -1193,7 +1239,15 @@ impl SteamClient {
         reset_on_success: bool,
     ) -> Option<Result<(Parts, Vec<u8>)>> {
         let alt = self.alt.as_ref()?;
-        let request = req.try_clone()?.build().ok()?;
+        let mut request = req.try_clone()?.build().ok()?;
+        if self.alt_public_only {
+            request.headers_mut().remove(COOKIE);
+            if ep == Endpoint::Legacy {
+                request
+                    .headers_mut()
+                    .insert(COOKIE, HeaderValue::from_static("bMarketOptOut=1"));
+            }
+        }
         let attempt = match self.reserve_read(ep, "alt").await {
             Ok(attempt) => attempt,
             Err(e) => return Some(Err(e)),

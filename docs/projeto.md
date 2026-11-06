@@ -221,10 +221,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    mantém o painel ativo enquanto sua fila estiver disponível; não apaga a pausa das actions. Tentativa que
    termina sem enviar requisição não aumenta as consultas do aprendizado nem o crédito de descoberta.
    **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
-   Starlink por um celular com Tailscale) dá outro IP público, sem garantia de cota independente. Leva só leitura de anúncios e histórico
-   (livro e busca já têm o balde deles), sempre sem login; compra, sessão e login nunca passam por ele. Tem limitador próprio,
-   só em memória (reiniciar volta a 6 s). A principal tem a preferência: a extra só pega a vaga quando a principal
-   está esperando. Recusa, erro de rede ou 429 na extra não tocam no breaker nem no limitador da principal: a
+   Starlink por um celular com Tailscale) dá outro IP público, sem garantia de cota independente. As sondas de
+   `pesquisa-web.md` 11 encontraram actions recusadas e livro/render públicos disponíveis nessa rota. Por isso a
+   produção usa a extra só para livro e anúncios antigos públicos; histórico, actions filtradas, compra, sessão e
+   login ficam na principal. A extra nunca recebe o cookie de login. Tem limitador próprio,
+   só em memória (reiniciar volta a 6 s), com pelo menos 3 s entre envios e intervalo conservador de 6 s por grupo.
+   Anúncios comuns aproveitam a alternativa pública livre enquanto a principal aguarda o ritmo; a cobertura
+   continua por nome e o leitor valida BRL, identidade e paginação. Recusa, erro de rede ou 429 na extra não tocam no breaker nem no limitador da principal: a
    consulta volta para a fila dela, e a extra descansa 5 min (rede/recusa) ou pausa pelo próprio 429. Consultas por
    minuto somam as duas; a caça só aparece em pausa quando as duas estão paradas. Sem o proxy ligado, nada muda.
 4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas.

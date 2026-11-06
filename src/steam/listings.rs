@@ -231,7 +231,7 @@ pub async fn query_listings_wear(
     parse_page(&data, start)
 }
 
-/// Busca por nome na interface antiga quando as actions estão indisponíveis. Ela cobre só o item
+/// Busca por nome na interface antiga quando as actions estão indisponíveis ou a saída pública tem vaga. Ela cobre só o item
 /// comum completo: nunca simula um filtro de seed/float recortando os primeiros anúncios.
 /// O booleano indica que a página cobre somente o nome solicitado.
 pub async fn query_listings_named(
@@ -241,27 +241,41 @@ pub async fn query_listings_named(
     start: u32,
     wear: Option<u8>,
 ) -> Result<(ListingsPage, bool)> {
+    if c.prefer_public_listings() {
+        match query_legacy_named(c, name, code, start).await {
+            Ok(page) => return Ok((page, true)),
+            Err(Error::BudgetExhausted) => return Err(Error::BudgetExhausted),
+            Err(e) => tracing::warn!("leitura pública alternativa falhou; tenta a principal: {e}"),
+        }
+    }
     match query_listings_wear(c, code, start, wear, &[]).await {
         Ok(page) => Ok((page, false)),
         Err(
             Error::RateLimited { .. } | Error::BreakerOpen { .. } | Error::ActionUnavailable { .. },
-        ) => {
-            let path = format!("/market/listings/730/{}/render/", path_escape(name));
-            let q = [
-                ("query", String::new()),
-                ("start", start.to_string()),
-                ("count", "20".into()),
-                ("country", "BR".into()),
-                ("language", "english".into()),
-                ("currency", CURRENCY_BRL.to_string()),
-            ];
-            let data = c.legacy_json(&path, &q, false).await?;
-            let page = super::legacy::parse_page(&data, name, code, start)?;
-            c.note_legacy_ok();
-            Ok((page, true))
-        }
+        ) => Ok((query_legacy_named(c, name, code, start).await?, true)),
         Err(e) => Err(e),
     }
+}
+
+async fn query_legacy_named(
+    c: &SteamClient,
+    name: &str,
+    code: &str,
+    start: u32,
+) -> Result<ListingsPage> {
+    let path = format!("/market/listings/730/{}/render/", path_escape(name));
+    let q = [
+        ("query", String::new()),
+        ("start", start.to_string()),
+        ("count", "20".into()),
+        ("country", "BR".into()),
+        ("language", "english".into()),
+        ("currency", CURRENCY_BRL.to_string()),
+    ];
+    let data = c.legacy_json(&path, &q, false).await?;
+    let page = super::legacy::parse_page(&data, name, code, start)?;
+    c.note_legacy_ok();
+    Ok(page)
 }
 
 // ---------------------------------------------------------------------------------------------

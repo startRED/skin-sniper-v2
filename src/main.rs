@@ -152,8 +152,9 @@ async fn main() -> Result<()> {
     db::spawn_retention(db.clone());
     let settings = settings::SettingsStore::new(db.clone());
     let mut app = web::AppState::new(db.clone(), settings.clone());
-    let steam =
-        Arc::new(steam::client::SteamClient::new()?.with_alt_proxy(steam::client::ALT_PROXY)?);
+    let steam = Arc::new(
+        steam::client::SteamClient::new()?.with_public_alt_proxy(steam::client::ALT_PROXY)?,
+    );
     app.login.attach(steam.clone());
     let csfloat = Arc::new(csfloat::CsfloatClient::new()?);
     let telegram = Arc::new(notify::Telegram::new()?);
