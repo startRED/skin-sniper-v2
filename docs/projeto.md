@@ -236,7 +236,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    consulta volta para a fila dela, e a extra descansa 5 min (rede/recusa) ou pausa pelo próprio 429. Consultas por
    minuto somam as duas; a caça só aparece em pausa quando as duas estão paradas. Sem o proxy ligado, nada muda.
    Além da fila principal, uma única leitura pública em paralelo pode consultar alvo comum já selecionado, sem
-   usar login nem retornar pela principal. Ela espera vaga, respeita o limitador da extra e começa no máximo uma
+   usar login nem retornar pela principal. Ela reserva a próxima vaga em até 6 s, antes das próximas triagens
+   do livro; uma pausa por 429 ou falha de rede impede a reserva e é reconferida antes do envio. Respeita o limitador da extra e começa no máximo uma
    página a cada 12 s, com pelo menos 60 s entre visitas ao mesmo alvo. Não disputa ativos atrasados ou livro
    periódico pendente; só usa histórico recente e não baixa histórico nem CSFloat na análise paralela. O laço
    principal valida e processa a página: se outra consulta da mesma skin começar antes do retorno, a seleção

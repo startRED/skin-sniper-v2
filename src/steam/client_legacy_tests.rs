@@ -380,7 +380,75 @@ async fn public_alt_only_legacy_sends_fixture_without_private_cookies() {
     assert_eq!(main_hits.load(Ordering::Relaxed), 0);
     assert_eq!(c.sent(), 1);
     assert_eq!(c.take_calls()[1].ok, 1);
-    assert!(!c.public_alt_available(), "the sent slot is paced");
+    assert!(c.public_alt_available(), "the next slot can be reserved");
+}
+
+#[tokio::test]
+async fn public_legacy_reserves_the_next_slot_ahead_of_books_and_rechecks_pause() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hits = seen.clone();
+    let app = Router::new().fallback(get(move |uri: axum::http::Uri, headers: AxHeaders| {
+        let hits = hits.clone();
+        async move {
+            hits.lock().unwrap().push((
+                uri.path().to_string(),
+                headers.contains_key("x-test-alt"),
+                Instant::now(),
+            ));
+            "{}"
+        }
+    }));
+    let base = serve(app).await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-test-alt", HeaderValue::from_static("yes"));
+    let mut c = fast(&base).with_alt(http_builder().default_headers(headers).build().unwrap());
+    c.alt_public_only = true;
+    c.set_gap_for_test(Duration::from_millis(5));
+    let gap = Duration::from_millis(100);
+    c.inner.lock().unwrap().alt_limiter.gap = gap;
+    c.get_json(Endpoint::Book, "/first-book", &[])
+        .await
+        .unwrap();
+
+    let (page, ()) = tokio::join!(c.legacy_json_public_alt("/page", &[]), async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        for _ in 0..3 {
+            c.get_json(Endpoint::Book, "/next-book", &[]).await.unwrap();
+        }
+    });
+    page.expect("o livro não pode roubar a reserva").unwrap();
+    {
+        let hits = seen.lock().unwrap();
+        assert_eq!(hits.len(), 5);
+        assert_eq!(hits[0].0, "/first-book");
+        assert!(hits[0].1);
+        let page = hits.iter().find(|h| h.0 == "/page").unwrap();
+        assert!(page.1, "o anúncio usa somente a extra");
+        assert!(page.2.duration_since(hits[0].2) >= gap - Duration::from_millis(10));
+        assert!(hits.iter().filter(|h| h.0 == "/next-book").all(|h| !h.1));
+    }
+
+    let before = c.sent();
+    let counted = c.stats().queries_per_min;
+    let (page, ()) = tokio::join!(c.legacy_json_public_alt("/paused-page", &[]), async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        c.inner
+            .lock()
+            .unwrap()
+            .alt_limiter
+            .on_429(Instant::now(), None);
+    });
+    assert!(
+        page.is_none(),
+        "429 durante a espera cancela o envio reservado"
+    );
+    assert_eq!(c.sent(), before);
+    assert_eq!(
+        c.stats().queries_per_min,
+        counted,
+        "reserva cancelada não é consulta"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 5);
 }
 
 #[tokio::test]

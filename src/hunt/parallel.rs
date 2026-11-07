@@ -291,6 +291,7 @@ mod tests {
         let release = Arc::new(Notify::new());
         let hits = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
+            .route("/book", get(|| async { "{}" }))
             .route(
                 "/market/listings/730/{name}/render/",
                 get({
@@ -357,6 +358,43 @@ mod tests {
             .default_headers(headers)
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn book_traffic_does_not_starve_the_next_parallel_page() {
+        let (base, started, release, main_hits) = fake_server().await;
+        let (h, db, _dir, _task) = setup(&base, alt_client()).await;
+        // O laço principal acabou de gastar a vaga extra com o livro.
+        h.steam
+            .get_json(Endpoint::Book, "/book", &[])
+            .await
+            .unwrap();
+        let mut reader = Reader::default();
+        reader.step(&h).await;
+        assert!(
+            reader.pending.is_some(),
+            "o leitor deve reservar a próxima vaga, mesmo depois de uma consulta do livro"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            h.steam.get_json(Endpoint::Listings, "/ping", &[]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(main_hits.load(Ordering::Relaxed), 1);
+        tokio::time::timeout(Duration::from_secs(8), started)
+            .await
+            .expect("o livro não pode tomar indefinidamente a vaga de anúncios")
+            .unwrap();
+        release.notify_one();
+        let done = reader.pending.take().unwrap().await.unwrap().unwrap();
+        consume(&h, done).await;
+        let count: i64 = db
+            .call(|c| c.query_row("SELECT count(*) FROM observations", [], |r| r.get(0)))
+            .await
+            .unwrap();
+        assert!(count > 0, "a página aguardada deve ser aproveitada");
     }
 
     #[tokio::test]
