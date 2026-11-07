@@ -184,13 +184,31 @@ pub(crate) async fn finish(attempt: Option<(Db, i64)>, outcome: &'static str) {
     }
 }
 
+pub(crate) async fn page_attempts() -> anyhow::Result<i64> {
+    let Some(context) = current() else {
+        return Ok(0);
+    };
+    context
+        .db
+        .call(move |c| {
+            c.query_row(
+                "SELECT count(*) FROM research_attempts WHERE decision_id=?1
+         AND endpoint IN ('listings','legacy') AND route IN ('main','alt') AND outcome!='not_sent'",
+                [context.id],
+                |r| r.get(0),
+            )
+        })
+        .await
+}
+
 /// Contagem separada do transporte CSFloat; chamar imediatamente antes do envio.
-pub async fn record_external(db: Db) -> anyhow::Result<()> {
+pub async fn record_external(db: Db) -> anyhow::Result<(Db, i64)> {
     let c = current();
     let (id, source) = c
         .map(|x| (Some(x.id), x.source))
         .unwrap_or((None, "background".into()));
-    db.call(move |c| { c.execute("INSERT INTO research_attempts(decision_id,at,source,endpoint,route,outcome) VALUES (?1,?2,?3,'sales','csfloat','started')", params![id,now_unix(),source])?; Ok(()) }).await
+    let attempt = db.call(move |c| { c.execute("INSERT INTO research_attempts(decision_id,at,source,endpoint,route,outcome) VALUES (?1,?2,?3,'sales','csfloat','started')", params![id,now_unix(),source])?; Ok(c.last_insert_rowid()) }).await?;
+    Ok((db, attempt))
 }
 
 pub fn retain(c: &Connection, now: i64) -> rusqlite::Result<()> {

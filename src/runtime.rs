@@ -385,6 +385,16 @@ impl Runtime {
                 "termine a compra em andamento primeiro",
             ));
         };
+        let pending_id = id.to_string();
+        let pending: Option<String> = self.db.call(move |c| {
+            c.query_row("SELECT json FROM purchases WHERE id=?1 AND json_extract(json,'$.status') IN ('pending','need_confirmation')", [pending_id], |r| r.get(0)).optional()
+        }).await?;
+        if let Some(json) = pending {
+            let mut purchase: Purchase =
+                serde_json::from_str(&json).map_err(anyhow::Error::from)?;
+            purchase.message = Some(UNCERTAIN.into());
+            return Ok(purchase);
+        }
         let key = id.to_string();
         let row: Option<(String, Option<String>)> = self
             .db
@@ -453,7 +463,13 @@ impl Runtime {
         if let BuyOutcome::NeedConfirmation { .. } = &first {
             p.status = PurchaseStatus::NeedConfirmation;
             p.message = Some("Confirme a compra no app da Steam (celular).".into());
-            self.save_purchase(&p, now).await?;
+            if let Err(e) = self.save_purchase(&p, now).await {
+                tracing::error!(
+                    "não consegui gravar a confirmação da compra {}: {e:#}",
+                    p.id
+                );
+                p.message = Some("A Steam pediu confirmação, mas o registro local falhou. Confira o app da Steam e o inventário antes de tentar outra compra.".into());
+            }
             let _ = self.events.send(Event::Purchase(p.clone()));
             // reenvia com o id a cada 2 s por até 60 s, sem segurar a requisição do painel
             let (rt, mut bg) = (self.clone(), p.clone());

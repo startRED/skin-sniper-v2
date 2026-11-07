@@ -807,6 +807,13 @@ impl SteamClient {
         g.bucket(ep).pause_end(now).is_some() && !(self.alt_reads(ep) && !g.alt_held(now))
     }
 
+    /// Pausa/breaker da principal; leitura autenticada não pode contar com a saída extra.
+    pub fn main_blocked(&self, ep: Endpoint) -> bool {
+        let now = Instant::now();
+        let mut g = self.inner.lock().unwrap();
+        g.bucket(ep).pause_end(now).is_some() || g.breakers[ep.idx()].check(now).is_some()
+    }
+
     /// Consultas enviadas desde que o cliente subiu (todas as saídas e baldes).
     pub fn sent(&self) -> u64 {
         self.inner.lock().unwrap().sent

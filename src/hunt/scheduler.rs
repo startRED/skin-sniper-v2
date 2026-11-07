@@ -651,14 +651,35 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         (s.queue.may_discover(), s.queue.len() == 0, urgent)
     };
     // a descoberta lê busca e histórico (os dois baldes)
-    if (may_discover || empty) && !listings_blocked && !book_blocked && !urgent {
-        match crate::research::scope(
+    if (may_discover || empty)
+        && (!listings_blocked || !h.steam.main_blocked(Endpoint::Legacy))
+        && !book_blocked
+        && !urgent
+    {
+        let tracked = crate::research::scope_tracked(
             h.db.clone(),
             decision(h, "descoberta", "catalogo"),
-            catalog::step(h),
+            async {
+                if catalog::refresh_watched_history(h).await? {
+                    Ok(true)
+                } else if !listings_blocked {
+                    catalog::step(h).await
+                } else {
+                    Ok(false)
+                }
+            },
         )
-        .await
-        {
+        .await;
+        let (result, attempts) = match tracked {
+            Ok((result, context)) => {
+                let attempts = crate::research::attempts(h.db.clone(), context.id)
+                    .await
+                    .unwrap_or(1);
+                (result, attempts)
+            }
+            Err(e) => (Err(e), 0),
+        };
+        match result {
             Ok(true) => {
                 h.lock().queue.spend_discovery();
                 set_idle_message(h);
@@ -667,7 +688,10 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             Ok(false) => {}
             Err(e) => {
                 backoff(h, &e).await;
-                return Tick::Discovery;
+                if attempts > 0 {
+                    h.lock().queue.spend_discovery();
+                    return Tick::Discovery;
+                }
             }
         }
     }
@@ -899,11 +923,13 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         eligible.retain(|other| !same_query(&t, other));
         let mut targets = vec![t.clone()];
         targets.extend(duplicates);
-        {
+        let before = crate::research::page_attempts().await?;
+        let result = query_group(h, &t, targets).await;
+        if crate::research::page_attempts().await? > before {
             let mut s = h.lock();
             s.queue.credit = (s.queue.credit + DISCOVERY_SHARE).min(CREDIT_CAP);
         }
-        query_group(h, &t, targets).await?;
+        result?;
     }
     Ok(())
 }

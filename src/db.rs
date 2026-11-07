@@ -142,6 +142,7 @@ const MIGRATIONS: &[&str] = &[
     crate::hunt::teacher::SCHEMA,
     crate::hunt::trial::SCHEMA,
     crate::hunt::explore::SCHEMA,
+    "CREATE TABLE csfloat_cache (name TEXT PRIMARY KEY, fetched_at INTEGER NOT NULL, json TEXT NOT NULL);",
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -239,6 +240,10 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
         [],
     )?;
     conn.execute("DELETE FROM csfloat_sales WHERE sold_at < ?1", [learn])?;
+    conn.execute(
+        "DELETE FROM csfloat_cache WHERE fetched_at <= ?1",
+        [now - crate::hunt::catalog::HISTORY_TTL],
+    )?;
     conn.execute(
         "DELETE FROM activity_seen WHERE last_seen < ?1",
         [now - 3 * DAY],

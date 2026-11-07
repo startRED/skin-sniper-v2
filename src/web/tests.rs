@@ -59,7 +59,7 @@ async fn manual_sales_and_calibration_use_saved_predictions() {
     p["bought_at"] = json!(1);
     p["tradable_at"] = json!(2);
     p["message"] = Value::Null;
-    // Previsão já descontada 20 % pelas vendas: a calibração compara com os 120 originais.
+    // O placar compara com os 96 mostrados; o ajuste relativo continua separado.
     p["sell"]["mid"]["price_cents"] = json!(96);
     p["sell"]["correction"] = json!(0.8);
     let p = p.to_string();
@@ -121,8 +121,8 @@ async fn manual_sales_and_calibration_use_saved_predictions() {
     assert_eq!(result["families"][0]["family"], "AK-47 | Redline");
     assert_eq!(result["families"][0]["kind"], "desconto");
     assert_eq!(result["families"][0]["n"], 1);
-    assert_eq!(result["families"][0]["mean_error_pct"], 20.0);
-    assert_eq!(result["families"][0]["bias_pct"], 20.0);
+    assert_eq!(result["families"][0]["mean_error_pct"], 50.0);
+    assert_eq!(result["families"][0]["bias_pct"], 50.0);
     assert_eq!(
         result["hours"]
             .as_array()

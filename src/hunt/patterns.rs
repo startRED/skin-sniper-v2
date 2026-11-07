@@ -15,6 +15,8 @@ use std::collections::{BTreeMap, HashMap};
 
 /// shortcut: uma skin a cada 2 min (~720 por dia, dentro da cota do CSFloat); subir se a cota sobrar.
 const GAP: i64 = 120;
+// shortcut: aquece os nomes vigiados a cada 15 s; reavaliar após medir cota e latência em produção.
+const WARM_GAP: i64 = 15;
 /// A mesma skin só é relida depois disso.
 const REFETCH: i64 = 24 * 3600;
 /// Venda a esta razão da mediana da skin ou mais conta como prêmio de pattern.
@@ -101,6 +103,47 @@ pub async fn load(h: &Hunt) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn load_cache(h: &Hunt) -> Result<()> {
+    let now = h.now();
+    let cutoff = now - super::catalog::HISTORY_TTL;
+    let rows: Vec<(String, i64, String)> =
+        h.db.call(move |c| {
+            c.prepare("SELECT name, fetched_at, json FROM csfloat_cache WHERE fetched_at > ?1 AND fetched_at <= ?2")?
+                .query_map([cutoff, now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .await?;
+    for (name, at, json) in rows {
+        match serde_json::from_str(&json) {
+            Ok(sales) => {
+                h.lock().csfloat_cache.insert(name, (at, sales));
+            }
+            Err(e) => tracing::warn!("cache de vendas ignorado para {name}: {e}"),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn cache_sales(h: &Hunt, name: &str, sales: &[crate::csfloat::CsfloatSale]) {
+    let at = h.now();
+    let n = name.to_string();
+    match serde_json::to_string(sales) {
+        Ok(json) => {
+            if let Err(e) = h.db.call(move |c| {
+                c.execute("INSERT INTO csfloat_cache(name,fetched_at,json) VALUES (?1,?2,?3)
+                    ON CONFLICT(name) DO UPDATE SET fetched_at=excluded.fetched_at,json=excluded.json",
+                    params![n,at,json])?;
+                Ok(())
+            }).await { tracing::warn!("cache de vendas não persistiu: {e:#}"); }
+        }
+        Err(e) => tracing::warn!("cache de vendas não serializou: {e}"),
+    }
+    h.lock()
+        .csfloat_cache
+        .insert(name.into(), (at, sales.to_vec()));
+    super::teacher::store_csfloat(h, name, sales).await;
+}
+
 /// Lê as vendas da próxima skin do catálogo, se é hora. Não gasta consulta da Steam: só o CSFloat.
 pub async fn maybe_step(h: &Hunt) {
     let now = h.now();
@@ -111,7 +154,15 @@ pub async fn maybe_step(h: &Hunt) {
         if s.learn_at == 0 {
             s.learn_at = now;
         }
-        if now - s.learn_at < GAP {
+        let warming = h.csfloat.status().is_none_or(|(ok, _)| ok)
+            && s.queue.tasks().iter().any(|t| {
+                s.queue.external.as_ref() != Some(&t.id)
+                    && s.learn_seen.get(&t.name).is_none_or(|at| now - at >= 600)
+                    && s.csfloat_cache
+                        .get(&t.name)
+                        .is_none_or(|(at, _)| now - at >= super::catalog::HISTORY_TTL)
+            });
+        if now - s.learn_at < if warming { WARM_GAP } else { GAP } {
             return;
         }
         s.learn_at = now;
@@ -161,9 +212,8 @@ pub async fn maybe_step(h: &Hunt) {
         Ok(s) => s,
         Err(e) => return tracing::warn!("patterns: CSFloat falhou para {name}: {e}"),
     };
-    super::teacher::store_csfloat(h, &name, &sales).await;
+    cache_sales(h, &name, &sales).await;
     let found = premium_sales(&name, &sales);
-    h.lock().csfloat_cache.insert(name.clone(), (now, sales));
     if found.is_empty() {
         return;
     }
