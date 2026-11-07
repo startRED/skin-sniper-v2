@@ -284,9 +284,11 @@ impl Limiter {
         Ok(())
     }
 
-    /// 429: pausa e alonga 50 %. Um 429 dentro de uma pausa já ativa não avança o degrau (idempotente).
+    /// 429: pausa e alonga 50 %. Durante a pausa, só estende um `Retry-After` maior, sem avançar o degrau.
     pub(crate) fn on_429(&mut self, now: Instant, retry_after: Option<Duration>) {
-        if self.paused_until.is_some_and(|p| now < p) {
+        if let Some(end) = self.pause_end(now) {
+            let requested = now + retry_after.unwrap_or_default();
+            self.paused_until = Some(end.max(requested));
             return;
         }
         // 60 min sem 429 (mesmo sem nenhuma resposta no meio): a escalada recomeça.
@@ -1396,21 +1398,12 @@ impl SteamClient {
             let retry = retry_after(&resp);
             let mut g = self.inner.lock().unwrap();
             g.calls[if side(ep) { 2 } else { 0 }].limited += 1; // o 429 da extra não chega aqui
-            if sent_by.is_some()
+            let logged_read = sent_by.is_some()
                 && matches!(ep, Endpoint::Listings | Endpoint::History | Endpoint::Book)
-            {
-                // Tenta a próxima leitura sem login, no ritmo; restrição da conta é hipótese, não diagnóstico.
-                // 429 de uma sessão que já saiu não marca a conta nova.
-                let current = g.cookie.as_ref().map(|c| c.steam_login_secure.as_str());
-                if current == sent_by.as_deref() {
-                    g.anon_reads_until = Some(now + ANON_AFTER_429);
-                    Self::notify_pace(&mut g, now);
-                }
-                drop(g);
-                tracing::warn!(endpoint = ?ep, "Steam: 429 logado; leituras seguem sem login por 6 h");
-                return Err(Error::RateLimited {
-                    until: unix_in(Duration::ZERO),
-                });
+                && g.cookie.as_ref().map(|c| c.steam_login_secure.as_str()) == sent_by.as_deref();
+            if logged_read {
+                // Trocar o login não libera cota: a próxima leitura anônima também espera a pausa.
+                g.anon_reads_until = Some(now + ANON_AFTER_429);
             }
             g.bucket(ep).on_429(now, retry);
             let until = g
@@ -1418,12 +1411,15 @@ impl SteamClient {
                 .stats(now)
                 .paused_until
                 .unwrap_or_else(|| unix_in(PAUSE_START));
-            if !side(ep) {
+            if !side(ep) || logged_read {
                 Self::notify_pace(&mut g, now);
             }
             drop(g);
             // Qual consulta levou o 429 (e se ia logada): sem isso não dá para saber o que a Steam segura.
-            tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(), "Steam: 429");
+            tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(),
+                pausa_segundos = until - unix_in(Duration::ZERO),
+                retry_after_segundos = retry.map(|d| d.as_secs()),
+                proxima_sem_login = logged_read, "Steam: 429");
             return Err(Error::RateLimited { until });
         }
         let mut resp = resp;
@@ -2249,6 +2245,28 @@ mod tests {
     }
 
     #[test]
+    fn another_429_extends_retry_after_without_escalating_twice() {
+        let t = t0();
+        let mut l = Limiter::new(t);
+        l.on_429(t, None);
+        let gap = l.gap;
+        let next_pause = l.pause_len;
+        l.on_429(t + Duration::from_secs(10), Some(Duration::from_secs(3600)));
+        let end = t + Duration::from_secs(3610);
+        assert_eq!(l.paused_until, Some(end));
+        assert_eq!((l.gap, l.pause_len), (gap, next_pause));
+        l.on_429(t + Duration::from_secs(20), Some(Duration::from_secs(1)));
+        l.on_429(t + Duration::from_secs(30), None);
+        assert_eq!(
+            l.paused_until,
+            Some(end),
+            "prazo menor nunca encurta a pausa"
+        );
+        assert!(l.try_acquire(end - Duration::from_secs(1)).is_err());
+        assert!(l.try_acquire(end).is_ok());
+    }
+
+    #[test]
     fn limiter_counts_queries_per_minute() {
         let t = t0();
         let mut l = Limiter::new(t);
@@ -2436,6 +2454,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logged_429_honors_retry_after_without_sending_an_anonymous_retry() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = Router::new().route(
+            "/market/actions",
+            get(move || {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async { (AxStatus::TOO_MANY_REQUESTS, [("retry-after", "3600")], "") }
+            }),
+        );
+        let base = serve(app).await;
+        for ep in [Endpoint::History, Endpoint::Book] {
+            let c = fast(&base);
+            c.set_cookie(Some(Cookie {
+                steam_login_secure: "test-login".into(),
+                sessionid: None,
+            }));
+            let before = calls.load(std::sync::atomic::Ordering::Relaxed);
+            let first = c
+                .action(ep, "Limit", &serde_json::json!([]))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(first, Error::RateLimited { until } if until >= unix_in(Duration::from_secs(3595))),
+                "o 429 logado deve respeitar Retry-After: {first}"
+            );
+            assert!(c.blocked(ep));
+            assert!(c.inner.lock().unwrap().anon_reads_until.is_some());
+            assert!(c.action(ep, "Limit", &serde_json::json!([])).await.is_err());
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::Relaxed),
+                before + 1,
+                "trocar para anônimo não libera outra chamada durante a pausa"
+            );
+            let mut g = c.inner.lock().unwrap();
+            let saved = SteamClient::saved_pace(&mut g, Instant::now());
+            if !side(ep) {
+                assert!(
+                    saved.split('|').next().unwrap().parse::<i64>().unwrap()
+                        >= unix_in(Duration::from_secs(3595)),
+                    "a pausa logada deve sobreviver ao reinício: {saved}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn action_sends_header_and_unwraps_data_then_429_pauses() {
         let app = Router::new()
             .route(
@@ -2466,14 +2531,15 @@ mod tests {
         let saved = Arc::new(Mutex::new(String::new()));
         let keep = saved.clone();
         c.on_pace_change(move |v| *keep.lock().unwrap() = v);
-        // 429 logado: sem pausa nem alongamento; a próxima vai sem login.
+        // 429 logado: pausa e alonga antes de a próxima seguir sem login.
         let e = c
             .action(Endpoint::History, "Limit", &serde_json::json!([1]))
             .await
             .unwrap_err();
         assert!(matches!(e, Error::RateLimited { .. }));
         let s = c.stats();
-        assert_eq!((s.paused_until, s.gap_ms), (None, 100));
+        assert!(s.paused_until.is_some());
+        assert_eq!(s.gap_ms, 150);
         // O prazo sem login sobrevive a um reinício.
         let v = saved.lock().unwrap().clone();
         let anon: i64 = v.split('|').nth(3).unwrap().parse().unwrap();
@@ -2481,6 +2547,13 @@ mod tests {
         let again = fast(&base);
         again.set_cookie(c.cookie());
         again.restore_pace(&v);
+        assert!(
+            again.blocked(Endpoint::Listings),
+            "reiniciar não libera a pausa logada"
+        );
+        // Simula o fim da pausa sem dormir um minuto; o prazo sem login continua valendo.
+        again.inner.lock().unwrap().limiter.paused_until = Some(Instant::now());
+        c.inner.lock().unwrap().limiter.paused_until = Some(Instant::now());
         again
             .action(Endpoint::Listings, "Anon", &serde_json::json!([1]))
             .await
@@ -2488,7 +2561,7 @@ mod tests {
         c.action(Endpoint::Listings, "Anon", &serde_json::json!([1]))
             .await
             .unwrap();
-        // 429 sem login: aí é o IP, e o limitador pausa.
+        // 429 sem login também pausa; o status não informa qual cota foi atingida.
         let e = c
             .action(Endpoint::Listings, "Limit", &serde_json::json!([1]))
             .await
@@ -2496,7 +2569,7 @@ mod tests {
         assert!(matches!(e, Error::RateLimited { .. }));
         let s = c.stats();
         assert!(s.paused_until.is_some());
-        assert_eq!(s.gap_ms, 150);
+        assert_eq!(s.gap_ms, 225);
     }
 
     #[test]
