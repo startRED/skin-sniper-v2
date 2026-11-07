@@ -225,7 +225,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    mantém o painel ativo enquanto sua fila estiver disponível; não apaga a pausa das actions. Tentativa que
    termina sem enviar requisição não aumenta as consultas do aprendizado nem o crédito de descoberta.
    **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
-   Starlink por um celular com Tailscale) dá outro IP público, sem garantia de cota independente. As sondas de
+   rede fixa autorizada por um celular com Tailscale; redes atuais em `pesquisa-web.md` 13) dá outro IP público,
+   sem garantia de cota independente. As sondas de
    `pesquisa-web.md` 11 encontraram actions recusadas e livro/render públicos disponíveis nessa rota. Por isso a
    produção usa a extra só para livro e anúncios antigos públicos; histórico, actions filtradas, compra, sessão e
    login ficam na principal. A extra nunca recebe o cookie de login. Tem limitador próprio,
