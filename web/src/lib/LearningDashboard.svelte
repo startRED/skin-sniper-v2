@@ -8,7 +8,7 @@
   let selectedDay = $state('');
   const days = $derived(data.days.slice(0, period).reverse());
   const queries = $derived(days.reduce((n, d) => n + d.queries, 0));
-  const finds = $derived(days.reduce((n, d) => n + d.finds, 0));
+  const finds = $derived(days.reduce((n, d) => n + (d.queries ? d.finds : 0), 0));
   const samples = $derived(days.reduce((n, d) => n + (d.price_samples ?? 0), 0));
   const rate = $derived(queries ? finds / queries * 100 : null);
   const points = $derived(days.map((d, i) => ({
