@@ -213,3 +213,29 @@ async fn unique_credits_and_finds_survive_reload() {
         .unwrap();
     assert_eq!((n, profit), (1, 200));
 }
+
+#[tokio::test]
+async fn parallel_find_and_attempt_are_counted_once_in_common_reference() {
+    let (db, _dir) = db::temp_db();
+    db.call(|c| {
+        let decision = |source: &str, target: &str| -> rusqlite::Result<i64> {
+            c.execute("INSERT INTO research_decisions(at,source,policy,target,scale,block_id) VALUES (?1,?2,?2,?3,1,NULL)", (NOW, source, target))?;
+            Ok(c.last_insert_rowid())
+        };
+        let parallel = decision("paralela", "d:skin")?;
+        let normal = decision("normal", "d:skin")?;
+        let external = decision("exploracao_externa", "d:externa")?;
+        let rare = decision("normal", "r:rara")?;
+        for (id, source, route, outcome) in [(parallel,"paralela","alt","ok"), (normal,"normal","main","ok"), (external,"exploracao_externa","alt","ok"), (rare,"normal","main","ok"), (parallel,"paralela","alt","not_sent")] {
+            c.execute("INSERT INTO research_attempts(decision_id,at,source,endpoint,route,outcome) VALUES (?1,?2,?3,'legacy',?4,?5)", (id,NOW,source,route,outcome))?;
+        }
+        assert!(explore::record_find(c, "listing", Some(parallel), NOW, "d:skin", 100)?);
+        assert!(!explore::record_find(c, "listing", Some(normal), NOW, "d:skin", 100)?);
+        assert!(explore::record_find(c, "external", Some(external), NOW, "d:externa", 100)?);
+        assert!(explore::record_find(c, "rare", Some(rare), NOW, "r:rara", 100)?);
+        assert_eq!(explore::reference(c, NOW - 1)?, (1, 2));
+        let (source, block): (String, Option<i64>) = c.query_row("SELECT source,block_id FROM research_decisions WHERE id=?1", [parallel], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        assert_eq!((source.as_str(), block), ("paralela", None));
+        Ok(())
+    }).await.unwrap();
+}

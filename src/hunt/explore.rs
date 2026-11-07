@@ -213,7 +213,7 @@ pub async fn select(
             let id = state.candidate.as_ref().unwrap().task.id.clone();
             h.db.call(move |c| {
                 let (finds, attempts): (i64,i64) = c.query_row("SELECT (SELECT count(*) FROM research_finds WHERE target=?1 AND at>=?2),(SELECT count(*) FROM research_attempts a JOIN research_decisions d ON d.id=a.decision_id WHERE d.target=?1 AND a.route IN ('main','alt') AND a.outcome != 'not_sent' AND a.at>=?2)",params![id,now-MAX_WINDOW],|r|Ok((r.get(0)?,r.get(1)?)))?;
-                let (reference_finds, reference_attempts): (i64,i64) = c.query_row("SELECT (SELECT count(*) FROM research_finds f JOIN research_decisions d ON d.id=f.decision_id WHERE d.source='normal' AND d.target LIKE 'd:%' AND f.at>=?1),(SELECT count(*) FROM research_attempts a JOIN research_decisions d ON d.id=a.decision_id WHERE d.source='normal' AND d.target LIKE 'd:%' AND a.route IN ('main','alt') AND a.outcome != 'not_sent' AND a.at>=?1)",[now-MAX_WINDOW],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                let (reference_finds, reference_attempts) = reference(c, now - MAX_WINDOW)?;
                 Ok(finds >= 3 && attempts >= 12 && reference_attempts >= 12 && i128::from(finds)*i128::from(reference_attempts) > i128::from(reference_finds)*i128::from(attempts))
             }).await?
         } else {
@@ -334,6 +334,11 @@ pub async fn visited(h: &Hunt, task: &Task, attempts: i64) -> Result<()> {
         save(h).await?;
     }
     Ok(())
+}
+
+/// Compara a exploração com as leituras comuns, inclusive as feitas pela saída paralela.
+pub(super) fn reference(c: &Connection, since: i64) -> rusqlite::Result<(i64, i64)> {
+    c.query_row("SELECT (SELECT count(*) FROM research_finds f JOIN research_decisions d ON d.id=f.decision_id WHERE d.source IN ('normal','paralela') AND d.target LIKE 'd:%' AND f.at>=?1),(SELECT count(*) FROM research_attempts a JOIN research_decisions d ON d.id=a.decision_id WHERE d.source IN ('normal','paralela') AND d.target LIKE 'd:%' AND a.route IN ('main','alt') AND a.outcome != 'not_sent' AND a.at>=?1)", [since], |r| Ok((r.get(0)?, r.get(1)?)))
 }
 
 pub async fn first_credit(h: &Hunt, id: &str) -> Result<bool> {

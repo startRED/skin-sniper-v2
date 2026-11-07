@@ -199,6 +199,8 @@ pub struct Queue {
     pub external_ready: bool,
     pub last_exploring: bool,
     cursors: HashMap<String, usize>,
+    selection_revision: u64,
+    query_revisions: HashMap<String, u64>,
 }
 
 impl Queue {
@@ -213,6 +215,12 @@ impl Queue {
     /// Troca o conjunto de tarefas: quem continua mantém o aprendizado; quem entra começa sem consultas (e é
     /// testado já). Devolve os ids das tarefas que saíram.
     pub fn set_tasks(&mut self, tasks: Vec<Task>) -> Vec<String> {
+        self.selection_revision = self.selection_revision.wrapping_add(1);
+        let bases: HashSet<String> = tasks
+            .iter()
+            .map(|t| base_name(&t.name).to_string())
+            .collect();
+        self.query_revisions.retain(|base, _| bases.contains(base));
         let keep: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
         let removed: Vec<String> = self
             .entries
@@ -233,6 +241,28 @@ impl Queue {
             }
         }
         removed
+    }
+
+    pub(super) fn revision(&self, task: &Task) -> (u64, u64) {
+        (
+            self.selection_revision,
+            self.query_revisions
+                .get(base_name(&task.name))
+                .copied()
+                .unwrap_or(0),
+        )
+    }
+
+    fn begin_query(&mut self, task: &Task) {
+        let n = self
+            .query_revisions
+            .entry(base_name(&task.name).to_string())
+            .or_default();
+        *n = n.wrapping_add(1);
+    }
+
+    pub(super) fn last_at(&self, id: &str) -> Option<i64> {
+        self.stats.get(id).map(|s| s.last_at)
     }
 
     /// Carrega as notas guardadas no banco (arranque).
@@ -526,7 +556,7 @@ impl Queue {
         }
     }
 
-    fn record_scan(&mut self, id: &str, now: i64) {
+    pub(super) fn record_scan(&mut self, id: &str, now: i64) {
         let stat = self.stats.entry(id.to_string()).or_insert_with(|| Stat {
             first_at: now,
             updated_at: now,
@@ -954,6 +984,7 @@ async fn book_then_listings(
 }
 
 async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Result<()> {
+    h.lock().queue.begin_query(task);
     let mut targets: Vec<Task> = tasks.into_iter().filter(|t| same_query(task, t)).collect();
     {
         let mut s = h.lock();
@@ -1167,7 +1198,9 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
 /// Laço da caça. Termina quando o processo termina.
 pub async fn run(h: Arc<Hunt>) {
     let mut saved = h.now();
+    let mut parallel = super::parallel::Reader::default();
     loop {
+        parallel.step(&h).await;
         if tick(&h).await == Tick::Idle {
             tokio::select! {
                 () = h.wake.notified() => {}

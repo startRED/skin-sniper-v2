@@ -7,9 +7,9 @@ use crate::steam::book::{self, Book};
 use rusqlite::params;
 
 /// shortcut: 60 s é ~1 em 10 consultas no ritmo de 6 s; subir se os pedidos renderem mais que a caça.
-const GAP: i64 = 60;
+pub(super) const GAP: i64 = 60;
 /// Livro mais novo que isso não é lido de novo.
-const TTL: i64 = 30 * 60;
+pub(super) const TTL: i64 = 30 * 60;
 /// Livro mais velho que isso não vira sugestão: o topo da fila já pode ter mudado.
 pub const STALE: i64 = 60 * 60;
 /// Livro lido sem mudança é registrado de novo depois disso: o professor precisa saber o menor anúncio de cada dia.

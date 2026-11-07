@@ -234,6 +234,9 @@ pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<Pri
         })
         .await?;
     if last.is_none_or(|t| now - t >= HISTORY_TTL) {
+        if crate::research::current().is_some_and(|c| c.source == "paralela") {
+            anyhow::bail!("histórico vencido para leitura paralela");
+        }
         fetch_and_store_history(h, name).await?;
         h.lock().queue.spend_discovery();
     }
@@ -255,7 +258,7 @@ pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<Pri
 }
 
 /// Múltiplos `price / base_price` das vendas do CSFloat do mesmo grupo (cache de 6 h por nome).
-async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> RareEvidence {
+async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvidence> {
     let now = h.now();
     let cached = h
         .lock()
@@ -266,6 +269,9 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> RareEvidence {
     let sales = match cached {
         Some(v) => v,
         None => {
+            if crate::research::current().is_some_and(|c| c.source == "paralela") {
+                anyhow::bail!("vendas raras ausentes no cache da leitura paralela");
+            }
             let (at, v) = match h.csfloat.sales(name).await {
                 Ok(v) => {
                     h.set_keys(|k| {
@@ -297,7 +303,7 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> RareEvidence {
             v
         }
     };
-    RareEvidence {
+    Ok(RareEvidence {
         multiples: sales
             .iter()
             .filter(|s| !s.has_stickers)
@@ -307,7 +313,7 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> RareEvidence {
             })
             .map(|s| s.multiple)
             .collect(),
-    }
+    })
 }
 
 fn api_confidence(c: SellConfidence) -> Confidence {
@@ -506,7 +512,7 @@ async fn evaluate_one(
     let rare = match (&group, learned) {
         // pattern aprendido: o prêmio são as vendas que ensinaram (todos os desgastes), não as desta página
         (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
-        (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await),
+        (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
         (None, _) => None,
     };
     let mut est = match sell::estimate(&points, now, others_min, rare) {
