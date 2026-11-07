@@ -104,6 +104,9 @@ export type LearningDay = {
   life_median_min: number | null;
   near: number;
   finds: number;
+  price_samples: number;
+  price_error_pct: number | null;
+  price_bias_pct: number | null;
 };
 export type TeacherSummary = {
   ghosts: number;
@@ -199,4 +202,5 @@ export type Learning = {
   cohorts?: LearningCohort[];
   exploration?: LearningExploration | null;
   experiment?: LearningExperiment | null;
+  adjustments?: { at: number; old: number | null; new: number | null; why: string }[];
 };

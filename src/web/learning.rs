@@ -13,7 +13,7 @@ const DAY: i64 = 86_400;
 /// Brasília não tem horário de verão desde 2019.
 const BRT: i64 = -3 * 3600;
 /// Dias no placar.
-pub const DAYS: i64 = 14;
+pub const DAYS: i64 = 60;
 
 /// Dia de Brasília de um instante (número de dias desde 1970).
 pub fn brt_day(ts: i64) -> i64 {
@@ -45,6 +45,10 @@ pub struct Day {
     /// Quase-achados e achados.
     pub near: i64,
     pub finds: i64,
+    /// Avisos comuns com preço observado nas 48 h, agrupados pela data da previsão.
+    pub price_samples: i64,
+    pub price_error_pct: Option<f64>,
+    pub price_bias_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +79,17 @@ pub struct Learning {
     pub exploration: Option<crate::hunt::explore::Info>,
     #[serde(default)]
     pub experiment: Option<crate::hunt::trial::Report>,
+    /// Alterações efetivamente aplicadas ao preço dos comuns.
+    #[serde(default)]
+    pub adjustments: Vec<Adjustment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Adjustment {
+    pub at: i64,
+    pub old: Option<f64>,
+    pub new: Option<f64>,
+    pub why: String,
 }
 
 fn one() -> f64 {
@@ -159,6 +174,31 @@ pub fn scorecard(
         .collect()
 }
 
+/// Cada erro compara o preço observado ao previsto; não representa uma venda confirmada.
+fn price_scorecard(days: &mut [Day], samples: &[(i64, i64, i64)]) {
+    let mut by_day: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+    for &(at, predicted, observed) in samples {
+        if predicted > 0 && observed > 0 {
+            by_day
+                .entry(brt_day(at))
+                .or_default()
+                .push((observed as f64 - predicted as f64) / predicted as f64 * 100.0);
+        }
+    }
+    for day in days {
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(&day.day, "%Y-%m-%d") {
+            let key = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() / DAY;
+            if let Some(values) = by_day.get(&key) {
+                let mut signed = values.clone();
+                let mut absolute: Vec<f64> = values.iter().map(|v| v.abs()).collect();
+                day.price_samples = values.len() as i64;
+                day.price_bias_pct = median(&mut signed);
+                day.price_error_pct = median(&mut absolute);
+            }
+        }
+    }
+}
+
 pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError> {
     let now = now_unix();
     let from = (brt_day(now) - DAYS + 1) * DAY - BRT;
@@ -185,6 +225,15 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                 .collect::<rusqlite::Result<_>>()?;
             let since: Option<i64> =
                 c.query_row("SELECT MIN(first_seen) FROM observations", [], |r| r.get(0))?;
+            let prices: Vec<(i64, i64, i64)> = c
+                .prepare("SELECT bought_at, mid_price_cents, fast_median_cents FROM ghosts WHERE bought_at >= ?1 AND grp IS NULL AND approved = 1 AND fast_at IS NOT NULL AND fast_median_cents > 0 AND mid_price_cents > 0")?
+                .query_map([from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut days = scorecard(now, &hours, &new, &gone);
+            price_scorecard(&mut days, &prices);
+            let adjustments = c.prepare("SELECT at, old, new, why FROM refit_log WHERE key = 'comum' AND at >= ?1 ORDER BY at DESC")?
+                .query_map([from], |r| Ok(Adjustment { at: r.get(0)?, old: r.get(1)?, new: r.get(2)?, why: r.get(3)? }))?
+                .collect::<rusqlite::Result<_>>()?;
             let harvest: Option<String> = c
                 .query_row(
                     "SELECT value FROM settings WHERE key = ?1",
@@ -193,7 +242,7 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                 )
                 .optional()?;
             Ok(Learning {
-                days: scorecard(now, &hours, &new, &gone),
+                days,
                 since,
                 teacher: crate::hunt::teacher::summary(c)?,
                 harvest: harvest.and_then(|v| serde_json::from_str(&v).ok()),
@@ -207,6 +256,7 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                 cohorts: crate::hunt::teacher::cohorts(c, now - 60 * DAY, now, now)?,
                 exploration: Some(crate::hunt::explore::info(c)?),
                 experiment: Some(crate::hunt::trial::report(c, now)?),
+                adjustments,
             })
         })
         .await?;
@@ -228,7 +278,7 @@ mod tests {
         let hours = [
             (now / 3600, 10, 4, 2, 1),
             (late_5th / 3600, 7, 0, 1, 0),
-            ((now - 30 * DAY) / 3600, 99, 99, 99, 99), // fora dos 14 dias
+            ((now - 70 * DAY) / 3600, 99, 99, 99, 99), // fora dos 60 dias
         ];
         let new = [
             (now, Some(120)),
@@ -258,5 +308,19 @@ mod tests {
         );
         assert_eq!(days[2].age_median_min, None);
         assert_eq!(days.iter().map(|d| d.queries).sum::<i64>(), 17);
+    }
+
+    #[test]
+    fn price_scorecard_uses_prediction_day_and_keeps_error_separate_from_bias() {
+        let now = 1_793_977_200;
+        let mut days = scorecard(now, &[], &[], &[]);
+        price_scorecard(
+            &mut days,
+            &[(now, 1000, 900), (now, 1000, 1100), (now, 0, 100)],
+        );
+        assert_eq!(days[0].price_samples, 2);
+        assert_eq!(days[0].price_error_pct, Some(10.0));
+        assert_eq!(days[0].price_bias_pct, Some(0.0));
+        assert_eq!(days[1].price_error_pct, None);
     }
 }
