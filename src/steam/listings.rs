@@ -231,7 +231,7 @@ pub async fn query_listings_wear(
     parse_page(&data, start)
 }
 
-/// Busca por nome na interface antiga quando as actions estão indisponíveis ou a saída pública tem vaga. Ela cobre só o item
+/// Busca por nome na interface antiga quando as actions estão indisponíveis ou a leitura pública tem vaga antes. Ela cobre só o item
 /// comum completo: nunca simula um filtro de seed/float recortando os primeiros anúncios.
 /// O booleano indica que a página cobre somente o nome solicitado.
 pub async fn query_listings_named(
@@ -245,7 +245,7 @@ pub async fn query_listings_named(
         match query_legacy_named(c, name, code, start).await {
             Ok(page) => return Ok((page, true)),
             Err(Error::BudgetExhausted) => return Err(Error::BudgetExhausted),
-            Err(e) => tracing::warn!("leitura pública alternativa falhou; tenta a principal: {e}"),
+            Err(e) => tracing::warn!("leitura pública falhou; tenta as actions: {e}"),
         }
     }
     match query_listings_wear(c, code, start, wear, &[]).await {

@@ -10,6 +10,70 @@ const NAME: &str = "Glock-18 | Moonrise (Field-Tested)";
 const CODE: &str = "G180420B6053004";
 
 #[tokio::test]
+async fn slow_native_listings_use_ready_main_legacy_when_public_exit_is_down() {
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let seen = hits.clone();
+    let base = serve(Router::new().fallback(get(
+        move |uri: axum::http::Uri, headers: AxHeaders| {
+            seen.lock()
+                .unwrap()
+                .push((uri.path().to_owned(), Instant::now()));
+            async move {
+                assert_eq!(headers.get("cookie").unwrap(), "bMarketOptOut=1");
+                include_str!("../../testdata/steam_legacy_render_moonrise_2026-11.json")
+            }
+        },
+    )))
+    .await;
+    let c = fast(&base).with_public_alt_for_test(
+        http_builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap(),
+    );
+    c.set_cookie(Some(Cookie {
+        steam_login_secure: "must-not-leak".into(),
+        sessionid: None,
+    }));
+    let started = Instant::now();
+    {
+        let mut g = c.inner.lock().unwrap();
+        g.limiter.next_at = started + Duration::from_secs(5);
+        g.next_any = started + Duration::from_millis(50);
+        g.alt_down_until = Some(started + Duration::from_secs(60));
+    }
+    let (page, named_only) = tokio::time::timeout(
+        Duration::from_millis(500),
+        crate::steam::listings::query_listings_named(&c, NAME, CODE, 0, Some(2)),
+    )
+    .await
+    .expect("a leitura comum não deve esperar a fila nativa")
+    .unwrap();
+    assert!(named_only);
+    assert_eq!(page.listings.len(), 3);
+    {
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].0.ends_with("/render/"));
+        assert!(hits[0].1.duration_since(started) >= Duration::from_millis(50));
+    }
+    assert_eq!(c.take_calls()[1].ok, 0, "a extra continua indisponível");
+    assert!(!c.blocked(Endpoint::Listings), "não houve 429 nativo");
+    {
+        let mut g = c.inner.lock().unwrap();
+        g.side.on_429(Instant::now(), None);
+    }
+    assert!(!c.prefer_public_listings(), "respeita a pausa do render");
+    {
+        let mut g = c.inner.lock().unwrap();
+        g.side.paused_until = None;
+        g.breakers[Endpoint::Legacy.idx()].open_until =
+            Some(Instant::now() + Duration::from_secs(60));
+    }
+    assert!(!c.prefer_public_listings(), "respeita falhas do render");
+}
+
+#[tokio::test]
 async fn legacy_recovers_listings_and_history_without_leaking_login_or_resetting_actions() {
     let actions = Arc::new(AtomicUsize::new(0));
     let seen = actions.clone();
