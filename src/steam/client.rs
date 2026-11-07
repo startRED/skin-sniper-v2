@@ -270,6 +270,12 @@ impl Limiter {
 
     /// `Ok` toma a vaga (e conta a consulta); `Err(espera)` diz quanto falta.
     pub(crate) fn try_acquire(&mut self, now: Instant) -> std::result::Result<(), Duration> {
+        self.try_reserve(now)?;
+        self.note_query(now);
+        Ok(())
+    }
+
+    fn try_reserve(&mut self, now: Instant) -> std::result::Result<(), Duration> {
         self.shorten(now);
         let free_at = self
             .paused_until
@@ -279,9 +285,12 @@ impl Limiter {
         }
         self.paused_until = None;
         self.next_at = now + self.gap;
+        Ok(())
+    }
+
+    fn note_query(&mut self, now: Instant) {
         self.last_query = Some(now);
         self.recent.push_back(now);
-        Ok(())
     }
 
     /// 429: pausa e alonga 50 %. Durante a pausa, só estende um `Retry-After` maior, sem avançar o degrau.
@@ -612,6 +621,9 @@ impl SteamClient {
                 if at <= now {
                     // O contador representa transporte iniciado, não vaga reservada.
                     inner.sent += 1;
+                    if alt {
+                        inner.alt_limiter.note_query(now);
+                    }
                     pace.last_any = Some(now);
                     pace.last_bucket[bucket] = Some(now);
                     return Ok(());
@@ -661,24 +673,19 @@ impl SteamClient {
         Ok(c)
     }
 
-    /// Há vaga imediata para leitura pública na saída extra.
+    /// A saída pública aceita uma reserva para os próximos 6 s, sem pausa nem falha de rede.
     pub fn public_alt_available(&self) -> bool {
         if !self.alt_public_only || self.alt.is_none() {
             return false;
         }
-        let Ok(pace) = self.alt_send_pace.try_lock() else {
-            return false;
-        };
         let now = Instant::now();
         let g = self.inner.lock().unwrap();
         g.alt_down_until.is_none_or(|t| now >= t)
             && g.alt_limiter.pause_end(now).is_none()
-            && g.alt_limiter.next_at <= now
+            && g.alt_limiter.next_at <= now + BASE_GAP
             && g.breakers[Endpoint::Legacy.idx()]
                 .open_until
                 .is_none_or(|t| now >= t)
-            && pace.last_any.is_none_or(|t| t + g.spacing <= now)
-            && pace.last_bucket[1].is_none_or(|t| t + g.alt_limiter.gap <= now)
     }
 
     /// Há uma vaga imediata na saída pública enquanto a leitura nativa espera na principal.
@@ -1063,7 +1070,8 @@ impl SteamClient {
     }
 
     /// Faz uma tentativa pública de anúncio somente pela saída alternativa.
-    /// `None` indica saída desativada/ocupada, pausa, breaker ou falha de rede/429 nela.
+    /// Reserva a próxima vaga em até 6 s; livros seguintes usam a principal ou esperam outra vaga.
+    /// `None` indica saída desativada, espera maior, pausa, breaker ou falha de rede/429 nela.
     /// Erros de orçamento, HTTP e JSON permanecem em `Some(Err(_))`; nunca usa a principal.
     pub async fn legacy_json_public_alt(
         &self,
@@ -1074,15 +1082,21 @@ impl SteamClient {
         if !self.alt_public_only || self.alt.is_none() {
             return None;
         }
-        {
+        let at = {
             let now = Instant::now();
             let mut g = self.inner.lock().unwrap();
             if g.breakers[ep.idx()].check(now).is_some()
-                || !matches!(self.alt_slot(&mut g, ep, now), Some(Ok(())))
+                || g.alt_held(now)
+                || g.alt_limiter.next_at > now + BASE_GAP
             {
                 return None;
             }
-        }
+            g.alt_limiter.shorten(now);
+            let at = now.max(g.alt_limiter.next_at);
+            g.alt_limiter.next_at = at + g.alt_limiter.gap;
+            at
+        };
+        tokio::time::sleep_until(at.into()).await;
         let req = self
             .http
             .get(self.url(path))
@@ -1287,7 +1301,7 @@ impl SteamClient {
         }
         match g.alt_down_until {
             Some(t) if now < t => Some(Err(t - now)),
-            _ => Some(g.alt_limiter.try_acquire(now)),
+            _ => Some(g.alt_limiter.try_reserve(now)),
         }
     }
 
