@@ -64,7 +64,7 @@ Valores de dinheiro sempre em **centavos BRL inteiros**. Datas em segundos Unix.
 ```
 GET  /api/state            -> State
 PUT  /api/saldo            {cents: int}            -> State      (saldo manual; null volta a ler da Steam)
-GET  /api/opportunities    -> Opportunity[]         (ativas e as perdidas do último dia, até 50, com gone_at; o frontend ordena)
+GET  /api/opportunities    -> Opportunity[]         (ativas e todas as perdidas nas últimas 24 h, com gone_at; o frontend ordena)
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
 POST /api/buy              {id: string}            -> Purchase
 GET  /api/purchases        -> Purchase[]
@@ -74,7 +74,7 @@ GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais p
 GET  /api/learning         -> Learning              (placar do aprendizado, 60 dias de Brasília)
 GET  /api/settings         -> Settings              (chaves mascaradas)
 PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga)
-GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id} | "state" State | "purchase" Purchase
+GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id, at, reason} | "state" State | "purchase" Purchase
 ```
 
 ```ts
@@ -106,6 +106,9 @@ Opportunity = {
   risk: "baixo" | "medio" | "alto" | null,
   evidence: string,              // frase curta: "392 vendas/dia nos últimos 7 dias"
   seen_at: number,
+  checked_at: number | null,     // última consulta que devolveu este anúncio; não é a criação na Steam
+  gone_at: number | null,        // fica visível por 24 h após sair, inclusive depois de reiniciar
+  gone_reason: "unavailable" | "unprofitable" | "unwatched" | "bought" | "rejected" | null,
   seal: Seal | null              // só raro: selo do prêmio (Aprendizado, item 5)
 }
 Seal = {
@@ -436,6 +439,10 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   (decisão do Erick em 06/11: R$ 0,30 por uma semana travada não vale o risco). O risco aparece na linha.
   `safe` quando lucro no `quick` > 0. Combinação e aviso exigem lucro esperado ajustado ao risco positivo.
   Aviso no Windows (toast, sai com o painel fechado; clicar abre o anúncio), Telegram e som: lucro esperado ajustado ao risco positivo e lucro no `mid` ≥ `notify_min_profit_cents` (padrão R$ 1,00). Não exige `safe`: raro quase nunca é `safe`, e um flip de R$ 10,75 escapou sem aviso por isso.
+  O aviso começa assim que o anúncio passa, antes dos históricos dos próximos anúncios. Também sai se a mesma
+  oportunidade só atingir o mínimo depois. `notified_at` persiste a entrega aceita pelo Windows ou Telegram;
+  falha não confirma envio. `notify_pending_at` reserva por 60 s e permite retomar após reinício. Windows tem
+  prazo de 10 s; Telegram, incluindo fila e repetições de rede, 40 s. A finalização só altera a própria reserva.
 - Calibração: cada compra grava os três preços previstos; quando o Erick vender, o realizado entra numa
   tabela para conferir o erro (v1 só grava; o ajuste fino vem depois com dados).
   Conferida em 06/11 contra o mercado 7–9 dias depois (7 525 casos, 493 skins): real ÷ previsto no médio com
@@ -521,10 +528,17 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   ativa é preservada para acompanhamento mesmo quando perde o lugar na seleção normal; sair do teste não prova sumiço.
 - `gone` só vale com a página confiável: página vazia precisa se repetir 2 vezes, e anúncio fora da primeira
   página (`more`) só some se o preço dele estava dentro da faixa vista.
+  A linha encerrada mantém o motivo por 24 h: vendido ou retirado (a Steam não distingue), deixou de compensar,
+  sem acompanhamento, comprado pelo usuário ou compra recusada. Uma pausa de consultas não prova venda.
+  Ativos são reconferidos após 60 s na faixa da seed encontrada; ler outra faixa não confirma esse anúncio.
+  Tentativa sem reencontro ou com erro também espera 60 s antes de repetir, para não prender a agenda.
+  O painel mostra quando o anúncio foi conferido e indica espera após 3 min sem confirmação; isso não informa
+  a idade de criação na Steam. O registro só tem limite de idade quando uma consulta anterior cobria seu preço.
 - Reavaliação (revisão do Codex): anúncio já visto é avaliado de novo quando o preço, o histórico do item ou o menor concorrente mudam
   (e, se é oportunidade ativa com histórico velho, a cada passagem). A oportunidade atualizada mantém a posição
   (`seen_at`) e só republica o evento se algo mudou; se deixou de compensar, vira `gone`. O aviso do Telegram sai
-  só para oportunidade nova. O mapa de avaliados vive em memória (reavalia tudo uma vez após reiniciar).
+  uma vez após qualificar e confirmar a entrega, mesmo que isso só ocorra na reavaliação. O mapa de avaliados
+  vive em memória (reavalia tudo uma vez após reiniciar).
 - Balanço de 10 min: `State.hunt.message` diz quantos anúncios foram conferidos e o quanto o mais perto dava de
   lucro (ou prejuízo); o log INFO traz os 3 mais perto, com o lucro no preço médio e no rápido.
   A mesma linha de 10 min conta as respostas da Steam por saída (`principal_ok`, `principal_429`, `extra_ok`,

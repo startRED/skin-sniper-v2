@@ -1,7 +1,7 @@
 import { api, ApiError } from './api';
 import { money, signed } from './format';
 import { beep, unlockAudio } from './sound';
-import type { History, Opportunity, Purchase, Settings, SettingsInput, State, WatchRow } from './types';
+import type { GoneReason, History, Opportunity, Purchase, Settings, SettingsInput, State, WatchRow } from './types';
 
 export type SortKey = 'profit' | 'margin' | 'safe' | 'eta' | 'new';
 const DEFAULT_DIR: Record<SortKey, 'asc' | 'desc'> = { profit: 'desc', margin: 'desc', safe: 'desc', eta: 'asc', new: 'desc' };
@@ -185,6 +185,7 @@ export async function load(): Promise<boolean> {
 
 let es: EventSource | undefined;
 let wasDown = false;
+const alerted = new Set<string>();
 
 // Depois de uma queda, eventos novos esperam a recarga terminar: senão a recarga atropelaria o que acabou de chegar.
 let queue: (() => void)[] | null = null;
@@ -220,14 +221,18 @@ function connect() {
   on('opportunity', (o: Opportunity) => {
     const isNew = !app.opps[o.id] || !!app.opps[o.id].gone_at;
     app.opps[o.id] = o;
-    if (!isNew) return;
-    app.fresh[o.id] = true;
-    setTimeout(() => delete app.fresh[o.id], 3500);
-    if (app.loaded && qualifies(o)) notify(o);
+    if (isNew && !o.gone_at) {
+      app.fresh[o.id] = true;
+      setTimeout(() => delete app.fresh[o.id], 3500);
+    }
+    if (app.loaded && !o.gone_at && qualifies(o) && !alerted.has(o.id)) {
+      alerted.add(o.id);
+      notify(o);
+    }
   });
-  on('gone', ({ id }) => {
+  on('gone', ({ id, at, reason }: { id: string; at: number; reason: GoneReason }) => {
     const o = app.opps[id];
-    if (o) app.opps[id] = { ...o, gone_at: app.now };
+    if (o) app.opps[id] = { ...o, gone_at: at ?? app.now, gone_reason: reason };
     if (app.armed === id) disarm();
   });
   on('state', (s: State) => {
@@ -241,7 +246,7 @@ export function start() {
   setInterval(() => (app.now = Math.floor(Date.now() / 1000)), 1000);
   window.addEventListener('pointerdown', unlockAudio, { once: true });
   window.addEventListener('keydown', unlockAudio, { once: true });
-  void load();
+  void resync();
   void loadWatch();
   setInterval(loadWatch, 30000);
   connect();

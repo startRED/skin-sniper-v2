@@ -13,7 +13,7 @@ use crate::steam::buy::brl;
 use crate::steam::client::Error as SteamError;
 use crate::steam::history;
 use crate::steam::listings::{Listing, ListingsPage};
-use crate::web::api::{Confidence, Event, Kind, Opportunity, Risk, Sell, Tier};
+use crate::web::api::{Confidence, Event, GoneReason, Kind, Opportunity, Risk, Sell, Tier};
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use std::collections::{BTreeMap, HashSet};
@@ -96,7 +96,7 @@ impl Cycle {
             t += &format!("; {} deram lucro", self.passed);
         } else if let Some(n) = self.near.first() {
             t += &format!(
-                "; nenhum deu lucro, o mais perto dava {}",
+                "; nenhum passou nos critérios de lucro e risco; o mais perto dava {} no preço médio",
                 profit_text(n.mid_cents)
             );
         } else if self.evaluated > 0 {
@@ -165,6 +165,12 @@ pub struct Outcome {
     pub gone: Vec<String>,
     /// O que a consulta rendeu à agenda (achados novos e a proximidade dos anúncios novos que não passaram).
     pub rewarded: Found,
+}
+
+pub(super) fn should_notify(opp: &Opportunity, min_profit: i64) -> bool {
+    opp.gone_at.is_none()
+        && opp.ev_profit_cents.is_some_and(|p| p > 0)
+        && opp.sell.mid.profit_cents >= min_profit
 }
 
 /// Quase lucro, só para o contador do painel: faltou até R$ 0,30 ou 10 % do preço, o que for maior.
@@ -620,7 +626,9 @@ async fn evaluate_one(
         }),
         evidence: est.evidence,
         seen_at: now,
+        checked_at: Some(now),
         gone_at: None,
+        gone_reason: None,
         seal,
     };
     let detail = Some(opp.evidence.clone());
@@ -736,7 +744,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .filter(|a| !page.more || a.opp.price_cents <= page_max)
             .map(|a| a.opp.id.clone())
             .collect();
-        out.gone = mark_gone(h, missing).await?;
+        out.gone = mark_gone(h, missing, GoneReason::Unavailable).await?;
     }
 
     // --- novos
@@ -797,6 +805,17 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             let last = h.lock().evaluated.get(&l.listing_id).copied();
             let aged = active.is_some() && hist.is_none_or(|t| now - t >= HISTORY_TTL);
             if last == Some((l.price_cents, hist.unwrap_or(0), others_min)) && !aged {
+                if let Some(mut opp) = active {
+                    let changed = opp.checked_at != Some(now);
+                    opp.checked_at = Some(now);
+                    let notify = should_notify(&opp, notify_min);
+                    let (_, alert) =
+                        store_opportunity(h, task, l, &opp, false, notify, view.panel_url.clone())
+                            .await?;
+                    if changed || alert {
+                        out.found.push((opp, alert));
+                    }
+                }
                 continue;
             }
         }
@@ -845,20 +864,19 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                 let fresh = prev.is_none();
                 if let Some(p) = &prev {
                     opp.seen_at = p.seen_at; // a ordem da lista não muda por reavaliar
-                    if serde_json::to_string(&opp)? == serde_json::to_string(p)? {
-                        continue;
-                    }
                 }
-                let first_approved = store_opportunity(h, task, l, &opp, fresh).await?;
+                let (first_approved, alert) =
+                    store_opportunity(h, task, l, &opp, fresh, notify, view.panel_url.clone())
+                        .await?;
                 if first_approved {
                     out.rewarded.finds += 1;
                     out.rewarded.gain_cents += opp.sell.mid.profit_cents;
                 }
-                out.found.push((opp, fresh && first_approved && notify));
+                out.found.push((opp, alert));
             }
             (None, Some(_)) => out
                 .gone
-                .extend(mark_gone(h, vec![l.listing_id.clone()]).await?),
+                .extend(mark_gone(h, vec![l.listing_id.clone()], GoneReason::Unprofitable).await?),
             (None, None) => {}
         }
     }
@@ -867,9 +885,6 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         tracing::warn!(%error, "falha ao guardar avaliações para auditoria");
     }
 
-    for (opp, _) in out.found.iter().filter(|(_, notify)| *notify) {
-        send_alert(h, opp, view.panel_url.clone());
-    }
     if !out.found.is_empty() || !out.gone.is_empty() {
         h.recompute_combo();
         h.publish_state();
@@ -916,7 +931,9 @@ async fn store_opportunity(
     l: &Listing,
     opp: &Opportunity,
     fresh: bool,
-) -> Result<bool> {
+    notify: bool,
+    panel_url: Option<String>,
+) -> Result<(bool, bool)> {
     let (id, json, lj, tid) = (
         opp.id.clone(),
         serde_json::to_string(opp)?,
@@ -929,20 +946,32 @@ async fn store_opportunity(
         h.now(),
         opp.sell.mid.profit_cents,
     );
-    let first = h.db.call(move |c| {
+    let (first, alert, changed) = h.db.call(move |c| {
         let tx = c.transaction()?;
+        let previous: Option<String> = tx.query_row(
+            "SELECT json FROM opportunities WHERE id = ?1", [&id], |r| r.get(0)
+        ).optional()?;
+        let changed = previous.as_ref() != Some(&json);
         let first = fresh && super::explore::record_find(&tx,&id,decision,now,&tid,profit)?;
         if first
             && let Err(error) = tx.execute("INSERT INTO hourly_activity(hour_utc, opportunities) VALUES (?1, 1) ON CONFLICT(hour_utc) DO UPDATE SET opportunities = opportunities + 1", [at.div_euclid(3600)]) {
             tracing::warn!(%error, "falha ao registrar atividade de oportunidades");
         }
         tx.execute(
-            "INSERT OR REPLACE INTO opportunities(id, json, created_at, gone_at, task, listing_json)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+            "INSERT INTO opportunities(id, json, created_at, gone_at, task, listing_json)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET json=excluded.json, gone_at=NULL,
+                 task=excluded.task, listing_json=excluded.listing_json",
             params![id, json, at, tid, lj],
         )?;
+        // Reserva com prazo: se o processo fechar durante o envio, a próxima consulta tenta de novo.
+        let alert = notify && tx.execute(
+            "UPDATE opportunities SET notify_pending_at=?2 WHERE id=?1 AND notified_at IS NULL
+             AND (notify_pending_at IS NULL OR notify_pending_at <= ?3)",
+            params![id, now, now - 60],
+        )? == 1;
         tx.commit()?;
-        Ok(first)
+        Ok((first, alert, changed))
     })
     .await?;
     {
@@ -952,26 +981,38 @@ async fn store_opportunity(
             Active {
                 opp: opp.clone(),
                 task: task.id.clone(),
+                attempted_at: now,
             },
         );
     }
-    let _ = h.events.send(Event::Opportunity(opp.clone()));
-    Ok(first)
+    if changed {
+        let _ = h.events.send(Event::Opportunity(opp.clone()));
+    }
+    if alert {
+        send_alert(h, opp, panel_url, now);
+    }
+    Ok((first, alert))
 }
 
 /// Marca como encerradas (`gone_at`) e avisa o painel. Devolve os ids que estavam ativos.
-pub(crate) async fn mark_gone(h: &Hunt, ids: Vec<String>) -> Result<Vec<String>> {
+pub(crate) async fn mark_gone(
+    h: &Hunt,
+    ids: Vec<String>,
+    reason: GoneReason,
+) -> Result<Vec<String>> {
     if ids.is_empty() {
         return Ok(ids);
     }
     let now = h.now();
     let list = ids.clone();
+    let reason_json = serde_json::to_string(&reason)?;
     h.db.call(move |c| {
         let tx = c.transaction()?;
         for id in &list {
             tx.execute(
-                "UPDATE opportunities SET gone_at = ?2 WHERE id = ?1 AND gone_at IS NULL",
-                params![id, now],
+                "UPDATE opportunities SET gone_at = ?2, json=json_set(json, '$.gone_reason', json(?3))
+                 WHERE id = ?1 AND gone_at IS NULL",
+                params![id, now, reason_json],
             )?;
         }
         tx.commit()
@@ -984,7 +1025,11 @@ pub(crate) async fn mark_gone(h: &Hunt, ids: Vec<String>) -> Result<Vec<String>>
         }
     }
     for id in &ids {
-        let _ = h.events.send(Event::Gone { id: id.clone() });
+        let _ = h.events.send(Event::Gone {
+            id: id.clone(),
+            at: now,
+            reason,
+        });
     }
     Ok(ids)
 }
@@ -999,28 +1044,26 @@ pub async fn drop_tasks(h: &Hunt, tasks: &[String]) -> Result<()> {
         .filter(|a| tasks.contains(&a.task))
         .map(|a| a.opp.id.clone())
         .collect();
-    if !mark_gone(h, ids).await?.is_empty() {
+    if !mark_gone(h, ids, GoneReason::Unwatched).await?.is_empty() {
         h.recompute_combo();
     }
     Ok(())
 }
 
-/// Aviso no Windows e no Telegram (uma vez por anúncio: só chega aqui o que é novo; o próprio
-/// `Telegram` também lembra). Em segundo plano: o envio espera o ritmo do Telegram e não pode segurar a caça.
-fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>) {
-    crate::notify::desktop(
-        &format!("{} de lucro · {}", brl(opp.sell.mid.profit_cents), opp.name),
-        &format!(
-            "Compre por {} e venda por {}.{} Clique para abrir na Steam.",
-            brl(opp.price_cents),
-            brl(opp.sell.mid.price_cents),
-            opp.seal
-                .as_ref()
-                .map(|s| format!(" Raro {}.", s.text))
-                .unwrap_or_default()
-        ),
-        &opp.steam_url,
+/// Confirma o envio no banco; falha ou reinício permite repetir na próxima conferência do anúncio.
+/// Em segundo plano: o Windows e o Telegram não podem segurar a caça.
+fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>, reserved_at: i64) {
+    let title = format!("{} de lucro · {}", brl(opp.sell.mid.profit_cents), opp.name);
+    let body = format!(
+        "Compre por {} e venda por {}.{} Clique para abrir na Steam.",
+        brl(opp.price_cents),
+        brl(opp.sell.mid.price_cents),
+        opp.seal
+            .as_ref()
+            .map(|s| format!(" Raro {}.", s.text))
+            .unwrap_or_default()
     );
+    let url = opp.steam_url.clone();
     // raro: o selo e, se o prêmio dá folga, o preço para anunciar
     let seal = opp
         .seal
@@ -1036,9 +1079,9 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>) {
             }
             _ => format!("Raro {}", s.text),
         });
-    let Some(tg) = h.telegram.clone() else {
-        return;
-    };
+    let tg = h.telegram.clone();
+    let db = h.db.clone();
+    let now = h.now();
     let alert = Alert {
         id: opp.id.clone(),
         name: opp.name.clone(),
@@ -1050,9 +1093,56 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>) {
         seal,
     };
     tokio::spawn(async move {
-        match tg.notify(&alert, panel_url.as_deref()).await {
-            Ok(_) | Err(NotifyError::NotConfigured) => {}
-            Err(e) => tracing::warn!("aviso no Telegram falhou: {e}"),
+        let telegram = async {
+            let Some(tg) = tg else {
+                return false;
+            };
+            for attempt in 0..3 {
+                match tg.notify(&alert, panel_url.as_deref()).await {
+                    Ok(_) => return true,
+                    Err(NotifyError::NotConfigured) => return false,
+                    Err(NotifyError::Transport(e)) if attempt < 2 => {
+                        tracing::warn!("aviso no Telegram adiado: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("aviso no Telegram falhou: {e}");
+                        return false;
+                    }
+                }
+            }
+            false
+        };
+        // Inclui espera pelo mutex e pelo ritmo: o envio inteiro termina antes da reserva de 60 s.
+        let telegram = async {
+            tokio::time::timeout(std::time::Duration::from_secs(40), telegram)
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!("o Telegram não confirmou o aviso em 40 s");
+                    false
+                })
+        };
+        let (desktop, telegram) =
+            tokio::join!(crate::notify::desktop(&title, &body, &url), telegram);
+        let desktop = desktop.unwrap_or_else(|e| {
+            tracing::warn!("aviso do Windows falhou: {e}");
+            false
+        });
+        let delivered = desktop || telegram;
+        if delivered {
+            tracing::info!(id = %alert.id, windows = desktop, telegram, "aviso entregue");
+        }
+        if let Err(e) = db
+            .call(move |c| {
+                c.execute(
+            "UPDATE opportunities SET notify_pending_at=NULL, notified_at=COALESCE(notified_at,?2)
+             WHERE id=?1 AND notify_pending_at=?3",
+            params![alert.id, delivered.then_some(now), reserved_at],
+        )
+            })
+            .await
+        {
+            tracing::warn!("não consegui registrar o envio do aviso: {e:#}");
         }
     });
 }

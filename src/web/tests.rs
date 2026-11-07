@@ -396,6 +396,57 @@ async fn static_fallback_serves_html() {
 }
 
 #[tokio::test]
+async fn every_opportunity_stays_visible_for_24_hours_after_it_leaves() {
+    let s = start().await;
+    let now = crate::db::now_unix();
+    s.app
+        .db
+        .call(move |c| {
+            let tx = c.transaction()?;
+            for i in 0..65 {
+                let mut opp = opp_json(&i.to_string());
+                opp["gone_reason"] = json!("rejected");
+                tx.execute(
+                    "INSERT INTO opportunities(id,json,created_at,gone_at) VALUES (?1,?2,?3,?4)",
+                    rusqlite::params![i.to_string(), opp.to_string(), now - 90000, now - 60 - i],
+                )?;
+            }
+            for (id, gone) in [
+                ("boundary", Some(now - 86400)),
+                ("older", Some(now - 86401)),
+                ("active", None),
+            ] {
+                tx.execute(
+                    "INSERT INTO opportunities(id,json,created_at,gone_at) VALUES (?1,?2,?3,?4)",
+                    rusqlite::params![id, opp_json(id).to_string(), now - 90000, gone],
+                )?;
+            }
+            tx.commit()
+        })
+        .await
+        .unwrap();
+    let list: Vec<Opportunity> = s
+        .get("/api/opportunities")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        list.len(),
+        66,
+        "nenhuma das 65 perdidas do dia pode ser escondida por um limite de 50"
+    );
+    assert!(list.iter().all(|o| o.id != "boundary" && o.id != "older"));
+    assert!(
+        list.iter()
+            .filter(|o| o.gone_at.is_some())
+            .all(|o| o.gone_reason == Some(super::api::GoneReason::Rejected))
+    );
+}
+
+#[tokio::test]
 async fn sse_delivers_published_event() {
     let s = start().await;
     let mut r = s.get("/api/events").send().await.unwrap();
@@ -406,7 +457,15 @@ async fn sse_delivers_published_event() {
         let tx = s.app.events.clone();
         tokio::spawn(async move {
             loop {
-                if tx.send(Event::Gone { id: "42".into() }).unwrap_or(0) > 0 {
+                if tx
+                    .send(Event::Gone {
+                        id: "42".into(),
+                        at: 123,
+                        reason: super::api::GoneReason::Unavailable,
+                    })
+                    .unwrap_or(0)
+                    > 0
+                {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -420,7 +479,9 @@ async fn sse_delivers_published_event() {
         .unwrap();
     let text = String::from_utf8(chunk.to_vec()).unwrap();
     assert!(
-        text.contains("event: gone") && text.contains(r#"{"id":"42"}"#),
+        text.contains("event: gone")
+            && text.contains(r#""id":"42""#)
+            && text.contains(r#""reason":"unavailable""#),
         "{text}"
     );
     publisher.await.unwrap();
@@ -435,7 +496,11 @@ async fn sse_closes_when_client_lags() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     for i in 0..1000 {
-        let _ = s.app.events.send(Event::Gone { id: i.to_string() });
+        let _ = s.app.events.send(Event::Gone {
+            id: i.to_string(),
+            at: 123,
+            reason: super::api::GoneReason::Unavailable,
+        });
     }
     let end = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while r.chunk().await.ok().flatten().is_some() {}

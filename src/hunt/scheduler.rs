@@ -50,6 +50,8 @@ const DRY_REASON_SECS: i64 = 3 * 3600;
 const MIN_SCALE: f64 = 1.0;
 /// Grava as notas alteradas a cada tanto.
 const SAVE_EVERY_SECS: i64 = 30;
+/// Um raro pode sumir em poucos minutos: acompanhamento confere a seed achada, sem girar as outras faixas.
+const ACTIVE_RECHECK_SECS: i64 = 60;
 
 /// Modo de busca de um braço.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -547,6 +549,9 @@ impl Queue {
         else {
             return task;
         };
+        if task.seeds.len() == 1 && e.task.seeds.len() > 1 {
+            return task;
+        }
         let range = task.seeds[e.cursor % task.seeds.len()];
         e.cursor = e.cursor.wrapping_add(1);
         self.cursors.insert(task.id.clone(), e.cursor);
@@ -642,12 +647,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     }
     let (may_discover, empty, urgent) = {
         let s = h.lock();
-        let urgent = s.active.values().any(|a| {
-            s.queue
-                .stats
-                .get(&a.task)
-                .is_none_or(|st| h.now() - st.last_at >= 600)
-        });
+        let urgent = overdue_task(&s, h.now(), listings_blocked).is_some();
         (s.queue.may_discover(), s.queue.len() == 0, urgent)
     };
     // a descoberta lê busca e histórico (os dois baldes)
@@ -716,19 +716,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             s.queue.cursors.clone(),
         );
         // Conferir ativo atrasado tem preferência sobre qualquer teste; usa a mesma vaga do laço.
-        let overdue = s
-            .queue
-            .tasks()
-            .into_iter()
-            .filter(|t| !listings_blocked || !t.rare())
-            .filter(|t| s.active.values().any(|a| a.task == t.id))
-            .filter(|t| {
-                s.queue
-                    .stats
-                    .get(&t.id)
-                    .is_none_or(|st| h.now() - st.last_at >= 600)
-            })
-            .min_by_key(|t| s.queue.stats.get(&t.id).map_or(0, |st| st.last_at));
+        let overdue = overdue_task(&s, now, listings_blocked);
         if let Some(task) = overdue {
             s.queue.record_scan(&task.id, now);
             s.queue.last_exploring = false;
@@ -794,6 +782,31 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         tracing::warn!("visita exploratória não gravada: {e:#}");
     }
     Tick::Watched(task.id)
+}
+
+pub(super) fn overdue_task(s: &super::Shared, now: i64, listings_blocked: bool) -> Option<Task> {
+    s.active
+        .values()
+        .filter_map(|a| {
+            let checked = a.opp.checked_at.unwrap_or(a.opp.seen_at);
+            let entry = s.queue.entries.get(&a.task)?;
+            (now - checked.max(a.attempted_at) >= ACTIVE_RECHECK_SECS
+                && (!listings_blocked || !entry.task.rare()))
+            .then_some((checked, a, &entry.task))
+        })
+        .min_by_key(|(checked, a, _)| (*checked, &a.opp.id))
+        .map(|(_, a, t)| {
+            let mut task = t.clone();
+            if let Some(seed) = a.opp.seed
+                && let Some(range) = t
+                    .seeds
+                    .iter()
+                    .find(|(lo, hi)| (i64::from(*lo)..=i64::from(*hi)).contains(&seed))
+            {
+                task.seeds = vec![*range];
+            }
+            task
+        })
 }
 
 fn decision(h: &Hunt, source: &str, target: &str) -> crate::research::Decision {
@@ -1047,6 +1060,22 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             };
             if same_query(task, &focused) {
                 targets.push(s.queue.focus(other));
+            }
+        }
+    }
+    {
+        let mut s = h.lock();
+        for a in s
+            .active
+            .values_mut()
+            .filter(|a| targets.iter().any(|t| t.id == a.task))
+        {
+            if task.seeds.first().is_none_or(|&(lo, hi)| {
+                a.opp
+                    .seed
+                    .is_some_and(|seed| (i64::from(lo)..=i64::from(hi)).contains(&seed))
+            }) {
+                a.attempted_at = h.now();
             }
         }
     }

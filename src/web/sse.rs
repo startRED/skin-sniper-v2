@@ -12,9 +12,9 @@ use tokio_stream::wrappers::BroadcastStream;
 fn to_sse(ev: Event) -> Option<sse::Event> {
     let (name, data) = match ev {
         Event::Opportunity(o) => ("opportunity", serde_json::to_string(&o)),
-        Event::Gone { id } => (
+        Event::Gone { id, at, reason } => (
             "gone",
-            serde_json::to_string(&serde_json::json!({ "id": id })),
+            serde_json::to_string(&serde_json::json!({ "id": id, "at": at, "reason": reason })),
         ),
         Event::State(s) => ("state", serde_json::to_string(&s)),
         Event::Purchase(p) => ("purchase", serde_json::to_string(&p)),

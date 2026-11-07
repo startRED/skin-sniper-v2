@@ -92,7 +92,7 @@
         <OppTable />
       {/if}
       {#if lostCount > 0}
-        <h3 class="lost">Perdidas nas últimas 24 h <span class="muted">· {lostCount} · saíram da lista; ficam aqui só para você ver o que escapou</span></h3>
+        <h3 class="lost">Perdidas nas últimas 24 h <span class="muted">· {lostCount} · ficam por 24 h após sair; o motivo aparece em cada skin</span></h3>
         <OppTable lost />
       {/if}
       <Watch collapsed={count > 0} />

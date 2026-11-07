@@ -171,6 +171,7 @@ async fn active_task_survives_control_even_when_all_slots_are_protected() {
                 Active {
                     opp: opp(&task.id),
                     task: task.id.clone(),
+                    attempted_at: 0,
                 },
             );
         }
