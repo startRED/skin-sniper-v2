@@ -18,7 +18,7 @@ const MIN_GAP: Duration = Duration::from_millis(1200);
 /// Sem `x-ratelimit-reset` num 429, espera 60 s.
 const DEFAULT_PAUSE: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CsfloatSale {
     /// Preço pago, em centavos de USD.
     pub price_usd_cents: i64,
@@ -51,6 +51,7 @@ struct State {
     rl: RateLimit,
     blocked_until: Option<i64>,
     next_at: Instant,
+    last_result: Option<(bool, String)>,
 }
 
 pub struct CsfloatClient {
@@ -84,6 +85,7 @@ impl CsfloatClient {
                 rl: RateLimit::default(),
                 blocked_until: None,
                 next_at: Instant::now(),
+                last_result: None,
             }),
         })
     }
@@ -94,9 +96,18 @@ impl CsfloatClient {
 
     /// Troca a chave em tempo de execução (`None` volta ao modo anônimo).
     pub fn set_key(&self, key: Option<String>) {
-        self.state.lock().unwrap().key = key
+        let key = key
             .filter(|k| !k.trim().is_empty())
             .map(|k| k.trim().to_string());
+        let mut s = self.state.lock().unwrap();
+        if s.key != key {
+            s.last_result = None;
+            s.key = key;
+        }
+    }
+
+    pub fn status(&self) -> Option<(bool, String)> {
+        self.state.lock().unwrap().last_result.clone()
     }
 
     pub fn rate_limit(&self) -> RateLimit {
@@ -135,18 +146,45 @@ impl CsfloatClient {
             self.base,
             path_escape(market_hash_name)
         ));
-        if let Some(k) = self.state.lock().unwrap().key.clone() {
+        let key = self.state.lock().unwrap().key.clone();
+        if let Some(k) = &key {
             req = req.header("Authorization", k);
         }
         let request = req
             .build()
             .map_err(|e| Error::Transport(e.without_url().to_string()))?;
         let db = self.research_db.lock().unwrap().clone();
-        if let Some(db) = db {
-            crate::research::record_external(db)
-                .await
-                .map_err(|e| Error::Transport(format!("registro de pesquisa: {e:#}")))?;
+        let attempt = if let Some(db) = db {
+            Some(
+                crate::research::record_external(db)
+                    .await
+                    .map_err(|e| Error::Transport(format!("registro de pesquisa: {e:#}")))?,
+            )
+        } else {
+            None
+        };
+        let result = self.read_sales(request).await;
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(Error::RateLimited { .. }) => "rate_limited",
+            Err(Error::Transport(_)) => "network_error",
+            Err(_) => "error",
+        };
+        crate::research::finish(attempt, outcome).await;
+        let mut s = self.state.lock().unwrap();
+        if s.key == key {
+            s.last_result = Some(match &result {
+                Ok(v) => (
+                    true,
+                    format!("vendas consultadas: {} na última resposta", v.len()),
+                ),
+                Err(e) => (false, e.to_string()),
+            });
         }
+        result
+    }
+
+    async fn read_sales(&self, request: reqwest::Request) -> Result<Vec<CsfloatSale>> {
         let resp = self
             .http
             .execute(request)
@@ -347,6 +385,70 @@ mod tests {
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn old_key_response_does_not_validate_a_new_key() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (s, r) = (started.clone(), release.clone());
+        let base = serve(Router::new().fallback(get(move || {
+            let (s, r) = (s.clone(), r.clone());
+            async move {
+                s.notify_one();
+                r.notified().await;
+                "[]"
+            }
+        })))
+        .await;
+        let c = std::sync::Arc::new(CsfloatClient::with_base(&base).unwrap());
+        c.set_key(Some("old-test-key".into()));
+        let client = c.clone();
+        let pending = tokio::spawn(async move { client.sales("sample").await });
+        started.notified().await;
+        c.set_key(Some("new-test-key".into()));
+        release.notify_one();
+        pending.await.unwrap().unwrap();
+        assert!(c.status().is_none(), "a resposta pertence à chave enviada");
+    }
+
+    #[tokio::test]
+    async fn research_records_completed_outcomes_and_health_for_the_current_key() {
+        let base = serve(Router::new().route(
+            "/history/{name}/sales",
+            get(
+                |axum::extract::Path(name): axum::extract::Path<String>| async move {
+                    match name.as_str() {
+                        "limited" => (Ax::TOO_MANY_REQUESTS, "[]"),
+                        "refused" => (Ax::FORBIDDEN, "[]"),
+                        _ => (Ax::OK, "[]"),
+                    }
+                },
+            ),
+        ))
+        .await;
+        let (db, _dir) = crate::db::temp_db();
+        for (name, ok) in [("ok", true), ("refused", false), ("limited", false)] {
+            let c = CsfloatClient::with_base(&base).unwrap();
+            c.set_key(Some("test-key".into()));
+            c.set_research_db(db.clone());
+            assert_eq!(c.sales(name).await.is_ok(), ok);
+            assert_eq!(c.status().unwrap().0, ok);
+            c.set_key(Some("new-test-key".into()));
+            assert!(
+                c.status().is_none(),
+                "não reaproveita a saúde da chave anterior"
+            );
+        }
+        let outcomes: Vec<String> = db
+            .call(|c| {
+                c.prepare("SELECT outcome FROM research_attempts ORDER BY id")?
+                    .query_map([], |r| r.get(0))?
+                    .collect()
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcomes, ["ok", "error", "rate_limited"]);
     }
 
     #[tokio::test]

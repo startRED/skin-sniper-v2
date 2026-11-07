@@ -73,7 +73,7 @@ pub struct Sell {
     pub high: Tier,
     pub mid: Tier,
     pub quick: Tier,
-    /// Fator das vendas reais já aplicado a estes preços (1 = nenhum); a calibração compara sem ele.
+    /// Fator já aplicado (1 = nenhum); usado no ajuste relativo, não no erro da previsão exibida.
     #[serde(default = "one")]
     pub correction: f64,
 }

@@ -775,6 +775,35 @@ async fn measure_ratio_sample(
     Ok(())
 }
 
+/// Renova primeiro o histórico dos comuns vigiados, inclusive durante uma pausa das actions.
+pub(crate) async fn refresh_watched_history(h: &Hunt) -> Result<bool> {
+    let now = h.now();
+    let names: HashSet<String> = {
+        let s = h.lock();
+        s.queue
+            .tasks()
+            .into_iter()
+            .filter(|t| !t.rare() && s.queue.external.as_ref() != Some(&t.id))
+            .filter(|t| {
+                s.history_retry_after
+                    .get(&t.name)
+                    .is_none_or(|until| *until <= now)
+            })
+            .map(|t| t.name)
+            .collect()
+    };
+    let task = load_items(&h.db)
+        .await?
+        .into_iter()
+        .filter(|i| {
+            names.contains(&i.name) && i.history_at.is_none_or(|at| now - at >= HISTORY_TTL - 300)
+        })
+        .min_by_key(|i| (i.history_at, i.name.clone()));
+    let Some(task) = task else { return Ok(false) };
+    detect::fetch_and_store_history(h, &task.name).await?;
+    Ok(true)
+}
+
 async fn history_candidates(
     h: &Hunt,
     now: i64,

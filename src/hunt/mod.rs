@@ -241,6 +241,7 @@ impl Hunt {
         self.refresh_correction().await?;
         scheduler::load_pace(self).await?;
         patterns::load(self).await?;
+        patterns::load_cache(self).await?;
         explore::load(self).await?;
         {
             let mut s = self.lock();
@@ -313,7 +314,13 @@ impl Hunt {
     // o painel usa o mesmo prazo (`bookLane` em store.svelte.ts)
     pub fn state(&self) -> State {
         let stats = self.steam.stats();
+        let csfloat_status = self.csfloat.status();
         let s = self.lock();
+        let mut keys = s.keys.clone();
+        if let Some((ok, detail)) = csfloat_status {
+            keys.csfloat.ok = Some(ok);
+            keys.csfloat.detail = Some(detail);
+        }
         let paused = stats.paused_until;
         // anúncios barrados, mas o livro respondeu há pouco: a caça segue por ele
         let by_book = stats
@@ -339,7 +346,7 @@ impl Hunt {
                 },
             },
             combo: s.combo.clone(),
-            keys: s.keys.clone(),
+            keys,
         }
     }
 

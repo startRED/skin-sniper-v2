@@ -295,6 +295,87 @@ async fn buy_needs_confirmation_then_completes_in_background() {
 }
 
 #[tokio::test]
+async fn pending_purchase_still_blocks_another_post_after_restart() {
+    let (base, f) = serve(vec![(500, "oops".into())]).await;
+    let (rt, _, _dir) = runtime(&base);
+    insert_opportunity(&rt).await;
+    set_cookie(&rt).await;
+    assert_eq!(
+        rt.buy(ID).await.ok().unwrap().status,
+        PurchaseStatus::Pending
+    );
+    let restarted = Runtime::new(
+        rt.db.clone(),
+        rt.settings.clone(),
+        rt.events.clone(),
+        rt.hunt.clone(),
+        rt.steam.clone(),
+        rt.csfloat.clone(),
+        rt.telegram.clone(),
+    );
+    let p = restarted.buy(ID).await.ok().unwrap();
+    assert_eq!(p.status, PurchaseStatus::Pending);
+    assert_eq!(p.message.as_deref(), Some(UNCERTAIN));
+    assert_eq!(
+        restarted.buy("another").await.err().unwrap().0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(*f.buys.lock().unwrap(), 1);
+    rt.db
+        .call(|c| {
+            c.execute(
+                "INSERT INTO opportunities(id,json,created_at,listing_json)
+            SELECT 'another',json_set(json,'$.id','another'),created_at,
+                json_set(listing_json,'$.listing_id','another') FROM opportunities WHERE id=?1",
+                [ID],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.buy("another").await.ok().unwrap().status,
+        PurchaseStatus::Pending
+    );
+    assert_eq!(
+        *f.buys.lock().unwrap(),
+        2,
+        "outro anúncio válido continua chegando ao transporte"
+    );
+}
+
+#[tokio::test]
+async fn confirmation_continues_even_if_the_second_local_save_fails() {
+    let (base, f) = serve(vec![
+        (
+            200,
+            fixture("steam_buy_need_confirmation_documented_form.json"),
+        ),
+        (200, fixture("steam_buy_success_documented_form.json")),
+    ])
+    .await;
+    let (rt, mut rx, _dir) = runtime(&base);
+    insert_opportunity(&rt).await;
+    set_cookie(&rt).await;
+    rt.db.call(|c| c.execute_batch("CREATE TRIGGER fail_update BEFORE UPDATE ON purchases BEGIN SELECT RAISE(ABORT,'test'); END;")).await.unwrap();
+    let p = rt.buy(ID).await.ok().unwrap();
+    assert_eq!(p.status, PurchaseStatus::NeedConfirmation);
+    assert!(p.message.unwrap().contains("registro local falhou"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Event::Purchase(p) = rx.recv().await.unwrap()
+                && p.status == PurchaseStatus::Bought
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*f.buys.lock().unwrap(), 2);
+}
+
+#[tokio::test]
 async fn uncertain_purchase_says_so_and_is_not_repeated() {
     let (base, f) = serve(vec![(500, "oops".into())]).await;
     let (rt, _rx, _d) = runtime(&base);

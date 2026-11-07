@@ -452,6 +452,86 @@ async fn public_legacy_reserves_the_next_slot_ahead_of_books_and_rechecks_pause(
 }
 
 #[tokio::test]
+async fn authenticated_history_pause_does_not_hold_the_public_hunt_loop() {
+    let base = serve(Router::new().fallback(get(|headers: AxHeaders| async move {
+        assert!(headers.contains_key("x-test-alt"));
+        include_str!("../../testdata/steam_legacy_render_moonrise_2026-11.json")
+    })))
+    .await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-test-alt", HeaderValue::from_static("yes"));
+    let c = fast(&base)
+        .with_public_alt_for_test(http_builder().default_headers(headers).build().unwrap());
+    c.set_cookie(Some(Cookie {
+        steam_login_secure: "local-test".into(),
+        sessionid: None,
+    }));
+    {
+        let mut s = c.inner.lock().unwrap();
+        s.limiter.on_429(Instant::now(), None);
+        s.side.on_429(Instant::now(), None);
+    }
+    assert!(c.main_blocked(Endpoint::Legacy));
+    assert!(
+        !c.blocked(Endpoint::Legacy),
+        "anúncios públicos ainda podem usar a extra"
+    );
+    let (db, _dir) = crate::db::temp_db();
+    db.call(|c| {
+        c.execute("INSERT INTO items(name,updated_at) VALUES (?1,0)", [NAME])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (events, _) = tokio::sync::broadcast::channel(64);
+    let h = crate::hunt::Hunt::new(crate::hunt::HuntDeps {
+        db: db.clone(),
+        settings: crate::settings::SettingsStore::new(db.clone()),
+        steam: Arc::new(c),
+        csfloat: Arc::new(crate::csfloat::CsfloatClient::with_base(&base).unwrap()),
+        events,
+        telegram: None,
+    });
+    h.set_saldo(3608, crate::web::api::SaldoSource::Manual);
+    {
+        let mut s = h.lock();
+        s.queue.set_tasks(vec![crate::hunt::scheduler::Task {
+            id: format!("d:{NAME}"),
+            name: NAME.into(),
+            code: CODE.into(),
+            wear: Some(2),
+            seeds: vec![],
+            float: None,
+            score: 1.0,
+        }]);
+        for _ in 0..4 {
+            s.queue.next(crate::db::now_unix());
+        }
+    }
+    let tick = tokio::time::timeout(Duration::from_secs(2), crate::hunt::scheduler::tick(&h))
+        .await
+        .unwrap();
+    assert_eq!(
+        tick,
+        crate::hunt::scheduler::Tick::Watched(format!("d:{NAME}"))
+    );
+    let discovery: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM research_decisions WHERE source='descoberta'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        discovery, 0,
+        "uma saída pública livre não libera o histórico autenticado"
+    );
+}
+
+#[tokio::test]
 async fn public_alt_only_legacy_stops_on_429_and_pause() {
     let alt_hits = Arc::new(AtomicUsize::new(0));
     let main_hits = Arc::new(AtomicUsize::new(0));

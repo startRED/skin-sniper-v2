@@ -436,9 +436,9 @@ pub fn parse_response(status: u16, body: &[u8]) -> BuyOutcome {
         {
             return match confirmation_id(v) {
                 Some(id) => BuyOutcome::NeedConfirmation { id },
-                None => failed(
-                    "A Steam pediu confirmação, mas não mandou o código. Confirme no app da Steam e tente de novo.",
-                ),
+                None => BuyOutcome::Uncertain {
+                    message: "A Steam pediu confirmação sem mandar o código. Confira o app, o inventário e o saldo antes de tentar de novo.".into(),
+                },
             };
         }
         if status == 200 && v.pointer("/wallet_info/success").and_then(Value::as_i64) == Some(1) {
@@ -639,6 +639,18 @@ mod tests {
     }
 
     #[test]
+    fn missing_confirmation_code_is_uncertain_not_a_definitive_failure() {
+        assert!(matches!(
+            parse_response(200, br#"{"need_confirmation":true}"#),
+            BuyOutcome::Uncertain { .. }
+        ));
+        assert!(matches!(
+            parse_response(200, br#"{"success":22}"#),
+            BuyOutcome::Uncertain { .. }
+        ));
+    }
+
+    #[test]
     fn success_returns_new_balance() {
         let out = parse_response(200, &doc("steam_buy_success_documented_form.json"));
         assert_eq!(
@@ -669,7 +681,7 @@ mod tests {
         let no_id = br#"{"success":22,"need_confirmation":true}"#;
         assert!(matches!(
             parse_response(200, no_id),
-            BuyOutcome::Failed { .. }
+            BuyOutcome::Uncertain { .. }
         ));
     }
 

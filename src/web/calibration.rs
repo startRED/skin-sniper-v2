@@ -104,6 +104,7 @@ pub(crate) struct Sale {
     name: String,
     kind: Kind,
     predicted: i64,
+    correction: f64,
     sold: i64,
 }
 
@@ -120,14 +121,12 @@ fn load_sales(c: &rusqlite::Connection) -> rusqlite::Result<Vec<Sale>> {
                     .and_then(|j| serde_json::from_str::<Opportunity>(&j).ok())
                     .map(|o| o.kind)
             })?;
-            // Compara com a previsão antes do fator: senão vender no preço já descontado anula o desconto.
-            let predicted = (p.sell.mid.price_cents as f64
-                / p.sell.correction.clamp(CORRECTION_FLOOR, 1.0))
-            .round() as i64;
+            let predicted = p.sell.mid.price_cents;
             (predicted > 0 && sold > 0).then_some(Sale {
                 name: p.name,
                 kind,
                 predicted,
+                correction: p.sell.correction.clamp(CORRECTION_FLOOR, 1.0),
                 sold,
             })
         })
@@ -148,7 +147,8 @@ pub(crate) fn correction(sales: &[Sale]) -> [f64; 2] {
             .iter()
             .filter(|s| s.kind == kind)
             .take(CORRECTION_RECENT)
-            .map(|s| (s.sold as f64 / s.predicted as f64, 1.0))
+            // Ajuste relativo ao fator aplicado; o placar usa a previsão realmente mostrada.
+            .map(|s| (s.sold as f64 / s.predicted as f64 * s.correction, 1.0))
             .collect();
         if ratios.len() < CORRECTION_MIN_SALES {
             return 1.0;
@@ -176,6 +176,7 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Calibration>, ApiEr
         kind,
         predicted,
         sold,
+        ..
     } in sales
     {
         let family = [
@@ -244,6 +245,7 @@ mod tests {
             name: "X".into(),
             kind,
             predicted: 1000,
+            correction: 1.0,
             sold,
         };
         let four: Vec<_> = (0..4).map(|_| sale(Kind::Desconto, 500)).collect();
@@ -258,6 +260,15 @@ mod tests {
         assert_eq!(correction(&five)[0], CORRECTION_FLOOR);
         five.iter_mut().for_each(|s| s.sold = 1500);
         assert_eq!(correction(&five)[0], 1.0); // vender acima do previsto não sobe a previsão
+        five.iter_mut().for_each(|s| {
+            s.sold = 1000;
+            s.correction = 0.8;
+        });
+        assert_eq!(
+            correction(&five)[0],
+            0.8,
+            "vender na previsão já descontada não apaga o fator"
+        );
     }
 
     #[test]

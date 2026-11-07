@@ -32,6 +32,18 @@ fn clock() -> i64 {
     NOW
 }
 
+fn boot_tasks(task: Task) -> Vec<Task> {
+    (0..scheduler::BOOT_TASKS)
+        .map(|i| {
+            let mut t = task.clone();
+            if i > 0 {
+                t.id = format!("duplicate:{i}:{}", t.id);
+            }
+            t
+        })
+        .collect()
+}
+
 fn fixture(name: &str) -> Value {
     let p = format!("{}/testdata/{name}", env!("CARGO_MANIFEST_DIR"));
     serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
@@ -101,6 +113,7 @@ struct Bodies {
     book_queries: AtomicUsize,
     /// A leitura de anúncios responde 429 (bloqueio de horas da Steam).
     listings_429: AtomicBool,
+    listings_500: AtomicBool,
     legacy_queries: AtomicUsize,
 }
 
@@ -119,6 +132,7 @@ async fn serve() -> (String, Arc<Bodies>) {
         book: Mutex::new(fixture("steam_orderbook_negev_2026-11.json")),
         book_queries: AtomicUsize::new(0),
         listings_429: AtomicBool::new(false),
+        listings_500: AtomicBool::new(false),
         legacy_queries: AtomicUsize::new(0),
     });
     async fn actions(
@@ -131,6 +145,9 @@ async fn serve() -> (String, Arc<Bodies>) {
                 b.listing_queries.fetch_add(1, Ordering::Relaxed);
                 if b.listings_429.load(Ordering::Relaxed) {
                     return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+                }
+                if b.listings_500.load(Ordering::Relaxed) {
+                    return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
                 let mut body = b.listings.lock().unwrap().clone();
                 // como a Valve: faixa de seed (propriedade 1) filtra os anúncios
@@ -181,6 +198,23 @@ async fn serve() -> (String, Arc<Bodies>) {
         }
     }
     let app = Router::new()
+        .route(
+            "/fail",
+            get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        )
+        .route(
+            "/market/pricehistory/",
+            get(|AxState(b): AxState<Arc<Bodies>>| async move {
+                (
+                    if b.history_400.load(Ordering::Relaxed) {
+                        axum::http::StatusCode::BAD_REQUEST
+                    } else {
+                        axum::http::StatusCode::OK
+                    },
+                    Json(fixture("steam_legacy_history_moonrise_2026-11.json")),
+                )
+            }),
+        )
         .route("/market/actions", get(actions))
         .route(
             "/market/orderbook",
@@ -271,6 +305,162 @@ fn hunt_against(base: &str, db: Db) -> (Arc<Hunt>, broadcast::Receiver<Event>) {
         clock,
     );
     (h, rx)
+}
+
+#[tokio::test]
+async fn sales_cache_survives_restart_with_its_original_freshness_and_stickers() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against(&base, db.clone());
+    let sales = crate::csfloat::parse_sales(&csfloat_body()).unwrap();
+    assert!(sales.iter().any(|s| s.has_stickers));
+    patterns::cache_sales(&h, MOON, &sales).await;
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO csfloat_cache VALUES ('stale',?1,'[]')",
+            [NOW - catalog::HISTORY_TTL],
+        )?;
+        c.execute(
+            "INSERT INTO csfloat_cache VALUES ('bad',?1,'not json')",
+            [NOW],
+        )?;
+        c.execute(
+            "INSERT INTO csfloat_cache VALUES ('future',?1,'[]')",
+            [NOW + 1],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (restarted, _) = hunt_against(&base, db);
+    patterns::load_cache(&restarted).await.unwrap();
+    let s = restarted.lock();
+    assert_eq!(s.csfloat_cache.len(), 1);
+    assert_eq!(s.csfloat_cache[MOON], (NOW, sales));
+}
+
+#[tokio::test]
+async fn sales_warmup_is_faster_only_while_normal_watched_cache_is_missing() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against(&base, db);
+    h.lock().queue.set_tasks(
+        [MOON, ST_MOON]
+            .into_iter()
+            .map(|name| Task {
+                id: format!("d:{name}"),
+                name: name.into(),
+                code: "G180420B6053004".into(),
+                wear: Some(2),
+                seeds: vec![],
+                float: None,
+                score: 1.0,
+            })
+            .collect(),
+    );
+    h.lock().learn_at = NOW - 15;
+    patterns::maybe_step(&h).await;
+    assert_eq!(bodies.csfloat_names.lock().unwrap().len(), 1);
+    h.lock().learn_at = NOW - 14;
+    patterns::maybe_step(&h).await;
+    assert_eq!(bodies.csfloat_names.lock().unwrap().len(), 1);
+    h.lock().learn_at = NOW - 15;
+    patterns::maybe_step(&h).await;
+    assert_eq!(bodies.csfloat_names.lock().unwrap().len(), 2);
+    h.lock().learn_at = NOW - 15;
+    patterns::maybe_step(&h).await;
+    assert_eq!(bodies.csfloat_names.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn watched_history_renews_through_legacy_during_native_pause() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO items(name,updated_at,history_at) VALUES (?1,?2,?3)",
+            rusqlite::params![MOON, NOW, NOW - catalog::HISTORY_TTL],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    {
+        let mut s = h.lock();
+        s.queue.set_tasks(boot_tasks(Task {
+            id: format!("d:{MOON}"),
+            name: MOON.into(),
+            code: "G180420B6053004".into(),
+            wear: Some(2),
+            seeds: vec![],
+            float: None,
+            score: 1.0,
+        }));
+        for _ in 0..4 {
+            s.queue.next(NOW);
+        }
+    }
+    bodies.listings_429.store(true, Ordering::Relaxed);
+    assert!(
+        h.steam
+            .action(
+                crate::steam::client::Endpoint::Listings,
+                "QueryListingsForItem",
+                &json!([])
+            )
+            .await
+            .is_err()
+    );
+    h.steam.set_cookie(Some(crate::steam::client::Cookie {
+        steam_login_secure: "local-test".into(),
+        sessionid: None,
+    }));
+    assert_eq!(tick(&h).await, Tick::Discovery);
+    let at: i64 = db
+        .call(|c| {
+            c.query_row("SELECT history_at FROM items WHERE name=?1", [MOON], |r| {
+                r.get(0)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(at, NOW);
+    assert_eq!(
+        bodies.history_queries.load(Ordering::Relaxed),
+        0,
+        "native continua em pausa"
+    );
+    assert!(
+        !catalog::refresh_watched_history(&h).await.unwrap(),
+        "não repete histórico fresco"
+    );
+    let mut task = h.lock().queue.tasks().pop().unwrap();
+    task.id = format!("d:{ST_MOON}");
+    task.name = ST_MOON.into();
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO items(name,updated_at) VALUES (?1,?2)",
+            rusqlite::params![ST_MOON, NOW],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    {
+        let mut s = h.lock();
+        s.queue.set_tasks(boot_tasks(task));
+        for _ in 0..4 {
+            s.queue.next(NOW);
+        }
+    }
+    bodies.history_400.store(true, Ordering::Relaxed);
+    assert_eq!(tick(&h).await, Tick::Discovery);
+    assert!(
+        !h.lock().queue.may_discover(),
+        "histórico enviado com erro também gasta o crédito"
+    );
 }
 
 #[tokio::test]
@@ -782,6 +972,63 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_T1));
+}
+
+#[tokio::test]
+async fn grouped_search_credit_requires_a_page_transport_even_if_that_page_fails() {
+    for blocked in [true, false] {
+        let (base, bodies) = serve().await;
+        let (db, _dir) = temp_db();
+        let (h, mut rx) = hunt_against(&base, db.clone());
+        h.set_saldo(3608, SaldoSource::Manual);
+        run_until_two(&h, &mut rx).await;
+        let mut task = h
+            .lock()
+            .queue
+            .tasks()
+            .into_iter()
+            .find(|t| t.id == format!("d:{MOON}"))
+            .unwrap();
+        task.code = "G180420B6053004".into();
+        {
+            let mut s = h.lock();
+            s.queue.set_tasks(boot_tasks(task.clone()));
+            s.active.clear();
+            for _ in 0..4 {
+                s.queue.spend_discovery();
+            }
+        }
+        if blocked {
+            for endpoint in [
+                crate::steam::client::Endpoint::Listings,
+                crate::steam::client::Endpoint::Legacy,
+            ] {
+                for _ in 0..3 {
+                    assert!(h.steam.get_json(endpoint, "/fail", &[]).await.is_err());
+                }
+            }
+        } else {
+            bodies.listings_500.store(true, Ordering::Relaxed);
+        }
+        for _ in 0..4 {
+            let decision = crate::research::Decision {
+                source: "normal".into(),
+                policy: "test".into(),
+                target: task.id.clone(),
+                scale: 0.03,
+                block_id: None,
+            };
+            let _ =
+                crate::research::scope(db.clone(), decision, scheduler::run_task(&h, &task)).await;
+        }
+        assert_eq!(
+            h.lock().queue.may_discover(),
+            !blocked,
+            "busca sem página não ganha crédito extra; página enviada com erro ganha"
+        );
+        let sent:i64=db.call(|c|c.query_row("SELECT count(*) FROM research_attempts WHERE source='normal' AND endpoint IN ('listings','legacy') AND outcome!='not_sent' AND decision_id IN (SELECT id FROM research_decisions WHERE policy='test')",[],|r|r.get(0))).await.unwrap();
+        assert_eq!(sent > 0, !blocked);
+    }
 }
 
 #[tokio::test]

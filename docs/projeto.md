@@ -168,6 +168,10 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 1. **Descoberta (1×/dia e quando o saldo muda muito):** `search/render` ordenado por popularidade nas
    categorias de arma, sem faca/luva, até cobrir os itens com piso ≤ saldo. Para cada candidato,
    `QueryPriceHistory` (cache 6 h) dá vendas/dia e dispersão.
+   A mesma parcela de consultas renova primeiro os históricos dos comuns vigiados nos 5 min antes de vencer.
+   Durante uma pausa das actions, usa o histórico antigo autenticado somente se a rota principal estiver
+   disponível; a saída pública não libera essa leitura. Erro enviado também gasta crédito; sem envio,
+   a agenda segue para a caça normal. A candidata externa continua fora dessa prioridade.
 2. **Seleção:** vigia itens com piso entre o mínimo viável e o saldo e ≥ 1 venda/dia. Nota = vendas/dia
    (até 10: quem compra uma unidade não ganha com giro maior) × lucro possível em reais × fator aprendido do alvo (abaixo). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
@@ -384,8 +388,11 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   06/11 apareceram seeds caros fora delas (MP7 Amberline 890 a 5–10×, M4A4 Etch Lord 158 a 18×). Um coletor lê as
   vendas do CSFloat de uma skin do catálogo a cada 2 min (a de mais vendas/dia com piso ≤ saldo, ≥ 5 vendas/dia, cada
   skin no máximo 1×/24 h; não gasta consulta da Steam). A mesma vaga prioriza nomes vigiados da política normal
-  cujo cache de vendas falta ou venceu (6 h), sem aumentar o ritmo; falhas desses nomes esperam 10 min. Esses
-  prazos são hipóteses e a candidata externa continua fora dessa prioridade. Com ≥ 10 vendas limpas, guarda em
+  cujo cache de vendas falta ou venceu (6 h). O aquecimento desses nomes usa intervalo de 15 s enquanto a
+  última consulta não falhou; fora dele, mantém 2 min. A cota e a pausa do CSFloat continuam obrigatórias;
+  falhas por nome esperam 10 min. O cache completo persiste no banco com a hora real da busca e só volta após
+  reinício enquanto tiver menos de 6 h; dados corrompidos ou com data futura são ignorados. Esses prazos são
+  hipóteses e a candidata externa continua fora dessa prioridade. Com ≥ 10 vendas limpas, guarda em
   `learned_sales` cada venda sem adesivo, fora de tabela e float de elite, que saiu entre 2× e o teto do múltiplo
   raro sobre a mediana da skin.
   Com 3 vendas assim do mesmo seed (somando desgastes e StatTrak, últimos 60 dias) o seed vira grupo
@@ -442,6 +449,9 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
 ## Compra
 
 - Clique em "Comprar" vira "Confirmar R$ X" por 4 s (evita clique acidental); segundo clique compra.
+- Pedido pendente do mesmo anúncio é recuperado do banco após reinício, sem repetir o POST. Resultado
+  incerto continua exigindo conferência na Steam; o painel não reconcilia automaticamente essa pendência.
+  Confirmação sem código permanece incerta, e uma falha ao gravar a confirmação não interrompe o acompanhamento.
 - `buylisting` com os campos de `pesquisa-web.md` 3.1. Se vier `need_confirmation`, o estado vira
   "confirme no app Steam" e o servidor reenvia com o id a cada 2 s por até 60 s.
 - Uma compra por vez. Recusa se o total passar do saldo. Saldo atualiza pelo `wallet_info` da resposta.

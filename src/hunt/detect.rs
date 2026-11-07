@@ -295,23 +295,10 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
             }
             let (at, v) = match h.csfloat.sales(name).await {
                 Ok(v) => {
-                    h.set_keys(|k| {
-                        if k.csfloat.set {
-                            k.csfloat.ok = Some(true);
-                            k.csfloat.detail = None;
-                        }
-                    });
+                    super::patterns::cache_sales(h, name, &v).await;
                     (now, v)
                 }
                 Err(e) => {
-                    if let SteamError::Csfloat { status: 401 | 403 } = e {
-                        h.set_keys(|k| {
-                            if k.csfloat.set {
-                                k.csfloat.ok = Some(false);
-                                k.csfloat.detail = Some("chave recusada pelo CSFloat".into());
-                            }
-                        });
-                    }
                     tracing::warn!("CSFloat indisponível para {name}: {e}");
                     // tenta de novo em ~10 min, sem martelar
                     (now - HISTORY_TTL + 600, vec![])
@@ -320,7 +307,6 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
             h.lock()
                 .csfloat_cache
                 .insert(name.to_string(), (at, v.clone()));
-            super::teacher::store_csfloat(h, name, &v).await;
             v
         }
     };
