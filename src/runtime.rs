@@ -127,6 +127,7 @@ impl Runtime {
                     steam_login_secure: c,
                     sessionid: None,
                 }));
+                self.hunt.lock().history_retry_after.clear();
                 *self.wallet.lock().unwrap() = None;
                 let set = cookie.is_some();
                 self.hunt.set_keys(|k| {

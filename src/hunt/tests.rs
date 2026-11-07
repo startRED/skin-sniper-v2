@@ -88,9 +88,14 @@ fn csfloat_body() -> Value {
 struct Bodies {
     listings: Mutex<Value>,
     history: Value,
+    history_queries: AtomicUsize,
+    history_400: AtomicBool,
+    history_wait: Mutex<Option<Arc<Notify>>>,
+    history_started: Notify,
     search: Mutex<Value>,
     listing_queries: AtomicUsize,
     csfloat: Value,
+    csfloat_names: Mutex<Vec<String>>,
     /// Livro de ofertas (captura real do Negev; o menor anúncio é trocado pelos testes).
     book: Mutex<Value>,
     book_queries: AtomicUsize,
@@ -103,9 +108,14 @@ async fn serve() -> (String, Arc<Bodies>) {
     let b = Arc::new(Bodies {
         listings: Mutex::new(listings_body()),
         history: history_body(),
+        history_queries: AtomicUsize::new(0),
+        history_400: AtomicBool::new(false),
+        history_wait: Mutex::new(None),
+        history_started: Notify::new(),
         search: Mutex::new(search_body()),
         listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
+        csfloat_names: Mutex::new(vec![]),
         book: Mutex::new(fixture("steam_orderbook_negev_2026-11.json")),
         book_queries: AtomicUsize::new(0),
         listings_429: AtomicBool::new(false),
@@ -154,7 +164,19 @@ async fn serve() -> (String, Arc<Bodies>) {
                 }
                 Json(body).into_response()
             }
-            Some("QueryPriceHistory") => Json(b.history.clone()).into_response(),
+            Some("QueryPriceHistory") => {
+                b.history_queries.fetch_add(1, Ordering::Relaxed);
+                let wait = b.history_wait.lock().unwrap().clone();
+                if let Some(wait) = wait {
+                    b.history_started.notify_one();
+                    wait.notified().await;
+                }
+                if b.history_400.load(Ordering::Relaxed) {
+                    axum::http::StatusCode::BAD_REQUEST.into_response()
+                } else {
+                    Json(b.history.clone()).into_response()
+                }
+            }
             other => panic!("consulta inesperada: {other:?}"),
         }
     }
@@ -220,7 +242,8 @@ async fn serve() -> (String, Arc<Bodies>) {
         .route(
             "/history/{name}/sales",
             get(
-                |AxState(b): AxState<Arc<Bodies>>, Path(_n): Path<String>| async move {
+                |AxState(b): AxState<Arc<Bodies>>, Path(n): Path<String>| async move {
+                    b.csfloat_names.lock().unwrap().push(n);
                     Json(b.csfloat.clone())
                 },
             ),
@@ -248,6 +271,151 @@ fn hunt_against(base: &str, db: Db) -> (Arc<Hunt>, broadcast::Receiver<Event>) {
         clock,
     );
     (h, rx)
+}
+
+#[tokio::test]
+async fn refused_history_waits_per_name_then_recovers_without_faking_freshness() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    bodies.history_400.store(true, Ordering::Relaxed);
+    for _ in 0..3 {
+        assert!(points_for(&h, MOON, NOW).await.is_err());
+    }
+    assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 1);
+    assert!(points_for(&h, ST_MOON, NOW).await.is_err());
+    assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 2);
+    let rows: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM items WHERE history_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "falha não pode virar histórico recente");
+
+    bodies.history_400.store(false, Ordering::Relaxed);
+    h.lock().history_retry_after.insert(MOON.into(), NOW);
+    assert!(!points_for(&h, MOON, NOW).await.unwrap().is_empty());
+    assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 3);
+    assert!(!h.lock().history_retry_after.contains_key(MOON));
+    assert!(h.lock().history_retry_after.contains_key(ST_MOON));
+    assert!(!points_for(&h, MOON, NOW).await.unwrap().is_empty());
+    assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn sales_collector_warms_watched_cache_before_catalog_without_extra_slots() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    db.call(|c| {
+        for (name, spd, floor) in [(MOON, 1, None), (ST_MOON, 1000, Some(800))] {
+            c.execute(
+                "INSERT INTO items(name,updated_at,floor_cents,sales_per_day) VALUES (?1,?2,?3,?4)",
+                rusqlite::params![name, NOW, floor, spd],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    {
+        let mut s = h.lock();
+        s.learn_at = NOW - 120;
+        s.queue.set_tasks(vec![Task {
+            id: format!("d:{MOON}"),
+            name: MOON.into(),
+            code: "G180420B6053004".into(),
+            wear: Some(2),
+            seeds: vec![],
+            float: None,
+            score: 1.0,
+        }]);
+    }
+    patterns::maybe_step(&h).await;
+    assert_eq!(*bodies.csfloat_names.lock().unwrap(), vec![MOON]);
+    assert!(h.lock().csfloat_cache.contains_key(MOON));
+    patterns::maybe_step(&h).await;
+    assert_eq!(
+        bodies.csfloat_names.lock().unwrap().len(),
+        1,
+        "mantém intervalo de 2 min"
+    );
+
+    h.lock().learn_at = NOW - 120;
+    patterns::maybe_step(&h).await;
+    assert_eq!(*bodies.csfloat_names.lock().unwrap(), vec![MOON, ST_MOON]);
+    {
+        let mut s = h.lock();
+        s.learn_at = NOW - 120;
+        s.csfloat_cache.get_mut(MOON).unwrap().0 = NOW - catalog::HISTORY_TTL;
+        s.learn_seen.insert(MOON.into(), NOW - 599);
+    }
+    patterns::maybe_step(&h).await;
+    assert_eq!(
+        bodies.csfloat_names.lock().unwrap().len(),
+        2,
+        "falha recente espera 10 min"
+    );
+    {
+        let mut s = h.lock();
+        s.learn_at = NOW - 120;
+        s.learn_seen.insert(MOON.into(), NOW - 600);
+    }
+    patterns::maybe_step(&h).await;
+    assert_eq!(
+        *bodies.csfloat_names.lock().unwrap(),
+        vec![MOON, ST_MOON, MOON]
+    );
+    assert_eq!(
+        h.lock().csfloat_cache[MOON].0,
+        NOW,
+        "renova em 6 h, sem esperar 24 h"
+    );
+    {
+        let mut s = h.lock();
+        s.learn_at = NOW - 120;
+        s.learn_seen.clear();
+        s.csfloat_cache.clear();
+        s.queue.external = Some(format!("d:{MOON}"));
+    }
+    patterns::maybe_step(&h).await;
+    assert_eq!(
+        bodies.csfloat_names.lock().unwrap().last().unwrap(),
+        ST_MOON,
+        "candidata externa não ganha aquecimento fora da cota"
+    );
+}
+
+#[tokio::test]
+async fn old_history_failure_cannot_delay_a_new_login() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    let release = Arc::new(Notify::new());
+    *bodies.history_wait.lock().unwrap() = Some(release.clone());
+    bodies.history_400.store(true, Ordering::Relaxed);
+    let pending = {
+        let h = h.clone();
+        tokio::spawn(async move { points_for(&h, MOON, NOW).await })
+    };
+    bodies.history_started.notified().await;
+    h.steam.set_cookie(Some(crate::steam::client::Cookie {
+        steam_login_secure: "new-test-login".into(),
+        sessionid: None,
+    }));
+    h.lock().history_retry_after.clear();
+    release.notify_one();
+    assert!(pending.await.unwrap().is_err());
+    assert!(h.lock().history_retry_after.is_empty());
+    *bodies.history_wait.lock().unwrap() = None;
+    bodies.history_400.store(false, Ordering::Relaxed);
+    assert!(!points_for(&h, MOON, NOW).await.unwrap().is_empty());
+    assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]

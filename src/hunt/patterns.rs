@@ -132,10 +132,28 @@ pub async fn maybe_step(h: &Hunt) {
         Ok(n) => n,
         Err(e) => return tracing::warn!("patterns: catálogo ilegível: {e}"),
     };
-    let Some(name) = names
-        .into_iter()
-        .find(|n| seen.get(n).is_none_or(|at| now - at >= REFETCH))
-    else {
+    let name = {
+        let s = h.lock();
+        // A mesma vaga aquece qualquer nome vigiado, inclusive os de giro baixo/sem piso do catálogo.
+        s.queue
+            .tasks()
+            .into_iter()
+            .filter(|t| s.queue.external.as_ref() != Some(&t.id))
+            .map(|t| t.name)
+            .filter(|n| {
+                seen.get(n).is_none_or(|at| now - at >= 600)
+                    && s.csfloat_cache
+                        .get(n)
+                        .is_none_or(|(at, _)| now - at >= super::catalog::HISTORY_TTL)
+            })
+            .min_by_key(|n| (seen.get(n).copied().unwrap_or(0), n.clone()))
+            .or_else(|| {
+                names
+                    .into_iter()
+                    .find(|n| seen.get(n).is_none_or(|at| now - at >= REFETCH))
+            })
+    };
+    let Some(name) = name else {
         return;
     };
     h.lock().learn_seen.insert(name.clone(), now);

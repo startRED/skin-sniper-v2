@@ -175,7 +175,28 @@ fn is_near(n: &Near) -> bool {
 
 /// Baixa `QueryPriceHistory` do nome e grava em `price_points` e em `items` (vendas/dia, dispersão).
 pub async fn fetch_and_store_history(h: &Hunt, name: &str) -> Result<()> {
-    let pts = history::fetch_history(&h.steam, name).await?;
+    let now = h.now();
+    {
+        let mut s = h.lock();
+        s.history_retry_after.retain(|_, until| *until > now);
+        if s.history_retry_after.contains_key(name) {
+            anyhow::bail!("histórico recusado recentemente; aguardando nova tentativa");
+        }
+    }
+    let cookie = h.steam.cookie();
+    let pts = match history::fetch_history(&h.steam, name).await {
+        Ok(pts) => pts,
+        Err(e) => {
+            let mut s = h.lock();
+            if matches!(e, SteamError::Http { .. } | SteamError::Parse(_))
+                && h.steam.cookie() == cookie
+            {
+                // shortcut: recusa/JSON inválido espera 10 min; calibrar com falhas reais por nome.
+                s.history_retry_after.insert(name.into(), h.now() + 600);
+            }
+            return Err(e.into());
+        }
+    };
     let now = h.now();
     let sell_pts: Vec<PricePoint> = pts.iter().map(to_sell_point).collect();
     let (spd, disp) = window_stats(&sell_pts, now).unwrap_or((0.0, 0.0));

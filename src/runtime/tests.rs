@@ -160,7 +160,12 @@ async fn settings_drive_state_and_balance() {
     let (rt, _rx, _d) = runtime(&base);
     assert_eq!(rt.hunt.state().saldo_source, SaldoSource::None);
 
+    rt.hunt
+        .lock()
+        .history_retry_after
+        .insert(NAME.into(), i64::MAX);
     set_cookie(&rt).await;
+    assert!(rt.hunt.lock().history_retry_after.is_empty());
     let s = rt.hunt.state();
     assert_eq!((s.saldo_cents, s.saldo_source), (3608, SaldoSource::Steam));
     assert_eq!((s.keys.steam.set, s.keys.steam.ok), (true, Some(true)));

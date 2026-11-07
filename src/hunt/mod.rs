@@ -69,6 +69,8 @@ pub(crate) struct Shared {
     pub message: Option<String>,
     /// Vendas do CSFloat por nome: (quando buscou, vendas). Cache de 6 h.
     pub csfloat_cache: HashMap<String, (i64, Vec<CsfloatSale>)>,
+    /// Histórico recusado/inválido: próxima tentativa por nome, sem tratar falha como dado fresco.
+    pub history_retry_after: HashMap<String, i64>,
     /// Consultas seguidas que vieram vazias por tarefa (uma página vazia pode ser transitória).
     pub empty_streak: HashMap<String, u8>,
     pub last_state_pub: i64,
@@ -171,6 +173,7 @@ impl Hunt {
                 },
                 message: Some("caça ainda não começou".into()),
                 csfloat_cache: HashMap::new(),
+                history_retry_after: HashMap::new(),
                 empty_streak: HashMap::new(),
                 last_state_pub: 0,
                 evaluated: HashMap::new(),
