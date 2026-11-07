@@ -249,6 +249,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    na nota do alvo, identificada como `paralela`, sem inflar a cota externa nem se misturar aos blocos do ensaio.
    A referência de alvos comuns conta achados e consultas normais e paralelos; cada anúncio rende crédito uma vez.
 4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas.
+   Busca em pausa por 429 ou suspensa por falhas é dispensada: o alvo segue pelo livro e pelos anúncios disponíveis,
+   mesmo sem a saída do celular. O primeiro 429 da busca também faz essa troca no mesmo passo, respeitando as pausas de cada consulta.
    Alvo comum sem outra versão para a busca cobrir e com teto lê antes o livro de ofertas (menor anúncio em R$, no
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e o menor anúncio novo
    ensina a agenda como um anúncio que não passou. O teto desses dois filtros não conta o menor anúncio do livro como
