@@ -52,13 +52,15 @@ impl Reader {
             return;
         }
         self.recent.retain(|_, at| at.elapsed() < TARGET_GAP);
-        let Some(task) = pick(h, &self.recent) else {
-            return;
-        };
-        if !history_fresh(h, &task.name).await.unwrap_or(false) {
+        let task = loop {
+            let Some(task) = pick(h, &self.recent) else {
+                return;
+            };
+            if history_fresh(h, &task.name).await.unwrap_or(false) {
+                break task;
+            }
             self.recent.insert(task.id, Instant::now());
-            return;
-        }
+        };
         let started_at = h.now();
         let started = Instant::now();
         let revision = h.lock().queue.revision(&task);
@@ -355,6 +357,24 @@ mod tests {
             .default_headers(headers)
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stale_history_does_not_starve_a_fresh_target() {
+        let (base, started, release, _) = fake_server().await;
+        let (h, _db, _dir, fresh) = setup(&base, alt_client()).await;
+        let mut stale = fresh.clone();
+        stale.id = "d:A".into();
+        stale.name = "A".into();
+        h.lock().queue.set_tasks(vec![stale, fresh]);
+        let mut reader = Reader::default();
+        reader.step(&h).await;
+        tokio::time::timeout(Duration::from_secs(2), started)
+            .await
+            .expect("o alvo atualizado deve ser consultado no mesmo ciclo")
+            .unwrap();
+        release.notify_one();
+        reader.pending.take().unwrap().await.unwrap().unwrap();
     }
 
     #[tokio::test]
