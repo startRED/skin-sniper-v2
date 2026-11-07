@@ -11,6 +11,7 @@ pub mod harvest;
 mod learn;
 pub mod ledger;
 pub mod orders;
+mod parallel;
 pub mod patterns;
 pub mod scheduler;
 pub mod teacher;

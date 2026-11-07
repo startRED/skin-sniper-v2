@@ -263,6 +263,28 @@ async fn query_legacy_named(
     code: &str,
     start: u32,
 ) -> Result<ListingsPage> {
+    let (path, q) = legacy_query(name, start);
+    let data = c.legacy_json(&path, &q, false).await?;
+    let page = super::legacy::parse_page(&data, name, code, start)?;
+    c.note_legacy_ok();
+    Ok(page)
+}
+
+/// Consulta apenas a saída pública, sem disputar a vaga da conexão principal.
+pub async fn query_public_alt(
+    c: &SteamClient,
+    name: &str,
+    code: &str,
+) -> Option<Result<ListingsPage>> {
+    let (path, q) = legacy_query(name, 0);
+    Some(
+        c.legacy_json_public_alt(&path, &q)
+            .await?
+            .and_then(|data| super::legacy::parse_page(&data, name, code, 0)),
+    )
+}
+
+fn legacy_query(name: &str, start: u32) -> (String, [(&'static str, String); 6]) {
     let path = format!("/market/listings/730/{}/render/", path_escape(name));
     let q = [
         ("query", String::new()),
@@ -272,10 +294,7 @@ async fn query_legacy_named(
         ("language", "english".into()),
         ("currency", CURRENCY_BRL.to_string()),
     ];
-    let data = c.legacy_json(&path, &q, false).await?;
-    let page = super::legacy::parse_page(&data, name, code, start)?;
-    c.note_legacy_ok();
-    Ok(page)
+    (path, q)
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -230,6 +230,14 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    continua por nome e o leitor valida BRL, identidade e paginação. Recusa, erro de rede ou 429 na extra não tocam no breaker nem no limitador da principal: a
    consulta volta para a fila dela, e a extra descansa 5 min (rede/recusa) ou pausa pelo próprio 429. Consultas por
    minuto somam as duas; a caça só aparece em pausa quando as duas estão paradas. Sem o proxy ligado, nada muda.
+   Além da fila principal, uma única leitura pública em paralelo pode consultar alvo comum já selecionado, sem
+   usar login nem retornar pela principal. Ela espera vaga, respeita o limitador da extra e começa no máximo uma
+   página a cada 12 s, com pelo menos 60 s entre visitas ao mesmo alvo. Não disputa ativos atrasados ou livro
+   periódico pendente; só usa histórico recente e não baixa histórico nem CSFloat na análise paralela. O laço
+   principal valida e processa a página: se outra consulta da mesma skin começar antes do retorno, a seleção
+   mudar, o alvo ficar ativo ou o resultado passar de 20 s, descarta. Uma leitura validada entra no registro e
+   na nota do alvo, identificada como `paralela`, sem inflar a cota externa nem se misturar aos blocos do ensaio.
+   A referência de alvos comuns conta achados e consultas normais e paralelos; cada anúncio rende crédito uma vez.
 4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas.
    Alvo comum sem outra versão para a busca cobrir e com teto lê antes o livro de ofertas (menor anúncio em R$, no
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e o menor anúncio novo

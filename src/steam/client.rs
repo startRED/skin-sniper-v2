@@ -659,6 +659,26 @@ impl SteamClient {
         Ok(c)
     }
 
+    /// Há vaga imediata para leitura pública na saída extra.
+    pub fn public_alt_available(&self) -> bool {
+        if !self.alt_public_only || self.alt.is_none() {
+            return false;
+        }
+        let Ok(pace) = self.alt_send_pace.try_lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        let g = self.inner.lock().unwrap();
+        g.alt_down_until.is_none_or(|t| now >= t)
+            && g.alt_limiter.pause_end(now).is_none()
+            && g.alt_limiter.next_at <= now
+            && g.breakers[Endpoint::Legacy.idx()]
+                .open_until
+                .is_none_or(|t| now >= t)
+            && pace.last_any.is_none_or(|t| t + g.spacing <= now)
+            && pace.last_bucket[1].is_none_or(|t| t + g.alt_limiter.gap <= now)
+    }
+
     /// Há uma vaga imediata na saída pública enquanto a leitura nativa espera na principal.
     pub fn prefer_public_listings(&self) -> bool {
         if !self.alt_public_only || self.alt.is_none() {
@@ -679,6 +699,13 @@ impl SteamClient {
     fn with_alt(mut self, http: reqwest::Client) -> Self {
         self.alt = Some(http);
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_public_alt_for_test(self, http: reqwest::Client) -> Self {
+        let mut c = self.with_alt(http);
+        c.alt_public_only = true;
+        c
     }
 
     /// Troca (ou remove) o cookie em tempo de execução. Vale para as próximas requisições `auth`.
@@ -1031,6 +1058,49 @@ impl SteamClient {
         }
         serde_json::from_slice(&body)
             .map_err(|_| Error::Parse("render: resposta não é JSON".into()))
+    }
+
+    /// Faz uma tentativa pública de anúncio somente pela saída alternativa.
+    /// `None` indica saída desativada/ocupada, pausa, breaker ou falha de rede/429 nela.
+    /// Erros de orçamento, HTTP e JSON permanecem em `Some(Err(_))`; nunca usa a principal.
+    pub async fn legacy_json_public_alt(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Option<Result<Value>> {
+        let ep = Endpoint::Legacy;
+        if !self.alt_public_only || self.alt.is_none() {
+            return None;
+        }
+        {
+            let now = Instant::now();
+            let mut g = self.inner.lock().unwrap();
+            if g.breakers[ep.idx()].check(now).is_some()
+                || !matches!(self.alt_slot(&mut g, ep, now), Some(Ok(())))
+            {
+                return None;
+            }
+        }
+        let req = self
+            .http
+            .get(self.url(path))
+            .query(query)
+            .header("accept", "application/json");
+        let result = self.send_alt(ep, &req, None, true).await?;
+        let (parts, body) = match result {
+            Ok(response) => response,
+            Err(e) => return Some(Err(e)),
+        };
+        if parts.status != 200 {
+            return Some(Err(Error::Http {
+                endpoint: ep,
+                status: parts.status,
+            }));
+        }
+        Some(
+            serde_json::from_slice(&body)
+                .map_err(|_| Error::Parse("render: resposta não é JSON".into())),
+        )
     }
 
     /// Só quem validou identidade, moeda e conteúdo pode declarar a leitura recuperada.

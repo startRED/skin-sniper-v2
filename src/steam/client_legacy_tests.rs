@@ -337,3 +337,146 @@ async fn public_exit_respects_budget_and_global_send_spacing() {
     .unwrap();
     assert_eq!(c.sent(), before);
 }
+
+#[tokio::test]
+async fn public_alt_only_legacy_sends_fixture_without_private_cookies() {
+    let main_hits = Arc::new(AtomicUsize::new(0));
+    let seen_main = main_hits.clone();
+    let app = Router::new().route(
+        "/public",
+        get(move |headers: AxHeaders| {
+            let seen_main = seen_main.clone();
+            async move {
+                if headers.contains_key("x-test-alt") {
+                    assert_eq!(
+                        headers.get("cookie").and_then(|v| v.to_str().ok()),
+                        Some("bMarketOptOut=1")
+                    );
+                    include_str!("../../testdata/steam_legacy_render_moonrise_2026-11.json")
+                } else {
+                    seen_main.fetch_add(1, Ordering::Relaxed);
+                    "{}"
+                }
+            }
+        }),
+    );
+    let base = serve(app).await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-test-alt", HeaderValue::from_static("yes"));
+    let mut c = fast(&base).with_alt(http_builder().default_headers(headers).build().unwrap());
+    c.alt_public_only = true;
+    c.set_cookie(Some(Cookie {
+        steam_login_secure: "must-not-leak".into(),
+        sessionid: Some("private-session".into()),
+    }));
+
+    assert!(c.public_alt_available());
+    let value = c
+        .legacy_json_public_alt("/public", &[])
+        .await
+        .expect("alt slot available")
+        .unwrap();
+    assert_eq!(value["success"], true);
+    assert_eq!(main_hits.load(Ordering::Relaxed), 0);
+    assert_eq!(c.sent(), 1);
+    assert_eq!(c.take_calls()[1].ok, 1);
+    assert!(!c.public_alt_available(), "the sent slot is paced");
+}
+
+#[tokio::test]
+async fn public_alt_only_legacy_stops_on_429_and_pause() {
+    let alt_hits = Arc::new(AtomicUsize::new(0));
+    let main_hits = Arc::new(AtomicUsize::new(0));
+    let a = alt_hits.clone();
+    let m = main_hits.clone();
+    let app = Router::new().route(
+        "/public",
+        get(move |headers: AxHeaders| {
+            let (a, m) = (a.clone(), m.clone());
+            async move {
+                if headers.contains_key("x-test-alt") {
+                    a.fetch_add(1, Ordering::Relaxed);
+                    AxStatus::TOO_MANY_REQUESTS
+                } else {
+                    m.fetch_add(1, Ordering::Relaxed);
+                    AxStatus::OK
+                }
+            }
+        }),
+    );
+    let base = serve(app).await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-test-alt", HeaderValue::from_static("yes"));
+    let mut c = fast(&base).with_alt(http_builder().default_headers(headers).build().unwrap());
+    c.alt_public_only = true;
+
+    assert!(c.public_alt_available());
+    assert!(c.legacy_json_public_alt("/public", &[]).await.is_none());
+    let sent = c.sent();
+    assert_eq!(sent, 1);
+    assert!(!c.public_alt_available());
+    assert!(c.legacy_json_public_alt("/public", &[]).await.is_none());
+    assert_eq!(c.sent(), sent);
+    assert_eq!(alt_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(main_hits.load(Ordering::Relaxed), 0);
+    assert_eq!(c.take_calls()[1].limited, 1);
+    assert!(
+        c.inner
+            .lock()
+            .unwrap()
+            .alt_limiter
+            .pause_end(Instant::now())
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn public_alt_only_legacy_offline_and_budget_never_use_main() {
+    let main_hits = Arc::new(AtomicUsize::new(0));
+    let seen_main = main_hits.clone();
+    let app = Router::new().route(
+        "/public",
+        get(move || {
+            let seen_main = seen_main.clone();
+            async move {
+                seen_main.fetch_add(1, Ordering::Relaxed);
+                "{}"
+            }
+        }),
+    );
+    let base = serve(app).await;
+    let c = fast(&base)
+        .with_public_alt_proxy("http://127.0.0.1:9")
+        .unwrap();
+    assert!(c.public_alt_available());
+    assert!(c.legacy_json_public_alt("/public", &[]).await.is_none());
+    assert_eq!(c.sent(), 1);
+    assert_eq!(main_hits.load(Ordering::Relaxed), 0);
+    assert!(c.inner.lock().unwrap().alt_down_until.is_some());
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-test-alt", HeaderValue::from_static("yes"));
+    let mut c = fast(&base).with_alt(http_builder().default_headers(headers).build().unwrap());
+    c.alt_public_only = true;
+    let (db, _dir) = crate::db::temp_db();
+    c.set_research_db(db.clone());
+    let before = c.sent();
+    let decision = crate::research::Decision {
+        source: "exploracao_externa".into(),
+        policy: "test".into(),
+        target: "x".into(),
+        scale: 1.0,
+        block_id: None,
+    };
+    crate::research::scope(db, decision, async {
+        assert!(matches!(
+            c.legacy_json_public_alt("/public", &[]).await,
+            Some(Err(Error::BudgetExhausted))
+        ));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(c.sent(), before);
+    assert_eq!(main_hits.load(Ordering::Relaxed), 0);
+}

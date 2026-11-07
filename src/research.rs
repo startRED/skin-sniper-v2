@@ -42,6 +42,11 @@ pub fn current() -> Option<Context> {
     CONTEXT.try_with(Clone::clone).ok()
 }
 
+/// Retoma a mesma decisão em outra tarefa, sem criar outra entrada no histórico.
+pub async fn with_context<T>(context: Context, future: impl Future<Output = T>) -> T {
+    CONTEXT.scope(context, future).await
+}
+
 pub async fn scope<T>(
     db: Db,
     decision: Decision,
@@ -88,10 +93,10 @@ pub struct Summary {
 }
 
 pub fn summary(c: &Connection, now: i64) -> rusqlite::Result<Summary> {
-    let (normal, exploratory, csfloat): (i64,i64,i64) = c.query_row("SELECT COALESCE(SUM(route != 'csfloat' AND source != 'exploracao_externa'),0), COALESCE(SUM(route != 'csfloat' AND source = 'exploracao_externa'),0), COALESCE(SUM(route = 'csfloat'),0) FROM research_attempts WHERE at >= ?1 AND outcome != 'not_sent'", [now - WINDOW_SECONDS], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    let (normal, exploratory, parallel, csfloat): (i64,i64,i64,i64) = c.query_row("SELECT COALESCE(SUM(route != 'csfloat' AND source NOT IN ('exploracao_externa','paralela')),0), COALESCE(SUM(route != 'csfloat' AND source = 'exploracao_externa'),0), COALESCE(SUM(route != 'csfloat' AND source = 'paralela'),0), COALESCE(SUM(route = 'csfloat'),0) FROM research_attempts WHERE at >= ?1 AND outcome != 'not_sent'", [now - WINDOW_SECONDS], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
     let (limited, failed, followup): (i64, i64, i64) = c.query_row("SELECT COALESCE(SUM(outcome = 'rate_limited'),0), COALESCE(SUM(outcome IN ('error','network_error')),0), COALESCE(SUM(source = 'acompanhamento'),0) FROM research_attempts WHERE at >= ?1 AND route != 'csfloat' AND outcome != 'not_sent'", [now - WINDOW_SECONDS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(Summary {
-        reads_1h: normal + exploratory,
+        reads_1h: normal + exploratory + parallel,
         exploratory_1h: exploratory,
         exploratory_limit: MAX_EXPLORATORY,
         available: (normal / 15 - exploratory)
@@ -111,7 +116,7 @@ pub(crate) enum ReserveError {
 }
 
 fn eligible(c: &Connection, id: i64) -> rusqlite::Result<bool> {
-    let (normal, exploratory): (i64, i64) = c.query_row("SELECT COALESCE(SUM(source != 'exploracao_externa'),0), COALESCE(SUM(source = 'exploracao_externa'),0) FROM research_attempts WHERE at >= ?1 AND route != 'csfloat' AND outcome != 'not_sent'", [now_unix() - WINDOW_SECONDS], |r| Ok((r.get(0)?,r.get(1)?)))?;
+    let (normal, exploratory): (i64, i64) = c.query_row("SELECT COALESCE(SUM(source NOT IN ('exploracao_externa','paralela')),0), COALESCE(SUM(source = 'exploracao_externa'),0) FROM research_attempts WHERE at >= ?1 AND route != 'csfloat' AND outcome != 'not_sent'", [now_unix() - WINDOW_SECONDS], |r| Ok((r.get(0)?,r.get(1)?)))?;
     let per_decision: i64 = c.query_row("SELECT count(*) FROM research_attempts WHERE decision_id = ?1 AND route != 'csfloat' AND outcome != 'not_sent'", [id], |r| r.get(0))?;
     Ok(exploratory < MAX_EXPLORATORY
         && normal >= 15 * (exploratory + 1)
@@ -272,5 +277,95 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn parallel_reads_count_but_never_fund_exploration() {
+        let (db, _dir) = crate::db::temp_db();
+        let d = Decision {
+            source: "paralela".into(),
+            policy: "paralela".into(),
+            target: "x".into(),
+            scale: 1.0,
+            block_id: None,
+        };
+        scope(db.clone(), d, async {
+            for _ in 0..30 {
+                reserve(None, "legacy", "alt").await.unwrap();
+            }
+            finish(reserve(None, "legacy", "alt").await.unwrap(), "not_sent").await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let s = db.call(|c| summary(c, now_unix())).await.unwrap();
+        assert_eq!((s.reads_1h, s.exploratory_1h, s.available), (30, 0, 0));
+        assert!(
+            !scope(db.clone(), exploratory(), async {
+                Ok(reserve(None, "listings", "main").await.is_ok())
+            })
+            .await
+            .unwrap()
+        );
+        for _ in 0..15 {
+            reserve(Some(db.clone()), "listings", "main").await.unwrap();
+        }
+        assert_eq!(
+            db.call(|c| summary(c, now_unix())).await.unwrap().available,
+            1
+        );
+        assert!(
+            scope(db.clone(), exploratory(), async {
+                Ok(reserve(None, "listings", "main").await.is_ok())
+            })
+            .await
+            .unwrap()
+        );
+        let s = db.call(|c| summary(c, now_unix())).await.unwrap();
+        assert_eq!((s.reads_1h, s.exploratory_1h, s.available), (46, 1, 0));
+        assert!(
+            !scope(db, exploratory(), async {
+                Ok(reserve(None, "listings", "main").await.is_ok())
+            })
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn context_can_move_to_another_task_and_back() {
+        let (db, _dir) = crate::db::temp_db();
+        let d = Decision {
+            source: "paralela".into(),
+            policy: "paralela".into(),
+            target: "x".into(),
+            scale: 1.0,
+            block_id: None,
+        };
+        let (result, context) = scope_tracked(db.clone(), d, async {
+            let ctx = current().unwrap();
+            tokio::spawn(async move {
+                assert!(current().is_none());
+                with_context(ctx, async {
+                    assert_eq!(current().unwrap().source, "paralela");
+                    reserve(None, "legacy", "alt").await.unwrap();
+                })
+                .await;
+                assert!(current().is_none());
+            })
+            .await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert!(current().is_none());
+        with_context(context.clone(), async {
+            reserve(None, "legacy", "alt").await.unwrap();
+        })
+        .await;
+        assert_eq!(attempts(db.clone(), context.id).await.unwrap(), 2);
+        let rows = db.call(move |c| c.query_row("SELECT count(*) FROM research_attempts WHERE decision_id=?1 AND source='paralela' AND route='alt'", [context.id], |r| r.get::<_,i64>(0))).await.unwrap();
+        assert_eq!(rows, 2);
     }
 }
