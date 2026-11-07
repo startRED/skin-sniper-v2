@@ -186,7 +186,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
      foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
      enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
-     A seleção é refeita a cada 15 min para isso valer.
+     A seleção é refeita a cada 15 min e no próximo passo após observar um piso novo acima do saldo.
    - **Agenda que aprende (bandido de vários braços):** cada alvo (skin × desgaste × modo: `barato` ou `seed`) é um braço com uma nota que se atualiza sozinha = lucro esperado (preço médio) achado por consulta
      gasta; além do achado, cada anúncio **novo** avaliado que não passou rende `lucro mínimo × e^(g/τ)`, com
      g = (lucro no médio − lucro mínimo) ÷ preço, limitado a 0: todo anúncio visto ensina, e a nota não começa do

@@ -1153,6 +1153,35 @@ fn set_lowest_ask(b: &Bodies, cents: i64) {
 }
 
 #[tokio::test]
+async fn newly_unaffordable_page_reselects_without_waiting_fifteen_minutes() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let task = lone_moonrise(&h, &mut rx).await;
+    h.lock().selected = Some((h.saldo(), NOW));
+    let mut body = listings_body();
+    body["data"]["start"] = json!(0);
+    for listing in body["data"]["listings"].as_array_mut().unwrap() {
+        listing["unPrice"] = json!(5000);
+        listing["unFee"] = json!(750);
+    }
+    let page = crate::steam::listings::parse_page(&body["data"], 0).unwrap();
+    detect::process(&h, &task, &page).await.unwrap();
+    catalog::maybe_reselect(&h).await.unwrap();
+    assert!(
+        h.lock().queue.tasks().iter().all(|t| t.id != task.id),
+        "não gasta os próximos 15 min no alvo que deixou de caber no saldo"
+    );
+    let selected = h.lock().selected;
+    detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(
+        h.lock().selected,
+        selected,
+        "preço igual não refaz a seleção"
+    );
+}
+
+#[tokio::test]
 async fn ready_public_listings_skip_the_book_and_search_prefilters() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
