@@ -3,6 +3,7 @@
   import { api } from './api';
   import { day, money, signed } from './format';
   import type { Learning } from './types';
+  import LearningDashboard from './LearningDashboard.svelte';
 
   let data = $state<Learning | null>(null);
   let error = $state('');
@@ -76,11 +77,10 @@
     {#if today}<span class="muted"> · hoje: {today.new_listings} anúncios novos, {today.sales} saíram da lista, {today.finds} {today.finds === 1 ? 'achado' : 'achados'}</span>{/if}
   </summary>
   <div class="body">
-    <p class="muted sub">
-      O app guarda cada anúncio que vê e confere com o mercado o que aconteceu com ele, sem comprar nada. É daqui que ele
-      aprende quanto os anúncios duram e procura indícios do que pode ter sido vendido; sumir da lista não confirma uma venda.{#if data?.since}{' '}Registro desde {day(data.since)}.{/if}
-    </p>
+    <p class="muted sub">Acompanhe como as previsões e a busca evoluem.{#if data?.since}{' '}Registro desde {day(data.since)}.{/if}</p>
     {#if error}<p class="amber">{error}</p>{/if}
+    {#if data}<LearningDashboard {data} />{/if}
+    <details class="more"><summary>Mais detalhes</summary>
     {#if trial || exploration || research || experiment}
       <section class="ml" aria-label="Exploração e pesquisa">
         {#if trial}
@@ -137,7 +137,7 @@
         {/if}
         {#if wk}
           <li>
-            <b>Semana</b> {wk[0].finds} {wk[0].finds === 1 ? 'achado' : 'achados'}, {wk[0].near} quase, {wk[0].queries} consultas{#if wk[0].alerts}; avisos que venderiam em 48 h: {wk[0].alerts_closed} de {wk[0].alerts}{/if}{#if wk[0].labeled}; lucro virtual {signed(wk[0].profit_cents)} em {wk[0].labeled}{/if}.
+            <b>Semana</b> {wk[0].finds} {wk[0].finds === 1 ? 'achado' : 'achados'}, {wk[0].near} quase, {wk[0].queries} consultas{#if wk[0].alerts}; preço previsto alcançado em 48 h: {wk[0].alerts_closed} de {wk[0].alerts}{/if}{#if wk[0].labeled}; lucro virtual {signed(wk[0].profit_cents)} em {wk[0].labeled}{/if}.
             {#if wk[1].queries}Semana anterior: {wk[1].finds} achados, {wk[1].near} quase, {wk[1].queries} consultas{#if wk[1].labeled}; lucro virtual {signed(wk[1].profit_cents)}{/if}.{/if}
           </li>
         {/if}
@@ -167,6 +167,7 @@
         {/each}
       </div>
     {/if}
+    </details>
   </div>
 </details>
 
@@ -176,6 +177,7 @@
   summary .muted { font-weight: 400; }
   .body { padding: 0 0 8px; }
   .sub { margin: 0 16px 10px; max-width: 110ch; }
+  .more > summary { color: var(--muted); font-size: 13px; }
   .amber { color: var(--amber); margin: 0 16px 8px; }
   .ml, .cohorts { margin: 0 16px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 5px; }
   .ml p, .cohorts p { margin: 0; }

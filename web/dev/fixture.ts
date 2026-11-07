@@ -149,13 +149,16 @@ function watchRows(): WatchRow[] {
 
 // Placar de exemplo: 3 dias de registro (o resto vazio, como logo depois de instalar).
 function learning(): Learning {
-  const days = Array.from({ length: 14 }, (_, i) => {
+  const days = Array.from({ length: 60 }, (_, i) => {
     const d = new Date((nowS() - 3 * 3600 - i * 86400) * 1000).toISOString().slice(0, 10);
     const on = i < 3;
     return {
       day: d, queries: on ? 4200 - i * 300 : 0, books: on ? 1300 : 0, new_listings: on ? 610 - i * 40 : 0, aged: on ? 380 : 0,
       age_median_min: on ? 4.5 + i : null, sales: on ? 240 : 0, relists: on ? 9 : 0, life_median_min: on ? 95 + i * 10 : null,
-      near: on ? 31 : 0, finds: on ? (i === 1 ? 2 : 0) : 0
+      near: on ? 31 : 0, finds: on ? (i === 1 ? 2 : 0) : 0,
+      price_samples: i > 1 && i < 12 ? 4 + i : 0,
+      price_error_pct: i > 1 && i < 12 ? 7 + i * 0.9 : null,
+      price_bias_pct: i > 1 && i < 12 ? -3 - i * 0.6 : null
     };
   });
   const teacher = {
@@ -170,7 +173,8 @@ function learning(): Learning {
     { queries: 11900, finds: 2, near: 93, alerts: 6, alerts_closed: 4, labeled: 0, profit_cents: 0 },
     { queries: 0, finds: 0, near: 0, alerts: 0, alerts_closed: 0, labeled: 0, profit_cents: 0 }
   ];
-  return { days, since: nowS() - 2.4 * 86400, teacher, harvest, refit: 1, weeks };
+  return { days, since: nowS() - 2.4 * 86400, teacher, harvest, refit: 1, weeks,
+    adjustments: [{ at: nowS() - 86400, old: 1, new: 0.98, why: 'Preços observados abaixo dos previstos' }] };
 }
 
 function history(o: Opportunity): History {

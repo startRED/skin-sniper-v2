@@ -71,7 +71,7 @@ GET  /api/purchases        -> Purchase[]
 POST /api/purchases/:id/sold {sold_cents: int}      -> Purchase (valor pago pelo comprador, com taxas)
 GET  /api/calibration      -> Calibration
 GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
-GET  /api/learning         -> Learning              (placar do aprendizado, 14 dias de Brasília)
+GET  /api/learning         -> Learning              (placar do aprendizado, 60 dias de Brasília)
 GET  /api/settings         -> Settings              (chaves mascaradas)
 PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga)
 GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id} | "state" State | "purchase" Purchase
@@ -145,9 +145,11 @@ Learning = { days: LearningDay[], since: number | null,     // do dia mais recen
              trial?: TrialInfo | null,                   // referência, controle, piloto, pausa ou fim
              exploration?: ExplorationInfo | null,       // candidata, visitas e cobertura nova
              cohorts?: LearningCohort[],                 // decisão original; comum e raro separados
-             experiment?: TrialReport | null }           // comparação por blocos e incerteza
+             experiment?: TrialReport | null,            // comparação por blocos e incerteza
+             adjustments: { at, old, new, why }[] }      // ajustes registrados no fator dos comuns
 LearningDay = { day: "AAAA-MM-DD", queries, books, new_listings, aged, age_median_min: number | null,
-                sales, relists, life_median_min: number | null, near, finds }
+                sales, relists, life_median_min: number | null, near, finds, price_samples,
+                price_error_pct: number | null, price_bias_pct: number | null } // medianas dos erros dos avisos comuns com preço em 48 h, agrupados pela data da previsão
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
              telegram_chat_id: string|null, panel_url: string|null, sound: boolean,
              notify_min_profit_cents: number }      // segredos chegam mascarados: "••••gLO9"
