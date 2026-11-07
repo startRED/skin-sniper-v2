@@ -105,6 +105,8 @@ struct Bodies {
     history_wait: Mutex<Option<Arc<Notify>>>,
     history_started: Notify,
     search: Mutex<Value>,
+    search_429: AtomicBool,
+    search_queries: AtomicUsize,
     listing_queries: AtomicUsize,
     csfloat: Value,
     csfloat_names: Mutex<Vec<String>>,
@@ -126,6 +128,8 @@ async fn serve() -> (String, Arc<Bodies>) {
         history_wait: Mutex::new(None),
         history_started: Notify::new(),
         search: Mutex::new(search_body()),
+        search_429: AtomicBool::new(false),
+        search_queries: AtomicUsize::new(0),
         listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
         csfloat_names: Mutex::new(vec![]),
@@ -226,7 +230,13 @@ async fn serve() -> (String, Arc<Bodies>) {
         .route(
             "/market/search/render/",
             get(|AxState(b): AxState<Arc<Bodies>>| async move {
-                Json(b.search.lock().unwrap().clone())
+                use axum::response::IntoResponse;
+                b.search_queries.fetch_add(1, Ordering::Relaxed);
+                if b.search_429.load(Ordering::Relaxed) {
+                    axum::http::StatusCode::TOO_MANY_REQUESTS.into_response()
+                } else {
+                    Json(b.search.lock().unwrap().clone()).into_response()
+                }
             }),
         )
         .route(
@@ -1028,6 +1038,57 @@ async fn grouped_search_credit_requires_a_page_transport_even_if_that_page_fails
         );
         let sent:i64=db.call(|c|c.query_row("SELECT count(*) FROM research_attempts WHERE source='normal' AND endpoint IN ('listings','legacy') AND outcome!='not_sent' AND decision_id IN (SELECT id FROM research_decisions WHERE policy='test')",[],|r|r.get(0))).await.unwrap();
         assert_eq!(sent > 0, !blocked);
+    }
+}
+
+#[tokio::test]
+async fn unavailable_grouped_search_keeps_scanning_listings_without_a_phone() {
+    use crate::steam::client::Endpoint;
+    for failure in ["first_429", "paused", "breaker"] {
+        let (base, bodies) = serve().await;
+        let (db, _dir) = temp_db();
+        let (h, mut rx) = hunt_against(&base, db);
+        let task = lone_moonrise(&h, &mut rx).await;
+        let mut duplicate = task.clone();
+        duplicate.id = format!("duplicate:{}", task.id);
+        h.lock().queue.set_tasks(vec![task.clone(), duplicate]);
+        set_lowest_ask(&bodies, 200);
+        bodies.search_429.store(true, Ordering::Relaxed);
+        if failure == "paused" {
+            assert!(
+                h.steam
+                    .get_json(Endpoint::Search, "/market/search/render/", &[])
+                    .await
+                    .is_err()
+            );
+        } else if failure == "breaker" {
+            for _ in 0..3 {
+                assert!(
+                    h.steam
+                        .get_json(Endpoint::Search, "/fail", &[])
+                        .await
+                        .is_err()
+                );
+            }
+        }
+        let searches = bodies.search_queries.load(Ordering::Relaxed);
+        let listings = bodies.listing_queries.load(Ordering::Relaxed);
+        for step in 1..=2 {
+            tokio::time::timeout(Duration::from_secs(5), scheduler::run_task(&h, &task))
+                .await
+                .expect("anúncios não esperam a busca nem o celular")
+                .unwrap();
+            assert_eq!(
+                bodies.listing_queries.load(Ordering::Relaxed),
+                listings + step,
+                "{failure}"
+            );
+            assert_eq!(
+                bodies.search_queries.load(Ordering::Relaxed),
+                searches + usize::from(failure == "first_429"),
+                "não repete a busca barrada: {failure}"
+            );
+        }
     }
 }
 

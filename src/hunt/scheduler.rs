@@ -867,7 +867,7 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         .cloned()
         .collect();
     // Uma busca só economiza quando cobre duas ou mais versões vigiadas; com uma só, ela custaria a mais.
-    if group.len() < 2 {
+    if group.len() < 2 || h.steam.main_blocked(Endpoint::Search) {
         return book_then_listings(h, &task, tasks, &active).await;
     }
     let q = [
@@ -880,14 +880,22 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
         ("appid", "730".into()),
         ("norender", "1".into()),
     ];
-    let v = h
+    let v = match h
         .steam
         .get_json(
             crate::steam::client::Endpoint::Search,
             "/market/search/render/",
             &q,
         )
-        .await?;
+        .await
+    {
+        Ok(v) => v,
+        Err(e @ (SteamError::RateLimited { .. } | SteamError::BreakerOpen { .. })) => {
+            tracing::warn!("busca indisponível; continua pelos anúncios: {e}");
+            return book_then_listings(h, &task, tasks, &active).await;
+        }
+        Err(e) => return Err(e.into()),
+    };
     let page = search::parse_page(&v)?;
     let limits: HashMap<String, Option<i64>> = watch::list_for_scan(h)
         .await?
