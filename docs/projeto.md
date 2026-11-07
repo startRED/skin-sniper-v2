@@ -223,7 +223,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    atualizada a cada 15 min, mesmo durante essa pausa; descoberta de nomes novos e raros filtrados aguardam as actions.
    Comuns também usam o render da principal quando sua próxima vaga vem antes da fila nativa, mesmo sem a
    saída extra; o piso aprendido das actions não segura uma leitura pública disponível. O espaçamento
-   global, o intervalo do livro/render e as pausas de cada fila continuam valendo.
+   global, o intervalo do livro/render e as pausas de cada fila continuam valendo. Nessa situação, a agenda
+   lê a página diretamente, antes das triagens por livro ou busca que gastariam a mesma fila disponível.
    Com o livro barrado, não há pedidos sugeridos. Com as duas leituras barradas, a caça para.
    O balde de anúncios e histórico: começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios, histórico ou livro) aplica a pausa normal antes de as leituras seguirem sem login por 6 h. Trocar entre logado e anônimo não libera outra cota. O prazo `Retry-After`, quando informado, é respeitado também no primeiro 429 logado. Um 429
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até o piso aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso (até 20 s), e cada 6 h sem 429 desce um degrau até 6 s (a 6 s fixos a Steam bloqueava a cada 1–2 h, e cada série custava até 2 h paradas). O degrau da pausa só volta a 60 s após 60 min sem 429.

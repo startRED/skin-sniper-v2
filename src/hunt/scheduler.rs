@@ -857,6 +857,10 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
                 .collect::<HashSet<_>>(),
         )
     };
+    // Livro e busca gastariam a mesma fila que já pode entregar os anúncios completos.
+    if h.steam.prefer_public_listings() {
+        return query_group(h, &task, tasks).await;
+    }
     let Some(ratio) = ratio.filter(|r| r.is_finite() && *r > 0.0) else {
         return book_then_listings(h, &task, tasks, &active).await;
     };
