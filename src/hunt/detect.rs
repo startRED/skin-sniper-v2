@@ -644,7 +644,14 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         .collect();
     let mut out = Outcome::default();
     let floor = relevant.iter().map(|l| l.price_cents).min();
-    h.lock().floors.insert(task.floor_key(), (floor, now));
+    {
+        let mut s = h.lock();
+        let previous = s.floors.insert(task.floor_key(), (floor, now));
+        if floor.is_some_and(|p| p > saldo) && previous.is_none_or(|(p, _)| p != floor) {
+            // A seleção já sabe excluir o alvo caro; não precisa esperar os 15 min periódicos.
+            s.selected = None;
+        }
+    }
     let learned = h.lock().learned.clone();
     let key = |x: &Listing| {
         group_of(&x.name, x.seed.map(u32::from), x.paint_index, x.float)

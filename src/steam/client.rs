@@ -688,8 +688,23 @@ impl SteamClient {
                 .is_none_or(|t| now >= t)
     }
 
-    /// Há uma vaga imediata na saída pública enquanto a leitura nativa espera na principal.
+    /// O anúncio público pode sair antes da fila nativa, pela principal ou pela extra.
     pub fn prefer_public_listings(&self) -> bool {
+        let now = Instant::now();
+        {
+            let g = self.inner.lock().unwrap();
+            // Não prende o comum ao piso aprendido das actions quando o render da principal tem vaga antes.
+            if g.limiter.pause_end(now).is_none()
+                && g.side.pause_end(now).is_none()
+                && g.breakers[Endpoint::Legacy.idx()]
+                    .open_until
+                    .is_none_or(|t| now >= t)
+                && now.max(g.next_any).max(g.side.next_at)
+                    < now.max(g.next_any).max(g.limiter.next_at)
+            {
+                return true;
+            }
+        }
         if !self.alt_public_only || self.alt.is_none() {
             return false;
         }

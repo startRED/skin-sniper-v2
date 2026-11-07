@@ -1153,6 +1153,61 @@ fn set_lowest_ask(b: &Bodies, cents: i64) {
 }
 
 #[tokio::test]
+async fn newly_unaffordable_page_reselects_without_waiting_fifteen_minutes() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let task = lone_moonrise(&h, &mut rx).await;
+    h.lock().selected = Some((h.saldo(), NOW));
+    let mut body = listings_body();
+    body["data"]["start"] = json!(0);
+    for listing in body["data"]["listings"].as_array_mut().unwrap() {
+        listing["unPrice"] = json!(5000);
+        listing["unFee"] = json!(750);
+    }
+    let page = crate::steam::listings::parse_page(&body["data"], 0).unwrap();
+    detect::process(&h, &task, &page).await.unwrap();
+    catalog::maybe_reselect(&h).await.unwrap();
+    assert!(
+        h.lock().queue.tasks().iter().all(|t| t.id != task.id),
+        "não gasta os próximos 15 min no alvo que deixou de caber no saldo"
+    );
+    let selected = h.lock().selected;
+    detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(
+        h.lock().selected,
+        selected,
+        "preço igual não refaz a seleção"
+    );
+}
+
+#[tokio::test]
+async fn ready_public_listings_skip_the_book_and_search_prefilters() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let mut task = lone_moonrise(&h, &mut rx).await;
+    task.code = "G180420B6053004".into();
+    h.lock().queue.set_tasks(vec![task.clone()]);
+    h.steam.restore_pace("0|6000|60000|0");
+    crate::steam::listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &[])
+        .await
+        .unwrap();
+    let before = (
+        bodies.book_queries.load(Ordering::Relaxed),
+        bodies.search_queries.load(Ordering::Relaxed),
+        bodies.legacy_queries.load(Ordering::Relaxed),
+    );
+    tokio::time::timeout(Duration::from_secs(1), scheduler::run_task(&h, &task))
+        .await
+        .expect("a triagem não deve gastar a vaga do render")
+        .unwrap();
+    assert_eq!(bodies.book_queries.load(Ordering::Relaxed), before.0);
+    assert_eq!(bodies.search_queries.load(Ordering::Relaxed), before.1);
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), before.2 + 1);
+}
+
+#[tokio::test]
 async fn book_skips_listings_when_the_lowest_ask_is_above_the_ceiling() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
