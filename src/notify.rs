@@ -304,36 +304,57 @@ pub fn format_message(a: &Alert, panel_url: Option<&str>) -> String {
 }
 
 /// Toast do Windows via WinRT; os textos chegam por variável de ambiente para não virarem código.
-const TOAST: &str = r#"$e = [Security.SecurityElement]
+const TOAST: &str = r#"$ErrorActionPreference = 'Stop'
+$e = [Security.SecurityElement]
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
 $d = New-Object Windows.Data.Xml.Dom.XmlDocument
 $d.LoadXml("<toast activationType='protocol' launch='$($e::Escape($env:SS_URL))'><visual><binding template='ToastGeneric'><text>$($e::Escape($env:SS_TITLE))</text><text>$($e::Escape($env:SS_BODY))</text></binding></visual></toast>")
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($d))"#;
+$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe')
+if ($n.Setting -ne 'Enabled') { throw "Avisos do Windows desativados: $($n.Setting)" }
+$n.Show([Windows.UI.Notifications.ToastNotification]::new($d))"#;
 
 /// Aviso no canto da tela do Windows, que sai mesmo com o painel fechado; clicar abre `url`.
-pub fn desktop(title: &str, body: &str, url: &str) {
+pub async fn desktop(title: &str, body: &str, url: &str) -> Result<bool, String> {
     #[cfg(all(windows, not(test)))]
     {
-        use std::os::windows::process::CommandExt;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
+        use tokio::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let r = Command::new("powershell")
+        let mut command = Command::new("powershell.exe");
+        command
             .args(["-NoProfile", "-NonInteractive", "-Command", TOAST])
             .env("SS_TITLE", title)
             .env("SS_BODY", body)
             .env("SS_URL", url)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .kill_on_drop(true)
             .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-        if let Err(e) = r {
-            tracing::warn!("aviso do Windows falhou: {e}");
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+            .await
+            .map_err(|_| "o Windows não confirmou o aviso em 10 s".to_string())?
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "{}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
+        Ok(true)
     }
-    #[cfg(any(not(windows), test))]
-    let _ = (title, body, url);
+    #[cfg(test)]
+    {
+        let _ = (title, body, url);
+        Ok(true)
+    }
+    #[cfg(all(not(windows), not(test)))]
+    {
+        let _ = (title, body, url);
+        Ok(false)
+    }
 }
 
 #[cfg(test)]

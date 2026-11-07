@@ -3,7 +3,7 @@
   import { ago, eta, floatTxt, money, pct, signed } from './format';
   import BuyButton from './BuyButton.svelte';
   import Chart from './Chart.svelte';
-  import type { Opportunity, Tier } from './types';
+  import type { GoneReason, Opportunity, Tier } from './types';
 
   // lost: as que já sumiram da lista, apagadas e sem compra; cabeçalho sem ordenação (no celular, nenhum)
   let { lost = false }: { lost?: boolean } = $props();
@@ -25,6 +25,10 @@
   const inCombo = $derived(new Set(app.highlight ? (app.state?.combo.ids ?? []) : []));
   const CONF = { alta: 'Alta', media: 'Média', baixa: 'Baixa' } as const;
   const RISK = { baixo: 'baixo', medio: 'médio', alto: 'alto' } as const;
+  const STATUS: Record<GoneReason, string> = {
+    unavailable: 'Vendido ou retirado', unprofitable: 'Deixou de compensar',
+    unwatched: 'Sem acompanhamento', bought: 'Você comprou', rejected: 'Compra recusada'
+  };
   const TIERS: [string, 'quick' | 'mid' | 'high', string][] = [
     ['Rápido', 'quick', 'Vendendo rápido você ainda ganha: o preço é o mais baixo dos três, o de maior chance de vender logo'],
     ['Médio', 'mid', 'Preço mais provável de venda'],
@@ -89,6 +93,10 @@
                 {#if o.seed != null}<span>seed {o.seed}</span>{/if}
                 {#if o.group}<span class="pill {o.kind === 'raro' ? 'warn' : 'mute'}">{o.group}</span>{/if}
                 {#if o.seal}<span class="pill {o.seal.proven ? 'ok' : 'mute'}" title={o.seal.text + (o.seal.open_cents != null && o.seal.floor_cents != null && o.seal.open_cents > o.seal.floor_cents ? ` · anuncie a ${money(o.seal.open_cents)}, desça até ${money(o.seal.floor_cents)}` : '')}>{o.seal.proven ? 'comprovado' : 'não comprovado'}</span>{/if}
+                {#if !lost}
+                  <span title="Quando a Steam devolveu este anúncio pela última vez">Conferido {ago(o.checked_at ?? o.seen_at, app.now)}</span>
+                  {#if app.now - (o.checked_at ?? o.seen_at) >= 180}<span class="pill warn">Aguardando conferência</span>{/if}
+                {/if}
               </span>
             </span>
             <svg class="chev" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -118,7 +126,7 @@
             {#if purchaseOf(o.id)?.status === 'bought'}
               <span class="pill ok">Você comprou</span>
             {:else}
-              <span class="pill mute" title="Saiu da lista: alguém comprou antes, o vendedor tirou o anúncio, deixou de dar lucro ou a skin deixou de ser vigiada">Perdida</span>
+              <span class="pill mute" title={o.gone_reason === 'unavailable' ? 'A Steam não devolveu mais este anúncio; não dá para distinguir venda de retirada.' : undefined}>{o.gone_reason ? STATUS[o.gone_reason] : 'Indisponível'}</span>
             {/if}
           </div>
         {:else}
@@ -192,9 +200,8 @@
   .item { border-bottom: 1px solid var(--line); position: relative; }
   .item::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--green); }
   .item.risky::before { background: var(--amber); opacity: 0.7; }
-  .item.gone { opacity: 0.55; filter: grayscale(0.8); }
+  .item.gone { filter: grayscale(0.8); }
   .item.gone::before { background: var(--faint); }
-  .item.gone:hover, .item.gone.open { opacity: 0.85; }
   .item:hover { background: #12171c; }
   .item.open { background: var(--panel); }
   .item.combo { background: var(--green-bg); box-shadow: inset 0 0 0 1px rgba(62, 207, 142, 0.45); }

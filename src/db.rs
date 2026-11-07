@@ -143,6 +143,8 @@ const MIGRATIONS: &[&str] = &[
     crate::hunt::trial::SCHEMA,
     crate::hunt::explore::SCHEMA,
     "CREATE TABLE csfloat_cache (name TEXT PRIMARY KEY, fetched_at INTEGER NOT NULL, json TEXT NOT NULL);",
+    "ALTER TABLE opportunities ADD COLUMN notified_at INTEGER;
+     ALTER TABLE opportunities ADD COLUMN notify_pending_at INTEGER;",
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.

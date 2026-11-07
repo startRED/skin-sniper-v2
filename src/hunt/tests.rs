@@ -28,6 +28,238 @@ const ST_MOON: &str = "StatTrak™ Glock-18 | Moonrise (Field-Tested)";
 const ID_CHEAP: &str = "6624491228774232473";
 const ID_T1: &str = "8709556594461768769";
 
+#[test]
+fn recorded_stattrak_moonrise_alerts_without_quick_profit() {
+    // Registro original do achado perdido, sem alterar preço, seed, risco ou estimativas.
+    let mut opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    assert_eq!((opp.price_cents, opp.seed), (844, Some(706)));
+    assert_eq!(opp.sell.mid.profit_cents, 1075);
+    assert_eq!(opp.ev_profit_cents, Some(639));
+    assert!(!opp.safe && detect::should_notify(&opp, 100));
+    assert!(!detect::should_notify(&opp, 1076));
+    opp.gone_at = Some(NOW);
+    assert!(!detect::should_notify(&opp, 100));
+}
+
+#[tokio::test]
+async fn recheck_targets_the_active_seed_even_after_another_range_was_read() {
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against("http://127.0.0.1:1", db);
+    let mut opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    opp.checked_at = Some(NOW - 61);
+    let task = Task {
+        id: "r:moon".into(),
+        name: MOON.into(),
+        code: "G180420B6053004".into(),
+        wear: None,
+        seeds: crate::pricing::groups::seed_ranges(MOON),
+        float: None,
+        score: 1.0,
+    };
+    let retry = {
+        let mut s = h.lock();
+        s.queue.set_tasks(vec![task.clone()]);
+        s.queue.next(NOW);
+        s.queue.reward(&task.id, NOW, scheduler::Found::default());
+        s.active.insert(
+            opp.id.clone(),
+            Active {
+                opp,
+                task: task.id.clone(),
+                attempted_at: 0,
+            },
+        );
+        let overdue = scheduler::overdue_task(&s, NOW, false).unwrap();
+        assert_eq!(overdue.seeds, vec![(706, 706)]);
+        assert_eq!(s.queue.focus(overdue).seeds, vec![(706, 706)]);
+        assert_eq!(
+            s.queue.focus(task.clone()).seeds,
+            vec![(58, 59)],
+            "acompanhar não pula uma faixa da caça"
+        );
+        assert!(scheduler::overdue_task(&s, NOW, true).is_none());
+        // Uma tentativa que não reencontrou o anúncio não pode bloquear outra seed atrasada.
+        let original = s.active.values().next().unwrap().opp.clone();
+        let mut other = original.clone();
+        other.id = "other-seed".into();
+        other.seed = Some(59);
+        other.checked_at = Some(NOW - 60);
+        s.active.insert(
+            other.id.clone(),
+            Active {
+                opp: other,
+                task: "r:moon".into(),
+                attempted_at: 0,
+            },
+        );
+        s.active.get_mut(&original.id).unwrap().attempted_at = NOW;
+        assert_eq!(
+            scheduler::overdue_task(&s, NOW, false).unwrap().seeds,
+            vec![(58, 59)]
+        );
+        s.active.remove("other-seed");
+        assert!(scheduler::overdue_task(&s, NOW, false).is_none());
+        s.active.values_mut().next().unwrap().opp.checked_at = Some(NOW);
+        assert!(scheduler::overdue_task(&s, NOW, false).is_none());
+        let a = s.active.values_mut().next().unwrap();
+        a.opp.checked_at = Some(NOW - 61);
+        a.attempted_at = 0;
+        scheduler::overdue_task(&s, NOW, false).unwrap()
+    };
+    assert!(scheduler::run_task(&h, &retry).await.is_err());
+    let s = h.lock();
+    assert_eq!(s.active.values().next().unwrap().attempted_at, NOW);
+    assert!(
+        scheduler::overdue_task(&s, NOW, false).is_none(),
+        "falha também espera antes de tentar outra vez"
+    );
+}
+
+#[tokio::test]
+async fn notification_can_qualify_later_and_survives_restart_without_duplicates() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    h.settings
+        .apply(serde_json::from_value(json!({"notify_min_profit_cents":100000})).unwrap())
+        .await
+        .unwrap();
+    run_until_two(&h, &mut rx).await;
+    let task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let pending: i64 = db.call(|c| c.query_row(
+        "SELECT count(*) FROM opportunities WHERE notified_at IS NOT NULL OR notify_pending_at IS NOT NULL", [], |r| r.get(0)
+    )).await.unwrap();
+    assert_eq!(pending, 0);
+    h.settings
+        .apply(serde_json::from_value(json!({"notify_min_profit_cents":100})).unwrap())
+        .await
+        .unwrap();
+    h.lock()
+        .active
+        .values_mut()
+        .for_each(|a| a.opp.checked_at = Some(NOW - 61));
+    let out = detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(out.found.iter().filter(|(_, alert)| *alert).count(), 2);
+    assert_eq!(
+        out.rewarded.finds, 0,
+        "avisar não repete crédito de aprendizado"
+    );
+    assert!(
+        h.lock()
+            .active
+            .values()
+            .all(|a| a.opp.checked_at == Some(NOW))
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let delivered: i64 = db.call(|c| c.query_row(
+                "SELECT count(*) FROM opportunities WHERE notified_at IS NOT NULL AND notify_pending_at IS NULL", [], |r| r.get(0)
+            )).await.unwrap();
+            if delivered == 2 { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let (h2, _rx) = hunt_against(&base, db.clone());
+    h2.set_saldo(3608, SaldoSource::Manual);
+    h2.load().await.unwrap();
+    let again = detect::process(&h2, &task, &page).await.unwrap();
+    assert!(again.found.iter().all(|(_, alert)| !alert));
+    assert_eq!(again.rewarded.finds, 0);
+    db.call(|c| {
+        c.execute(
+            "UPDATE opportunities SET notified_at=NULL, notify_pending_at=?1 WHERE id=?2",
+            rusqlite::params![NOW - 61, ID_T1],
+        )
+    })
+    .await
+    .unwrap();
+    let recovered = detect::process(&h2, &task, &page).await.unwrap();
+    assert_eq!(
+        recovered
+            .found
+            .iter()
+            .filter(|(_, alert)| *alert)
+            .map(|(o, _)| o.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![ID_T1]
+    );
+}
+
+#[tokio::test]
+async fn notification_starts_before_a_later_listing_finishes_loading_history() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    h.settings
+        .apply(serde_json::from_value(json!({"notify_min_profit_cents":100000})).unwrap())
+        .await
+        .unwrap();
+    run_until_two(&h, &mut rx).await;
+    h.settings
+        .apply(serde_json::from_value(json!({"notify_min_profit_cents":100})).unwrap())
+        .await
+        .unwrap();
+    let task = Task {
+        id: "r:early".into(),
+        name: MOON.into(),
+        code: "G180420B6053004".into(),
+        wear: None,
+        seeds: vec![(0, 1000)],
+        float: None,
+        score: 1.0,
+    };
+    let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    page.listings.truncate(2);
+    page.listings[1].name = ST_MOON.into();
+    let release = Arc::new(Notify::new());
+    *bodies.history_wait.lock().unwrap() = Some(release.clone());
+    let pending = {
+        let h = h.clone();
+        tokio::spawn(async move { detect::process(&h, &task, &page).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), bodies.history_started.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let delivered: bool = db
+                .call(|c| {
+                    c.query_row(
+                        "SELECT notified_at IS NOT NULL FROM opportunities WHERE id=?1",
+                        [ID_CHEAP],
+                        |r| r.get(0),
+                    )
+                })
+                .await
+                .unwrap();
+            if delivered {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("o primeiro aviso não espera o histórico do segundo anúncio");
+    assert!(!pending.is_finished());
+    release.notify_one();
+    pending.await.unwrap().unwrap();
+}
+
 fn clock() -> i64 {
     NOW
 }
@@ -774,7 +1006,7 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     for _ in 0..400 {
         tick(&h).await;
         while let Ok(ev) = rx.try_recv() {
-            if let Event::Gone { id } = ev {
+            if let Event::Gone { id, .. } = ev {
                 gone = Some(id);
             }
         }
@@ -795,6 +1027,17 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         .await
         .unwrap();
     assert_eq!(gone_at, Some(NOW));
+    let reason: String = db
+        .call(|c| {
+            c.query_row(
+                "SELECT json_extract(json, '$.gone_reason') FROM opportunities WHERE id=?1",
+                [ID_CHEAP],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(reason, "unavailable");
 }
 
 #[tokio::test]
@@ -912,7 +1155,7 @@ async fn cheaper_competitor_reevaluates_known_opportunity() {
     for _ in 0..400 {
         tick(&h).await;
         while let Ok(ev) = rx.try_recv() {
-            if let Event::Gone { id } = ev {
+            if let Event::Gone { id, .. } = ev {
                 gone = Some(id);
             }
         }
@@ -972,7 +1215,7 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
             .unwrap();
         assert_eq!(h.lock().evaluated[ID_T1].2, Some(price));
         while let Ok(ev) = rx.try_recv() {
-            if let Event::Gone { id } = ev {
+            if let Event::Gone { id, .. } = ev {
                 gone = Some(id);
             }
         }
@@ -1394,6 +1637,7 @@ async fn legacy_queries_each_name_without_marking_other_version_gone() {
             Active {
                 opp: opp.clone(),
                 task: other.id.clone(),
+                attempted_at: 0,
             },
         );
         s.queue.set_tasks(vec![task.clone(), other.clone()]);
@@ -1545,7 +1789,7 @@ async fn seen_listing_is_reevaluated_when_history_changes() {
     for _ in 0..400 {
         tick(&h).await;
         while let Ok(ev) = rx.try_recv() {
-            if let Event::Gone { id } = ev {
+            if let Event::Gone { id, .. } = ev {
                 gone.push(id);
             }
         }
@@ -1744,7 +1988,7 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
     assert_eq!(
         h.state().hunt.message.as_deref(),
         Some(
-            "6 anúncios conferidos em 10 min; nenhum deu lucro, o mais perto dava R$ 0,12 de lucro"
+            "6 anúncios conferidos em 10 min; nenhum passou nos critérios de lucro e risco; o mais perto dava R$ 0,12 de lucro no preço médio"
         )
     );
     // o ciclo novo começa zerado e o balanço antigo segue até o próximo fechar
@@ -1932,6 +2176,7 @@ async fn combo_uses_positive_expected_profit_including_rare_without_daily_score(
                 Active {
                     opp,
                     task: "test".into(),
+                    attempted_at: 0,
                 },
             );
         }

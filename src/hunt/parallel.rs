@@ -487,9 +487,10 @@ mod tests {
         })
         .await
         .unwrap();
+        let repeated = events_rx.try_recv();
         assert!(
-            events_rx.try_recv().is_err(),
-            "a repetição não deve notificar duas vezes"
+            repeated.is_err(),
+            "a repetição não deve notificar duas vezes: {repeated:?}"
         );
         let still_found: i64 = db
             .call(|c| c.query_row("SELECT count(*) FROM research_finds", [], |r| r.get(0)))

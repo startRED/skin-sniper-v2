@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "shots": "node dev/shots.mjs"
+    "shots": "node dev/shots.mjs",
+    "test:radar": "node dev/radar-check.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

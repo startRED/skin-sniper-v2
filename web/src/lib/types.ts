@@ -17,6 +17,7 @@ export type State = {
 };
 export type Tier = { price_cents: number; net_cents: number; profit_cents: number; eta_hours: number | null };
 export type Sell = { high: Tier; mid: Tier; quick: Tier };
+export type GoneReason = 'unavailable' | 'unprofitable' | 'unwatched' | 'bought' | 'rejected';
 export type Opportunity = {
   id: string;
   name: string;
@@ -39,7 +40,9 @@ export type Opportunity = {
   risk: 'baixo' | 'medio' | 'alto' | null;
   evidence: string;
   seen_at: number;
+  checked_at?: number | null;
   gone_at?: number | null; // sumiu da Steam: fica na lista de perdidas por um dia
+  gone_reason?: GoneReason | null;
   seal?: Seal | null; // raro: "comprovado" ou "ainda não comprovado"
 };
 export type Seal = {

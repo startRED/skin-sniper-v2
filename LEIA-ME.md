@@ -40,8 +40,11 @@ Para desligar: Gerenciador de Tarefas → `skin-sniper.exe` → Finalizar tarefa
   O aviso no celular e no PC só sai para skin que ainda dá lucro contando o risco.
 - **Vigiando:** as skins que o Skin Sniper está olhando agora e até quanto compraria cada uma. As
   etiquetas dizem o que ele procura nela: **Barato** (anúncio abaixo do normal) e **Seed** (pattern raro). Ele vigia mais o que mais rendeu.
-- **Perdidas nas últimas 24 h:** oportunidades que saíram da lista (alguém comprou antes, o anúncio
-  sumiu ou deixou de dar lucro). Ficam apagadas, sem botão de compra, só para você ver o que escapou.
+- **Perdidas nas últimas 24 h:** oportunidades que saíram da lista ficam por um dia após a saída, inclusive
+  depois de fechar ou reiniciar. Cada skin mostra o motivo, sem botão de compra. “Vendido ou retirado” significa
+  que a Steam não devolveu mais o anúncio; ela não informa qual dos dois aconteceu.
+- **Conferido:** quando a Steam mostrou aquele anúncio pela última vez, não quando o vendedor o criou.
+  Depois de 3 min sem confirmação aparece “Aguardando conferência”; isso não significa que vendeu.
 - **"A Steam pediu calma":** a Steam limitou as consultas; a caça para sozinha e volta depois.
 
 Os preços de venda são estimativas a partir das vendas reais, não promessa. O mercado pode cair
@@ -55,3 +58,6 @@ jeito (até 20 %). Ele nunca prevê mais alto por causa disso.
 
 Ver `AGENTS.md` e `docs/projeto.md`. Para compilar e instalar a versão atual na pasta do programa:
 `powershell -File scripts/instalar.ps1`.
+
+Regressões do radar no navegador: `cd web && npm run build && npm run test:radar`.
+Usa dados simulados e o registro arquivado da Moonrise; não consulta a Steam nem compra.

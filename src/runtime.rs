@@ -524,7 +524,8 @@ impl Runtime {
                 p.message = Some(message);
                 // recusa conclusiva da Steam (vendido etc.): o anúncio não existe mais
                 if self.buyer.state_of(&p.id) == Some(ListingState::Failed) {
-                    self.drop_listing(&p.id).await;
+                    self.drop_listing(&p.id, crate::web::api::GoneReason::Rejected)
+                        .await;
                 }
             }
             BuyOutcome::Uncertain { message } => {
@@ -540,7 +541,8 @@ impl Runtime {
     }
 
     async fn after_bought(&self, p: &Purchase, new_balance: Option<i64>) {
-        self.drop_listing(&p.id).await;
+        self.drop_listing(&p.id, crate::web::api::GoneReason::Bought)
+            .await;
         // Saldo: manual desconta o que foi pago; da Steam, usa o `wallet_info` da resposta.
         let r = match self.settings.saldo().await {
             Ok(Some(m)) => {
@@ -568,8 +570,8 @@ impl Runtime {
     }
 
     /// Tira o anúncio da lista (comprado ou recusado como vendido).
-    async fn drop_listing(&self, id: &str) {
-        if let Err(e) = detect::mark_gone(&self.hunt, vec![id.to_string()]).await {
+    async fn drop_listing(&self, id: &str, reason: crate::web::api::GoneReason) {
+        if let Err(e) = detect::mark_gone(&self.hunt, vec![id.to_string()], reason).await {
             tracing::warn!("tirar {id} da lista: {e:#}");
         }
         self.hunt.recompute_combo();

@@ -49,6 +49,8 @@ pub struct HuntDeps {
 pub(crate) struct Active {
     pub opp: Opportunity,
     pub task: String,
+    /// Uma tentativa sem confirmação também espera antes de repetir, sem fingir que viu o anúncio.
+    pub attempted_at: i64,
 }
 
 /// Menor anúncio por (nome, grupo raro ou nenhum).
@@ -252,6 +254,7 @@ impl Hunt {
                         Active {
                             opp,
                             task: task.unwrap_or_default(),
+                            attempted_at: 0,
                         },
                     );
                 }

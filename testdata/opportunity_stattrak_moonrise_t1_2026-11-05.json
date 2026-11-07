@@ -1,0 +1,44 @@
+{
+  "id": "1881909724395453461",
+  "name": "StatTrak™ Glock-18 | Moonrise (Field-Tested)",
+  "icon_url": "https://community.fastly.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL2kpnj9h1a7s2pZKtuK8_CVliF0-x3vt5kQCa9qhsipTiXpYL8JSLSMxgnApJwF-ALsxXpm4W1N7zr4lCK2Y1FzXmoiS5PvCpvsbwFAKBwrKfVkUifZu_LJHFP",
+  "steam_url": "https://steamcommunity.com/market/listings/730/G180420B6053004?detail=1881909724395453461",
+  "inspect_url": "steam://run/730//+csgo_econ_action_preview%20B7A7154E3B37D0AFB39701B29FB387BE8F0F4F0043B4F775B2FFB7E712B5DFB2C7BF8B72E017",
+  "wear": "Field-Tested",
+  "float": 0.2773149013519287,
+  "seed": 706,
+  "group": "T1 Center Star",
+  "kind": "raro",
+  "price_cents": 844,
+  "sell": {
+    "high": {
+      "price_cents": 4536,
+      "net_cents": 3945,
+      "profit_cents": 3101,
+      "eta_hours": null
+    },
+    "mid": {
+      "price_cents": 2207,
+      "net_cents": 1919,
+      "profit_cents": 1075,
+      "eta_hours": null
+    },
+    "quick": {
+      "price_cents": 808,
+      "net_cents": 703,
+      "profit_cents": -141,
+      "eta_hours": null
+    },
+    "correction": 1
+  },
+  "margin_pct": 127.3696682464455,
+  "safe": false,
+  "confidence": "media",
+  "ev_profit_cents": 639,
+  "days_locked": null,
+  "profit_per_day_cents": null,
+  "risk": "medio",
+  "evidence": "85 vendas/dia nos últimos 7 dias · preço em queda, descontado 4% · grupo raro: 4 vendas, 2,2x a 5,1x o preço comum",
+  "seen_at": 1793839828,
+  "gone_at": null
+}
