@@ -289,3 +289,11 @@ Accept: application/json
 - [Sandstorm Max Purple](https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple), [PAW Stoner Cat](https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1), [Kami](https://cs2pattern-prices.com/weapons/five-seven/kami/pussy) e [Seasons](https://cs2pattern-prices.com/weapons/xm1014/seasons/blue-leaf): vendas publicadas motivam pesquisa por seed individual; adesivos, desgaste e amostra pequena impedem tratar o preço do grupo como preço de cada integrante. A fonte informa vendas da Kami 590; o levantamento inicial de apoio foi corrigido após nova leitura. Não importamos preços/multiplicadores publicados.
 
 A curadoria reproduzível e seus limites estão em `catalogo-2026-11-08.md`; os JSONs de apoio preservam as famílias visuais que ainda não merecem consulta rara ativa.
+
+Na verificação instalada, o feed público respondeu `Content-Encoding: gzip` inclusive com pedido
+`Accept-Encoding: identity`. O corpo comprimido tinha 542.005 bytes e o JSON descomprimido 3.727.093 bytes.
+Sem o recurso gzip do cliente HTTP, a leitura falhava antes de atualizar referências; o cache válido era
+preservado. Habilitamos a descompressão nativa do reqwest, conforme a
+[documentação do próprio cliente](https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html#method.gzip),
+e uma fixture comprimida do JSON real cobre a resposta que ignora identity. O limite de 8 MiB continua
+valendo sobre o corpo descomprimido.

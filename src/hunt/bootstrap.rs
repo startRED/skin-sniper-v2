@@ -391,6 +391,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_prices_decode_gzip_even_when_identity_was_requested() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new().route(
+            "/",
+            axum::routing::get(|| async {
+                (
+                    [
+                        (reqwest::header::CONTENT_ENCODING, "gzip"),
+                        (reqwest::header::CONTENT_TYPE, "application/json"),
+                    ],
+                    include_bytes!("../../testdata/catalog_prices_sample.json.gz").as_slice(),
+                )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let bytes = response.bytes().await.unwrap();
+        let name = "Glock-18 | Moonrise (Field-Tested)";
+        assert_eq!(
+            parse_prices(&bytes, &HashSet::from([name.into()])).unwrap(),
+            vec![(name.into(), 127)]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn new_curation_reconciles_membership_without_losing_newer_prices() {
         let (db, _dir) = crate::db::temp_db();
         db.call(|c| {
