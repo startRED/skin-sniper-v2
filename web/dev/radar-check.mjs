@@ -39,6 +39,7 @@ try {
     const settings = { sound: false, notify_min_profit_cents: 100 };
     const key = { set: false, ok: null, detail: null };
     const state = { saldo_cents: 3606, saldo_source: 'manual', hunt: { watching: 1, queries_per_min: 6, last_query_at: now, paused_until: null, last_ok_at: now, book_ok_at: now, message: null }, combo: { ids: [], cost_cents: 0, profit_cents: 0 }, keys: { steam: key, csfloat: key, telegram: key } };
+    state.hunt.message = 'Filtros de seed/float em pausa na Steam; conferindo anúncios públicos. 100 páginas em 10 min; 800 anúncios distintos vistos, 15 novos no monitoramento; 85 avaliações de lucro; nenhum passou nos critérios de lucro e risco';
     const week = { queries: 0, finds: 0, near: 0, alerts: 0, alerts_closed: 0, labeled: 0, profit_cents: 0 };
     const learning = { days: [], since: null, teacher: { ghosts: 0, waiting: 0, fast_alerts: 0, fast_alerts_closed: 0, fast_near: 0, fast_near_closed: 0, fast_ratio: null, final_alerts: 0, final_alerts_won: 0, profit_cents: 0, predicted_cents: 0, unlabeled: 0, rare_labeled: 0, rare_closed: 0 }, harvest: null, refit: 1, weeks: [week, week], adjustments: [] };
     await page.route('**/api/**', async (route) => {
@@ -49,6 +50,8 @@ try {
     });
     const emit = (name, data) => page.evaluate(({ name, data }) => window.stream.dispatchEvent(new MessageEvent(name, { data: JSON.stringify(data) })), { name, data });
     await page.goto(base);
+    await page.getByText('6 consultas totais/min', { exact: false }).waitFor();
+    await page.getByText(state.hunt.message, { exact: true }).waitFor();
     await page.getByText('T1 Center Star', { exact: true }).waitFor();
     Object.assign(opp, { ev_profit_cents: 639, checked_at: now + 1 });
     await emit('opportunity', opp);

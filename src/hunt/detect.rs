@@ -43,6 +43,9 @@ pub(crate) struct Near {
 pub(crate) struct Cycle {
     started: i64,
     evaluated: u32,
+    pub(crate) pages: u32,
+    pub(crate) seen: HashSet<String>,
+    pub(crate) new: u32,
     pub(crate) saved_listings: u32,
     passed: u32,
     pub(crate) near: Vec<Near>,
@@ -91,7 +94,13 @@ impl Cycle {
 
     fn text(&self, secs: i64) -> String {
         let min = (secs / 60).max(1);
-        let mut t = format!("{} anúncios conferidos em {min} min", self.evaluated);
+        let mut t = format!(
+            "{} páginas em {min} min; {} anúncios distintos vistos, {} novos no monitoramento; {} avaliações de lucro",
+            self.pages,
+            self.seen.len(),
+            self.new,
+            self.evaluated
+        );
         if self.passed > 0 {
             t += &format!("; {} deram lucro", self.passed);
         } else if let Some(n) = self.near.first() {
@@ -107,9 +116,9 @@ impl Cycle {
 
     /// Último balanço fechado; antes do primeiro, o parcial.
     pub(crate) fn message(&self, now: i64) -> Option<String> {
-        self.last
-            .clone()
-            .or_else(|| (self.evaluated > 0).then(|| self.text(now - self.started)))
+        self.last.clone().or_else(|| {
+            (self.pages > 0 || self.evaluated > 0).then(|| self.text(now - self.started))
+        })
     }
 }
 
@@ -130,6 +139,9 @@ pub(crate) fn roll_cycle(h: &Hunt) {
     s.cycle.last = Some(text.clone());
     drop(s);
     tracing::info!(
+        paginas = c.pages,
+        distintos = c.seen.len(),
+        novos = c.new,
         avaliados = c.evaluated,
         passaram = c.passed,
         consultas_anuncios_economizadas = c.saved_listings,

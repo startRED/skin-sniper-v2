@@ -50,6 +50,13 @@ struct Row {
 
 /// Grava a página no registro. Chamado uma vez por página, antes da detecção.
 pub async fn record(h: &Hunt, key: &str, page: &ListingsPage, now: i64) -> Result<Recorded> {
+    {
+        let mut s = h.lock();
+        s.cycle.pages += 1;
+        s.cycle
+            .seen
+            .extend(page.listings.iter().map(|l| l.listing_id.clone()));
+    }
     if page.listings.is_empty() {
         // página vazia pode ser transitória: não prova sumiço nem serve de cobertura para a idade
         return Ok(Recorded::default());
@@ -86,7 +93,7 @@ pub async fn record(h: &Hunt, key: &str, page: &ListingsPage, now: i64) -> Resul
         (prev, rows)
     };
     let key = key.to_string();
-    h.db.call(move |c| {
+    let recorded = h.db.call(move |c| {
         let tx = c.transaction()?;
         let mut out = Recorded::default();
         let present: HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
@@ -159,7 +166,9 @@ pub async fn record(h: &Hunt, key: &str, page: &ListingsPage, now: i64) -> Resul
         tx.commit()?;
         Ok(out)
     })
-    .await
+    .await?;
+    h.lock().cycle.new += recorded.new;
+    Ok(recorded)
 }
 
 /// Soma contadores da hora no placar (`hourly_activity`). Colunas fixas do código, nunca de fora.

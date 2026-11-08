@@ -1250,6 +1250,8 @@ async fn grouped_search_credit_requires_a_page_transport_even_if_that_page_fails
             for _ in 0..4 {
                 s.queue.spend_discovery();
             }
+            // Uma seleção já deu 1/4; três páginas completam o crédito antes de abrir o breaker.
+            s.queue.next(NOW);
         }
         if blocked {
             for endpoint in [
@@ -1263,7 +1265,7 @@ async fn grouped_search_credit_requires_a_page_transport_even_if_that_page_fails
         } else {
             bodies.listings_500.store(true, Ordering::Relaxed);
         }
-        for _ in 0..4 {
+        for _ in 0..3 {
             let decision = crate::research::Decision {
                 source: "normal".into(),
                 policy: "test".into(),
@@ -1491,7 +1493,7 @@ async fn book_skips_listings_when_the_lowest_ask_is_above_the_ceiling() {
 }
 
 #[tokio::test]
-async fn blocked_listings_keep_the_book_lane_without_waiting() {
+async fn blocked_native_listings_prioritize_public_ads_over_book_prefilters() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
     let (h, mut rx) = hunt_against(&base, db);
@@ -1519,23 +1521,29 @@ async fn blocked_listings_keep_the_book_lane_without_waiting() {
         recovered.last_ok_at.is_some(),
         "render validado conta como resposta boa"
     );
+    assert!(
+        recovered
+            .message
+            .unwrap()
+            .contains("Filtros de seed/float em pausa")
+    );
     let (l0, b0) = (listings(), books());
     let legacy0 = legacy();
 
-    // o livro segue e o fallback barato continua aprendendo sem esperar a pausa
+    // O render ainda funciona: usa a vaga para anúncios, mesmo se o livro subir acima do teto.
     let quick = Duration::from_secs(5);
     tokio::time::timeout(quick, scheduler::run_task(&h, &task))
         .await
         .expect("não espera a pausa dos anúncios")
         .unwrap();
-    assert_eq!((listings(), books(), legacy()), (l0, b0 + 1, legacy0 + 1));
+    assert_eq!((listings(), books(), legacy()), (l0, b0, legacy0 + 1));
     assert_eq!(listings(), l0, "não repete /actions durante a pausa");
     set_lowest_ask(&bodies, 20000);
     tokio::time::timeout(quick, scheduler::run_task(&h, &task))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!((listings(), books(), legacy()), (l0, b0 + 2, legacy0 + 1));
+    assert_eq!((listings(), books(), legacy()), (l0, b0, legacy0 + 2));
 
     // e a agenda deixa os raros (que só os anúncios servem) de fora enquanto dura o bloqueio
     let mut rare = task.clone();
@@ -1956,6 +1964,10 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
         quick_cents: mid - 30,
     };
     detect::roll_cycle(&h); // abre o ciclo
+    // Duas páginas iguais não viram o dobro de anúncios distintos nem de anúncios novos.
+    let page = ledger_page(&[("x", "a", 500), ("y", "b", 600)], false);
+    ledger::record(&h, "q", &page, NOW).await.unwrap();
+    ledger::record(&h, "q", &page, NOW + 1).await.unwrap();
     {
         let mut s = h.lock();
         for (n, m) in [("A", -40), ("B", 12), ("B", 12), ("C", -5), ("D", -300)] {
@@ -1981,14 +1993,14 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .hunt
             .message
             .unwrap()
-            .starts_with("6 anúncios conferidos em 1 min")
+            .starts_with("2 páginas em 1 min; 2 anúncios distintos vistos, 2 novos no monitoramento; 6 avaliações de lucro")
     );
     T.store(NOW + 600, Ordering::SeqCst);
     detect::roll_cycle(&h);
     assert_eq!(
         h.state().hunt.message.as_deref(),
         Some(
-            "6 anúncios conferidos em 10 min; nenhum passou nos critérios de lucro e risco; o mais perto dava R$ 0,12 de lucro no preço médio"
+            "2 páginas em 10 min; 2 anúncios distintos vistos, 2 novos no monitoramento; 6 avaliações de lucro; nenhum passou nos critérios de lucro e risco; o mais perto dava R$ 0,12 de lucro no preço médio"
         )
     );
     // o ciclo novo começa zerado e o balanço antigo segue até o próximo fechar
@@ -1997,7 +2009,7 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .cycle
             .message(NOW + 601)
             .unwrap()
-            .starts_with("6 anúncios")
+            .starts_with("2 páginas")
     );
     T.store(NOW + 1200, Ordering::SeqCst);
     detect::roll_cycle(&h);
@@ -2006,7 +2018,7 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .hunt
             .message
             .unwrap()
-            .starts_with("0 anúncios conferidos em 10 min")
+            .starts_with("0 páginas em 10 min; 0 anúncios distintos vistos, 0 novos no monitoramento; 0 avaliações de lucro")
     );
 }
 

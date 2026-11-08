@@ -10,6 +10,34 @@ const NAME: &str = "Glock-18 | Moonrise (Field-Tested)";
 const CODE: &str = "G180420B6053004";
 
 #[tokio::test]
+async fn paused_or_broken_native_prefers_public_ads_but_respects_public_failures() {
+    for pause in [false, true] {
+        let c = fast("http://127.0.0.1:9");
+        {
+            let mut g = c.inner.lock().unwrap();
+            if pause {
+                g.limiter.on_429(Instant::now(), None);
+            } else {
+                g.breakers[Endpoint::Listings.idx()].open_until =
+                    Some(Instant::now() + Duration::from_secs(60));
+            }
+        }
+        assert!(c.prefer_public_listings(), "não depende de saída extra");
+        {
+            c.inner.lock().unwrap().side.on_429(Instant::now(), None);
+        }
+        assert!(!c.prefer_public_listings(), "respeita a pausa pública");
+        {
+            let mut g = c.inner.lock().unwrap();
+            g.side.paused_until = None;
+            g.breakers[Endpoint::Legacy.idx()].open_until =
+                Some(Instant::now() + Duration::from_secs(60));
+        }
+        assert!(!c.prefer_public_listings(), "respeita falhas públicas");
+    }
+}
+
+#[tokio::test]
 async fn slow_native_listings_use_ready_main_legacy_when_public_exit_is_down() {
     let hits = Arc::new(Mutex::new(Vec::new()));
     let seen = hits.clone();
@@ -292,7 +320,12 @@ async fn public_book_does_not_clear_native_pause_and_alt_429_falls_back() {
     c.get_json(Endpoint::Book, "/book", &[]).await.unwrap();
     assert!(c.stats().paused_until.is_some());
     assert!(c.stats().last_ok_at.is_none());
-    assert!(!c.prefer_public_listings());
+    assert!(
+        c.prefer_public_listings(),
+        "o render da principal segue disponível"
+    );
+    c.inner.lock().unwrap().side.on_429(Instant::now(), None);
+    assert!(!c.prefer_public_listings(), "as duas saídas estão em pausa");
     assert_eq!(c.take_calls()[1].limited, 1);
 }
 
