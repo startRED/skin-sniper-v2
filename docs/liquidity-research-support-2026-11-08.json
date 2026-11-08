@@ -1,0 +1,481 @@
+{
+  "artifact": "liquidity-research-support",
+  "as_of": "2026-11-08",
+  "scope": {
+    "game": "Counter-Strike 2",
+    "included": "skins de armas; amostra candidata para catálogo de aprendizado",
+    "excluded": [
+      "facas",
+      "luvas",
+      "adesivos",
+      "chaveiros",
+      "cápsulas",
+      "caixas"
+    ],
+    "price_policy": "Nenhum preço atual ou estimativa de lucro foi coletado. As faixas são grupos de cobertura para curadoria, não faixas monetárias nem afirmação de liquidez."
+  },
+  "method": {
+    "interpretation": "Liquidez deve ser medida por vendas concluídas ao longo de janelas comparáveis, e complementada por quantidade de anúncios, profundidade e dispersão entre preços. Estoque de anúncios sozinho não prova giro.",
+    "candidate_policy": "Os nomes abaixo são sementes de catálogo por variedade de armas e desgastes. São candidatos para medir; não são uma recomendação de compra nem uma lista confirmada como líquida. A confirmação deve vir de contagens recentes por nome e desgaste no próprio marketplace observado.",
+    "cross_market_caution": "Volume de um marketplace não é volume total; evitar somar fontes sem deduplicar a mesma venda. Mudanças de regra do jogo e eventos podem alterar demanda rapidamente.",
+    "no_steam_access": true,
+    "no_purchases": true
+  },
+  "sources": [
+    {
+      "id": "skinport_sales_history",
+      "url": "https://docs.skinport.com/sales/history",
+      "kind": "documentação oficial do marketplace",
+      "measures": "Volume de vendas concluídas, mínimo, máximo, média e mediana por item em janelas móveis de 24h, 7d, 30d e 90d; aceita market_hash_name e moeda, incluindo BRL. Sem nome retorna todos os itens. Resposta em cache por 5 minutos.",
+      "limitations": "Mede apenas Skinport; agregação não expõe timestamps ou float individual da venda. API documenta limite compartilhado de 8 requisições por 5 minutos com /items. Não foi chamada nesta pesquisa, então não há contagem observada anexada."
+    },
+    {
+      "id": "skinport_api_overview",
+      "url": "https://docs.skinport.com/",
+      "kind": "documentação oficial do marketplace",
+      "measures": "Confirma que a REST API fornece estatísticas de venda, estoque, feed ao vivo de anúncios/vendas e endpoints de conta.",
+      "limitations": "A página de visão geral não fornece volume histórico por item; usar o endpoint de sales/history para isso. Feed ao vivo é observação de uma plataforma, não mercado inteiro."
+    },
+    {
+      "id": "csfloat_api",
+      "url": "https://docs.csfloat.com/",
+      "kind": "documentação oficial do marketplace",
+      "measures": "API documenta anúncios ativos, paginação, ordenação por preço/float/recência, categoria, faixas de float, paint seed, preço e nome; útil para estoque, ask ladder e disponibilidade de atributos individuais.",
+      "limitations": "Documentação consultada não descreve endpoint oficial de vendas concluídas. Anúncios ativos não equivalem a vendas ou giro. A maioria das chamadas requer chave API."
+    },
+    {
+      "id": "csfloat_sales_endpoint_reference",
+      "url": "https://csfloatapi.com/api-reference/market-data/get-sales-history/",
+      "kind": "referência de terceiros para endpoint não incluído na documentação oficial consultada",
+      "measures": "Descreve GET /api/v1/history/{item_name}/sales para histórico recente de vendas por item no CSFloat.",
+      "limitations": "Fonte não oficial; verificar disponibilidade, autenticação, paginação, cobertura temporal e semântica de cancelamentos diretamente antes de depender. Não tratar como medição feita nesta pesquisa."
+    },
+    {
+      "id": "csfloat_listing_schema",
+      "url": "https://docs.csfloat.com/",
+      "kind": "documentação oficial do marketplace",
+      "measures": "Campos de anúncio incluem float, seed, preço, nome, categoria, datas, interesse/watchers e filtros para lowest_float/highest_float/float_rank.",
+      "limitations": "Watchers, bids e anúncios listados são sinais de atenção/estoque, não proxy equivalente a venda. Faixas específicas podem ter poucas observações."
+    },
+    {
+      "id": "steamanalyst_liquidity",
+      "url": "https://www.steamanalyst.com/liquidity",
+      "kind": "painel analítico de terceiros",
+      "measures": "Declara calcular unidades negociadas nos últimos 30 dias entre marketplaces acompanhados; exibe demanda, vendas/dia, anúncios e dias de estoque para venda.",
+      "limitations": "Agregador secundário com cobertura e deduplicação próprias; página inclui Steam Market. Excluir a Steam para este projeto ou usar somente fonte/recorte que permita identificá-la. Não é fonte primária; serve para comparação e descoberta, não como verdade de treinamento sem auditoria."
+    },
+    {
+      "id": "steamanalyst_terminal",
+      "url": "https://www.steamanalyst.com/terminal?tab=sales",
+      "kind": "painel analítico de terceiros",
+      "measures": "Painel apresenta listagem, valor acompanhado, volume, ranking e escada de preços por item; pode apoiar triagem e comparar mercados.",
+      "limitations": "Agrega marketplaces e inclui dados da Steam conforme a página. Cobertura, método de deduplicação e disponibilidade por desgaste variam; validar contra uma fonte primária antes de usar."
+    },
+    {
+      "id": "csdb_market",
+      "url": "https://csdb.gg/market/",
+      "kind": "agregador secundário",
+      "measures": "Publica ranking por volume de 30 dias e classifica liquidez; no momento da consulta apresentou nomes de armas como AK-47 | Slate, M4A4 | Neo-Noir e AWP | Chromatic Aberration entre exemplos de itens negociados.",
+      "limitations": "É uma fotografia mutável de agregador, sem auditoria independente de cobertura/duplicatas. A página também mostra preço; esta pesquisa não copiou nem usou esses valores. Usar somente como fonte para descobrir nomes que merecem conferência."
+    },
+    {
+      "id": "float_ranges_dataset",
+      "url": "https://github.com/ByMykel/CSGO-API",
+      "kind": "dataset comunitário público",
+      "measures": "JSON de skins inclui metadados de nomes, raridade e limites nativos de float (min_float/max_float), útil para excluir intervalos impossíveis e gerar catálogo por desgaste.",
+      "limitations": "Projeto não oficial e sujeito a atraso ou divergência com arquivos do jogo; versão do dataset deve ser registrada. Limites da skin não são faixas de preço nem indicam prêmio comercial."
+    },
+    {
+      "id": "valve_finish_guide",
+      "url": "https://www.counter-strike.net/workshop/workshopfinishes/",
+      "kind": "documentação oficial do jogo",
+      "measures": "Explica que acabamentos têm estados de desgaste e trata a faixa de wear como atributo da definição do acabamento.",
+      "limitations": "Não fornece população de floats, prêmio de preço ou distribuição de vendas de cada skin."
+    },
+    {
+      "id": "valve_tradeup_oct2025",
+      "url": "https://www.counter-strike.net/newsentry/516350567072662004?l=english",
+      "kind": "notas oficiais de atualização",
+      "measures": "Registra a regra oficial adicionada em 22/10/2025: cinco itens Covert podem gerar faca StatTrak (inputs StatTrak) ou faca/luvas normais (inputs normais), de uma coleção fornecida.",
+      "limitations": "Não especifica volume de contratos, probabilidades detalhadas por acabamento, fórmula de float, nem efeito duradouro na demanda. A mudança é um motivo para reavaliar séries antes/depois, não evidência de lucro."
+    },
+    {
+      "id": "valve_tradeup_souvenir_may2026",
+      "url": "https://store.steampowered.com/news/posts/?appgroupname=Valve&appids=730%2C620%2C550%2C240%2C10%2C220%2C70%2C1840%2C400%2C440%2C420%2C500%2C80%2C380%2C4000%2C300%2C30%2C80822%2C80788%2C80762%2C80752%2C80747%2C80739%2C80633%2C5739%2C360%2C340%2C320%2C280%2C40%2C130%2C60%2C50%2C20%2C219%2C5952%2C410%2C5489%2C5268%2C630%2C570%2C80923%2C922%2C5734%2C5724%2C5260%2C5073%2C5051%2C5032%2C997%2C987%2C985%2C960%2C937%2C936%2C934%2C933%2C932%2C931%2C930%2C916%2C923%2C915%2C914%2C913%2C912%2C905%2C904%2C5149%2C5150%2C5141%2C5139%2C5138%2C918%2C917%2C901%2C81061%2C81026%2C5825%2C5722%2C995%2C906%2C1003&enddate=1779768567&feed=steam_community_announcements",
+      "kind": "notas oficiais de atualização",
+      "measures": "Nota de 21/05/2026 diz que Souvenir pode ser selecionado junto de itens normais; atributos Souvenir são removidos e o resultado é normal, um nível acima, de coleção entre as selecionadas.",
+      "limitations": "A URL é um feed oficial longo e agregador por grupo de aplicativos; a nota comprova regra, não procura ou volume. Capturar uma URL canônica de nota específica antes de automatizar."
+    },
+    {
+      "id": "tradeup_float_formula_community",
+      "url": "https://cs2tradeup.gg/about",
+      "kind": "calculadora/comunidade, não oficial",
+      "measures": "Documenta a fórmula comunitária observada: normalizar cada float de entrada pela faixa nativa, calcular a média normalizada e mapear à faixa da saída; probabilidades proporcionais às entradas por coleção.",
+      "limitations": "A Valve não publicou essa fórmula nas notas consultadas. Validar com casos conhecidos e registrar versão; fórmula não é sinal de liquidez nem garante que entradas ou saídas sejam vendidas."
+    },
+    {
+      "id": "csfloat_float_pricing_method",
+      "url": "https://www.steamanalyst.com/guides/float-value-explained",
+      "kind": "análise secundária baseada em vendas",
+      "measures": "Descreve análise de 356 mil vendas, usando preço de cada venda dividido pela referência diária de item comum para separar mudança temporal de diferença por float.",
+      "limitations": "Método e base são do publicador, não dados brutos completos auditáveis nesta pesquisa. Evidência agregada não define um corte universal nem prova prêmio líquido após taxas."
+    }
+  ],
+  "float_premium_research": {
+    "principle": "Float premium é específico de cada skin, desgaste, pattern/seed quando aplicável e marketplace. Defina as coortes com limites nativos por item; nunca use um único corte numérico global como se todas as skins tivessem range 0–1.",
+    "wear_bands_for_initial_catalog": [
+      {
+        "wear": "Factory New",
+        "nominal_min": 0,
+        "nominal_max_exclusive": 0.07
+      },
+      {
+        "wear": "Minimal Wear",
+        "nominal_min": 0.07,
+        "nominal_max_exclusive": 0.15
+      },
+      {
+        "wear": "Field-Tested",
+        "nominal_min": 0.15,
+        "nominal_max_exclusive": 0.38
+      },
+      {
+        "wear": "Well-Worn",
+        "nominal_min": 0.38,
+        "nominal_max_exclusive": 0.45
+      },
+      {
+        "wear": "Battle-Scarred",
+        "nominal_min": 0.45,
+        "nominal_max_inclusive": 1
+      }
+    ],
+    "band_caveat": "Limites nominais da comunidade usados como bins de desgaste. A faixa realmente possível de cada acabamento pode ser menor (ex.: AWP | Asiimov não chega a FN/MW); interseccione cada bin com min_float/max_float do dataset vigente e preserve o desgaste exato. Em fronteira, use a convenção de intervalos semiabertos e confira o nome do item.",
+    "cohorts_to_learn": [
+      {
+        "id": "ordinary_baseline",
+        "definition": "Anúncios e vendas do mesmo market_hash_name, mesma qualidade/StatTrak/Souvenir e desgaste, sem segmentar float além do intervalo nativo.",
+        "purpose": "Controle de preço base e giro."
+      },
+      {
+        "id": "wear_boundary",
+        "definition": "Floats logo abaixo/depois de fronteiras visuais nominais 0.07, 0.15, 0.38 e 0.45, somente se válidos para o acabamento; armazenar float numérico, não apenas label.",
+        "purpose": "Aprender diferença entre aparência/label de desgaste e preço observado; amostras próximas à fronteira precisam ser comparadas dentro da mesma skin."
+      },
+      {
+        "id": "skin_specific_low_float",
+        "definition": "Percentis do float observado por item e desgaste (ex.: ≤p10 e ≤p1 após obter amostra suficiente), juntamente com a distribuição completa e a faixa nativa do acabamento.",
+        "purpose": "Procurar prêmio de float sem impor um corte universal ou presumir que todo low-float tem comprador."
+      },
+      {
+        "id": "tradeup_input_float",
+        "definition": "Registrar float e min/max nativos de cada entrada; derivar normalized=(float−min)/(max−min), então usar a média normalizada para agrupar saídas previstas.",
+        "purpose": "Validar previsões de contrato em base reproduzível. Tratar como mecanismo de geração, não como premium comprovado."
+      }
+    ],
+    "evidence_threshold_guidance": "Sem volume mínimo universal definido nesta pesquisa. Exigir tamanho amostral e intervalo de incerteza por grupo, reportar n e janela; não chamar premium de comprovado com poucos anúncios ou apenas ofertas ativas."
+  },
+  "candidate_catalog": {
+    "status": "Amostra inicial para coleta e comparação, não ranking medido. Nomes exatos podem existir em variantes StatTrak™; expandir variante somente quando a fonte de inventário retornar market_hash_name válido.",
+    "tiers": [
+      {
+        "tier": "entrada_para_cobertura",
+        "meaning": "Candidatas de preço relativo baixo a médio, escolhidas para testar giro por armas muito usadas; nenhuma faixa monetária inferida.",
+        "candidates": [
+          {
+            "weapon_family": "AK-47",
+            "skin": "AK-47 | Slate",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Apareceu em ranking secundário de volume de 30 dias; verificar na fonte primária por desgaste."
+          },
+          {
+            "weapon_family": "AK-47",
+            "skin": "AK-47 | Uncharted",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de cobertura do mesmo rifle; giro não medido aqui."
+          },
+          {
+            "weapon_family": "M4A1-S",
+            "skin": "M4A1-S | Nightmare",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Apareceu em ranking secundário de volume de armas; confirmar em fonte primária."
+          },
+          {
+            "weapon_family": "M4A4",
+            "skin": "M4A4 | Magnesium",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de cobertura; giro não medido aqui."
+          },
+          {
+            "weapon_family": "AWP",
+            "skin": "AWP | Atheris",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de cobertura de sniper; giro não medido aqui."
+          },
+          {
+            "weapon_family": "USP-S",
+            "skin": "USP-S | Cortex",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de cobertura de pistola; giro não medido aqui."
+          },
+          {
+            "weapon_family": "Glock-18",
+            "skin": "Glock-18 | Vogue",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de cobertura de pistola; giro não medido aqui."
+          },
+          {
+            "weapon_family": "Desert Eagle",
+            "skin": "Desert Eagle | Light Rail",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de cobertura de pistola; giro não medido aqui."
+          },
+          {
+            "weapon_family": "MP9",
+            "skin": "MP9 | Food Chain",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de SMG; giro não medido aqui."
+          },
+          {
+            "weapon_family": "MAC-10",
+            "skin": "MAC-10 | Disco Tech",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de SMG; giro não medido aqui."
+          }
+        ]
+      },
+      {
+        "tier": "intermediaria_para_cobertura",
+        "meaning": "Candidatas de valor relativo intermediário ou acabamento conhecido; confirmação depende de vendas observadas por desgaste.",
+        "candidates": [
+          {
+            "weapon_family": "AK-47",
+            "skin": "AK-47 | Redline",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear",
+              "Well-Worn"
+            ],
+            "basis": "Nome recorrente em ferramentas de mercado e útil para testar prémio/segmentação por desgaste; liquidez atual não medida."
+          },
+          {
+            "weapon_family": "AK-47",
+            "skin": "AK-47 | Inheritance",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Exibida no painel de vendas do SteamAnalyst durante a pesquisa; sinal secundário, não contagem auditada."
+          },
+          {
+            "weapon_family": "M4A4",
+            "skin": "M4A4 | Neo-Noir",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Apareceu no ranking secundário de volume de 30 dias."
+          },
+          {
+            "weapon_family": "M4A1-S",
+            "skin": "M4A1-S | Decimator",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de cobertura de rifle; giro não medido aqui."
+          },
+          {
+            "weapon_family": "AWP",
+            "skin": "AWP | Chromatic Aberration",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Apareceu no ranking secundário de volume de 30 dias."
+          },
+          {
+            "weapon_family": "AWP",
+            "skin": "AWP | Asiimov",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Well-Worn",
+              "Battle-Scarred"
+            ],
+            "basis": "Nome recorrente em rankings/painéis de mercado; faixa nativa começa acima de 0,15, portanto FN/MW são impossíveis."
+          },
+          {
+            "weapon_family": "USP-S",
+            "skin": "USP-S | Printstream",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de acabamento popular e útil para controlar impacto de desgaste; giro não medido."
+          },
+          {
+            "weapon_family": "Desert Eagle",
+            "skin": "Desert Eagle | Printstream",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de pistola; giro não medido."
+          },
+          {
+            "weapon_family": "Glock-18",
+            "skin": "Glock-18 | Neo-Noir",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de pistola; giro não medido."
+          },
+          {
+            "weapon_family": "FAMAS",
+            "skin": "FAMAS | Commemoration",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata para ampliar cobertura além dos rifles de maior popularidade; giro não medido."
+          }
+        ]
+      },
+      {
+        "tier": "alto_valor_para_cobertura",
+        "meaning": "Candidatas para testar se volumes menores ainda justificam acompanhamento; valor alto não implica alta liquidez.",
+        "candidates": [
+          {
+            "weapon_family": "AK-47",
+            "skin": "AK-47 | Vulcan",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Apareceu em lista secundária de itens mais negociados; validar volumes recentes por marketplace e desgaste."
+          },
+          {
+            "weapon_family": "AK-47",
+            "skin": "AK-47 | Fire Serpent",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Well-Worn"
+            ],
+            "basis": "Candidata de alto valor/baixa oferta para aprendizado; nenhuma liquidez ou preço atual afirmados."
+          },
+          {
+            "weapon_family": "M4A4",
+            "skin": "M4A4 | Howl",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de alto valor; testar separadamente por baixa frequência possível e concentração de vendas."
+          },
+          {
+            "weapon_family": "M4A1-S",
+            "skin": "M4A1-S | Welcome to the Jungle",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de alto valor e oferta limitada; giro não medido."
+          },
+          {
+            "weapon_family": "AWP",
+            "skin": "AWP | Dragon Lore",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear",
+              "Well-Worn"
+            ],
+            "basis": "Candidata de alto valor; requer janela maior e reporte explícito de amostra pequena."
+          },
+          {
+            "weapon_family": "AWP",
+            "skin": "AWP | Gungnir",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de alto valor; giro não medido."
+          },
+          {
+            "weapon_family": "Desert Eagle",
+            "skin": "Desert Eagle | Blaze",
+            "wears_to_sample": [
+              "Factory New",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata com range de float limitado; nunca assumir FT/WW/BS sem validar dataset."
+          },
+          {
+            "weapon_family": "Desert Eagle",
+            "skin": "Desert Eagle | Fennec Fox",
+            "wears_to_sample": [
+              "Field-Tested",
+              "Minimal Wear"
+            ],
+            "basis": "Candidata de alto valor para pistola; giro não medido."
+          }
+        ]
+      }
+    ],
+    "tradeup_sensitive_followup": "Itens Covert usados como entradas em contratos especiais podem ter sua demanda alterada pela regra oficial de cinco Covert → faca/luvas. A regra e sua expansão a Souvenir exigem acompanhar mudanças de volume antes/depois por nome, qualidade e coleção; facas/luvas permanecem fora do catálogo do projeto."
+  },
+  "recommended_observation_fields": [
+    "marketplace",
+    "market_hash_name",
+    "quality_variant",
+    "wear",
+    "float_min_native",
+    "float_max_native",
+    "float_exact_when_available",
+    "sales_count_24h_7d_30d_90d",
+    "active_listing_count",
+    "bid_depth_if_public",
+    "observed_at_utc",
+    "currency",
+    "source_method_and_version"
+  ],
+  "references_for_summary": [
+    "https://docs.skinport.com/sales/history",
+    "https://docs.csfloat.com/",
+    "https://www.steamanalyst.com/liquidity",
+    "https://www.steamanalyst.com/guides/float-value-explained",
+    "https://github.com/ByMykel/CSGO-API",
+    "https://www.counter-strike.net/workshop/workshopfinishes/",
+    "https://www.counter-strike.net/newsentry/516350567072662004?l=english"
+  ]
+}

@@ -4,6 +4,7 @@
 //! `Hunt` é o estado compartilhado: o laço (`scheduler::run`) e o servidor mexem nele; nenhum lock
 //! atravessa um `await`.
 
+pub mod bootstrap;
 pub mod catalog;
 pub mod detect;
 pub mod explore;
@@ -230,6 +231,7 @@ impl Hunt {
 
     /// Carrega do banco o que sobreviveu a um reinício: oportunidades ainda ativas e a razão BRL/USD.
     pub async fn load(&self) -> anyhow::Result<()> {
+        bootstrap::load(&self.db).await?;
         let rows: Vec<(String, Option<String>)> = self
             .db
             .call(|c| {

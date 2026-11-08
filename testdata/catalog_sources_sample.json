@@ -1,0 +1,576 @@
+{
+  "sources": [
+    "https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins.json",
+    "https://prices.csgotrader.app/latest/steam.json"
+  ],
+  "skins": [
+    {
+      "id": "skin-91a429af4a60",
+      "name": "AK-47 | Redline",
+      "description": "Powerful and reliable, the AK-47 is one of the most popular assault rifles in the world. It is most deadly in short, controlled bursts of fire. It has been painted using a carbon fiber hydrographic and a dry-transfer decal of a red pinstripe.\\n\\n<i>Never be afraid to push it to the limit</i>",
+      "weapon": {
+        "id": "weapon_ak47",
+        "weapon_id": 7,
+        "name": "AK-47"
+      },
+      "category": {
+        "id": "csgo_inventory_weapon_category_rifles",
+        "name": "Rifles"
+      },
+      "pattern": {
+        "id": "cu_ak47_cobra",
+        "name": "Redline"
+      },
+      "min_float": 0.1,
+      "max_float": 0.7,
+      "rarity": {
+        "id": "rarity_legendary_weapon",
+        "name": "Classified",
+        "color": "#d32ce6"
+      },
+      "stattrak": true,
+      "souvenir": true,
+      "paint_index": "282",
+      "wears": [
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_1",
+          "name": "Minimal Wear"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_2",
+          "name": "Field-Tested"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_3",
+          "name": "Well-Worn"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_4",
+          "name": "Battle-Scarred"
+        }
+      ],
+      "collections": [
+        {
+          "id": "collection-set-community-2",
+          "name": "The Phoenix Collection",
+          "image": "https://raw.githubusercontent.com/ByMykel/counter-strike-image-tracker/main/static/panorama/images/econ/set_icons/set_community_2_png.png"
+        }
+      ],
+      "crates": [
+        {
+          "id": "crate-4011",
+          "name": "Operation Phoenix Weapon Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VTqVBP4io_fr2wPtqP5PKVvJPSQDWSSl7sn6eMxHC3hwhl3sDuDztivJHrEagJzWZd3W6dU5fXcT7oM"
+        }
+      ],
+      "team": {
+        "id": "terrorists",
+        "name": "Terrorist"
+      },
+      "legacy_model": true,
+      "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyLwlcK3wiFO0POlPPNSI_-RHGavzedxuPUnFniykEtzsWWBzoyuIiifaAchDZUjTOZe4RC_w4buM-6z7wzbgokUyzK-0H08hRGDMA",
+      "original": {
+        "name": "weapon_ak47"
+      }
+    },
+    {
+      "id": "skin-52971a3886a2",
+      "name": "Glock-18 | Moonrise",
+      "description": "The Glock 18 is a serviceable first-round pistol that works best against unarmored opponents and is capable of firing three-round bursts. A randomized city landscape in the foreground gives way to a full moon and purple night sky.\\n\\n<i>Look for the North Star</i>",
+      "weapon": {
+        "id": "weapon_glock",
+        "weapon_id": 4,
+        "name": "Glock-18"
+      },
+      "category": {
+        "id": "csgo_inventory_weapon_category_pistols",
+        "name": "Pistols"
+      },
+      "pattern": {
+        "id": "aa_glock_18_urban_moon_fever",
+        "name": "Moonrise"
+      },
+      "min_float": 0,
+      "max_float": 0.65,
+      "rarity": {
+        "id": "rarity_mythical_weapon",
+        "name": "Restricted",
+        "color": "#8847ff"
+      },
+      "stattrak": true,
+      "souvenir": true,
+      "paint_index": "694",
+      "wears": [
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_0",
+          "name": "Factory New"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_1",
+          "name": "Minimal Wear"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_2",
+          "name": "Field-Tested"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_3",
+          "name": "Well-Worn"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_4",
+          "name": "Battle-Scarred"
+        }
+      ],
+      "collections": [
+        {
+          "id": "collection-set-community-19",
+          "name": "The Clutch Collection",
+          "image": "https://raw.githubusercontent.com/ByMykel/counter-strike-image-tracker/main/static/panorama/images/econ/set_icons/set_community_19_png.png"
+        }
+      ],
+      "crates": [
+        {
+          "id": "crate-4471",
+          "name": "Clutch Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VTqVBP4io_frHsVtqr8a_dsdKTAWDWVxLgjsrAwHSvgwEQk4m-ByYuqIC2eO1VyD5QiR_lK7EcxQQPYQA"
+        }
+      ],
+      "team": {
+        "id": "terrorists",
+        "name": "Terrorist"
+      },
+      "legacy_model": true,
+      "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL2kpnj9h1a7s2pZKtuK8_CVliF0-x3vt5kQCa9qhsipTiXpYPwJiPTcANzXJNyFOEMthXsktHhMLzl4FaK3toWn3iqhi9BvHw9su5UU6Zw-_bJz1aWcX-Jd_0",
+      "original": {
+        "name": "weapon_glock"
+      }
+    },
+    {
+      "id": "skin-657a59e6566b",
+      "name": "★ Karambit | Fade",
+      "description": "With its curved blade mimicking a tiger's claw, the karambit was developed as part of the southeast Asian martial discipline of silat. The knife is typically used with a reverse grip, with the finger ring on the index finger. It has been painted by airbrushing transparent paints that fade together over a chrome base coat.\\n\\n<i>This isn't just a weapon, it's a conversation piece - Imogen, Arms Dealer In Training</i>",
+      "weapon": {
+        "id": "weapon_knife_karambit",
+        "weapon_id": 507,
+        "name": "Karambit"
+      },
+      "category": {
+        "id": "sfui_invpanel_filter_melee",
+        "name": "Knives"
+      },
+      "pattern": {
+        "id": "aa_fade",
+        "name": "Fade"
+      },
+      "min_float": 0,
+      "max_float": 0.08,
+      "rarity": {
+        "id": "rarity_ancient_weapon",
+        "name": "Covert",
+        "color": "#eb4b4b"
+      },
+      "stattrak": true,
+      "souvenir": false,
+      "paint_index": "38",
+      "wears": [
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_0",
+          "name": "Factory New"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_1",
+          "name": "Minimal Wear"
+        }
+      ],
+      "collections": [],
+      "crates": [
+        {
+          "id": "crate-4001",
+          "name": "CS:GO Weapon Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bji61XxRCKg0MSz_nUDvPb-OPFvdKTFDzbAkbp16bY5Gn6wkx9ysj7Xntf9IC6WZgA-Sswnnj45WXo"
+        },
+        {
+          "id": "crate-4002",
+          "name": "eSports 2013 Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjx-UnoUwniocSwrHEV7KaobPdud6HEWjXGmbYl6LIwHn2ywhgh5GzXzdmsc3yRalAkD5R3FvlK7Ed7JoXDRQ"
+        },
+        {
+          "id": "crate-4003",
+          "name": "Operation Bravo Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj7-lz1QAn4kZjf9CsVuvf7OfQ5IabBVzbHlb915bcwHCjikEp_sTnTn4z6eH6RblQlC8RwFPlK7EdXSP0Ibg"
+        },
+        {
+          "id": "crate-4004",
+          "name": "CS:GO Weapon Case 2",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bji61XxRCKj0M-xr3IIvqP5PqI_c6LDCjWUkrdw5LUwTivgkE9wsGnUnNr8InzBP1c-SswnzDatg2g"
+        },
+        {
+          "id": "crate-4005",
+          "name": "eSports 2013 Winter Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjx-UnoUwniocSwrHFkvqbgafw-JKHKWTGSw7wmtOMxTX2yw0ki5DyGm4ugcirGPQ4nC5B3EbNetw74zIMdBc4CJw"
+        },
+        {
+          "id": "crate-4009",
+          "name": "Winter Offensive Weapon Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VTqVBP4io_frGxZvqX4avxuIabDXDPJxb534uQ-TH-3wk8isGqByIuoIHKRbQRyXpJ2W6dU5a9fuS_R"
+        },
+        {
+          "id": "crate-4010",
+          "name": "CS:GO Weapon Case 3",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bji61XxRCKi0JS0pCZYvaCvOPI0eaHKWjGVmbovs7ZrHH_nl0oj5mXSzNqqdS7BaAc-SswnOWLoN2Y"
+        },
+        {
+          "id": "crate-4011",
+          "name": "Operation Phoenix Weapon Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VTqVBP4io_fr2wPtqP5PKVvJPSQDWSSl7sn6eMxHC3hwhl3sDuDztivJHrEagJzWZd3W6dU5fXcT7oM"
+        },
+        {
+          "id": "crate-4019",
+          "name": "eSports 2014 Summer Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjx-UnoUwniocSwrHZk_OejZaF_bvXGWT6Vkughs-A5H321kUQl5myEm9__dHKQaw8gWZtzQ7VYu0a-lYf5d7S1qrUfUsY"
+        },
+        {
+          "id": "crate-4029",
+          "name": "Operation Vanguard Weapon Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VTqVBP4io_fqGwPtvP9MKA_JKOSCGGWmL8useQ6TXywwB8k4T-EyImgeCmXbA4oAsRzW6dU5QwRm5UL"
+        },
+        {
+          "id": "crate-4186",
+          "name": "Revolver Case",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VTqVBP4io_frHIV7qWvOqE9IqSVWGKVlu8v6eM7Girmxkwl4TnWmIv8J36WagEiCpImQvlK7EclOzxxiQ"
+        }
+      ],
+      "team": {
+        "id": "both",
+        "name": "Both Teams"
+      },
+      "legacy_model": false,
+      "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL6kJ_m-B1Q7uCvZaZkNM-SD1iWwOpzj-1gSCGn20tztm_UyIn_JHKUbgYlWMcmQ-ZcskSwldS0MOnntAfd3YlMzH35jntXrnE8SOGRGG8",
+      "original": {
+        "name": "weapon_knife_karambit"
+      }
+    },
+    {
+      "id": "skin-dfd5859c02ae",
+      "name": "MP9 | Sand Dashed",
+      "description": "Manufactured in Switzerland, the cutting-edge MP9 SMG is an ergonomic polymer weapon favored by private security firms. It has been spray-painted using short pieces of tape as stencils.",
+      "weapon": {
+        "id": "weapon_mp9",
+        "weapon_id": 34,
+        "name": "MP9"
+      },
+      "category": {
+        "id": "csgo_inventory_weapon_category_smgs",
+        "name": "SMGs"
+      },
+      "pattern": {
+        "id": "sp_tape_short_sand",
+        "name": "Sand Dashed"
+      },
+      "min_float": 0.06,
+      "max_float": 0.8,
+      "rarity": {
+        "id": "rarity_common_weapon",
+        "name": "Consumer Grade",
+        "color": "#b0c3d9"
+      },
+      "stattrak": false,
+      "souvenir": true,
+      "paint_index": "148",
+      "wears": [
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_0",
+          "name": "Factory New"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_1",
+          "name": "Minimal Wear"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_2",
+          "name": "Field-Tested"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_3",
+          "name": "Well-Worn"
+        },
+        {
+          "id": "SFUI_InvTooltip_Wear_Amount_4",
+          "name": "Battle-Scarred"
+        }
+      ],
+      "collections": [
+        {
+          "id": "collection-set-dust-2",
+          "name": "The Dust 2 Collection",
+          "image": "https://raw.githubusercontent.com/ByMykel/counter-strike-image-tracker/main/static/panorama/images/econ/set_icons/set_dust_2_png.png"
+        }
+      ],
+      "crates": [
+        {
+          "id": "crate-4006",
+          "name": "DreamHack 2013 Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjw4k62EiLhjJnt8mxevfSqbqVsJaHKWGWVmOwi5eJtGX7jzUsi6mTXzNb_d3rDPQZzW5okW6dU5dbJcrqx"
+        },
+        {
+          "id": "crate-4013",
+          "name": "EMS One 2014 Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjx50q2FSLhjJnt8mxavfH_bPRvd_GSCzHBxbZ0tLY6Gy3kkRl0tW7cy4n4dXnFOFN1DJZzW6dU5V8ClnPH"
+        },
+        {
+          "id": "crate-4022",
+          "name": "ESL One Cologne 2014 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjx-VW2FSLhjJnt8h1f6s2qfbd5cr6XCD-VkroktrVoHi2wlBhx5mXXz4r8d3yVbQ5zAsF3RuYD5hO9kdXhKaq8sLHIAjYS"
+        },
+        {
+          "id": "crate-4031",
+          "name": "DreamHack 2014 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjw4k62FSLhjJnt8h1f6s2qfbd5cr7CDTTIkLsg4-A-Fii3wU8k4TjUyov4dniWbVAmWJt3R-MI5xm_xta0Kaq8sO_IzfuM"
+        },
+        {
+          "id": "crate-4079",
+          "name": "ESL One Katowice 2015 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjx-VXsQAn-iZ_j-HALvqeReLZiLf-sCmKvxftlpLMnSS23wE504Grcm4mgJ3OfPAMlDpRxRLZZ5EK4lIfjPu3j4ATegtlGnzK-0H3UToJFDg"
+        },
+        {
+          "id": "crate-4131",
+          "name": "ESL One Cologne 2015 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bjx-VXkThH-mZjlr3IKus2-eqtgL8-XC1iU1P1i4q9sTC2ylER05j7QnomsJHiQag4nApJwRu8DsULqloKxYrnl7wyP3t9G02yg2YmRsS6G"
+        },
+        {
+          "id": "crate-4176",
+          "name": "DreamHack Cluj-Napoca 2015 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35kztE02gy6nw7y1W4M2qbZtpNeOHXCmUk7935rI_GXDlx010627Xztf8dC7Cagd1W8dwQuUJsUa-koa2NOLj-UWA3M6kNEKU"
+        },
+        {
+          "id": "crate-4225",
+          "name": "MLG Columbus 2016 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VXyTB_kjcSwrHRk_-ChZatSJPWsCnKD1bw4s-c7FyrmlkR05W3dytmgeHKSbg9xDMMkFrIL4RC6wILkN-7g5leIg5UFk3uYze73pw"
+        },
+        {
+          "id": "crate-4274",
+          "name": "Cologne 2016 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj35VXoRhP0zMaxqx1L_f2jZ5tpJc-XG3SEk6B34uA_THmxkx92sTiBmNmrIirFaAQmX8BxTbEJ4UHqw4DuPri24gCNlcsbmh_qWnC9"
+        },
+        {
+          "id": "crate-4344",
+          "name": "Atlanta 2017 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj1_lXmTwnwzMaxqh1L_f2jZ5tpJc-XG3SEk6Au4ec5HS3rw0p052qHn4mhJHjFbQckAsByROVc4xS8m4LmZbvj5ACNlcsbmgzIAi55"
+        },
+        {
+          "id": "crate-4542",
+          "name": "London 2018 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj45VfjThOjzse4wjJJ4P-hV6BoH_SGHXPCj79ysbYwHi23k093tzvRy9isIi_GP1N0WZMjQeJZsxe8w4fnYbjitQTAy9USfZHe1a8"
+        },
+        {
+          "id": "crate-4592",
+          "name": "Katowice 2019 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj_603oVhTym8SwrHtk_-ChZatSJPWsCnKD1bw45rA7GnHrk0hx42TXno79d3zCaVNzApBzReJet0W_lYazNLjj5gLfiZUFk3vpn6VvvA"
+        },
+        {
+          "id": "crate-4662",
+          "name": "Berlin 2019 Dust II Souvenir Package",
+          "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGJKz2lu_XsnXwtmkJjSU91dh8bj270vrSBOjzse5wjJJ4P-hV6BoH_SGHXPCj7oj47Y4HyiwkUhy5j6Gzt2qcXrBPVBzA5Z4FOJY5hW7xNTvZeixsgDAy9USl0sSteY"
+        }
+      ],
+      "team": {
+        "id": "counter-terrorists",
+        "name": "Counter-Terrorist"
+      },
+      "legacy_model": false,
+      "image": "https://community.akamai.steamstatic.com/economy/image/i0CoZ81Ui0m-9KwlBY1L_18myuGuq1wfhWSaZgMttyVfPaERSR0Wqmu7LAocGIGz3UqlXOLrxM-vMGmW8VNxu5Dx60noTyL8js_f7jJk-_O-bZt-KP-BGliDwOByj-1gSCGn20kl5TjVwt-sJC6XOFAmDpUiQecOthTsm9PkYuix5wWP3opHyCr9hy9XrnE8MNQOT0E",
+      "original": {
+        "name": "weapon_mp9"
+      }
+    }
+  ],
+  "prices": {
+    "Glock-18 | Moonrise (Field-Tested)": {
+      "last_24h": 1.27,
+      "last_7d": 1.23,
+      "last_30d": 1.19,
+      "last_90d": 1.27
+    },
+    "Glock-18 | Moonrise (Battle-Scarred)": {
+      "last_24h": 1.22,
+      "last_7d": 1.19,
+      "last_30d": 1.16,
+      "last_90d": 1.21
+    },
+    "Glock-18 | Moonrise (Factory New)": {
+      "last_24h": 5.95,
+      "last_7d": 5.89,
+      "last_30d": 5.12,
+      "last_90d": 5.07
+    },
+    "StatTrak™ Glock-18 | Moonrise (Factory New)": {
+      "last_24h": 10.32,
+      "last_7d": 8.79,
+      "last_30d": 8.61,
+      "last_90d": 8.94
+    },
+    "StatTrak™ Glock-18 | Moonrise (Field-Tested)": {
+      "last_24h": 2.93,
+      "last_7d": 2.49,
+      "last_30d": 2.27,
+      "last_90d": 2.35
+    },
+    "Glock-18 | Moonrise (Minimal Wear)": {
+      "last_24h": 2.16,
+      "last_7d": 2.15,
+      "last_30d": 2.1,
+      "last_90d": 2.2
+    },
+    "StatTrak™ Glock-18 | Moonrise (Battle-Scarred)": {
+      "last_24h": 2.88,
+      "last_7d": 2.46,
+      "last_30d": 2.29,
+      "last_90d": 2.28
+    },
+    "Glock-18 | Moonrise (Well-Worn)": {
+      "last_24h": 1.3,
+      "last_7d": 1.24,
+      "last_30d": 1.2,
+      "last_90d": 1.37
+    },
+    "StatTrak™ Glock-18 | Moonrise (Minimal Wear)": {
+      "last_24h": 4.18,
+      "last_7d": 4.3,
+      "last_30d": 4.16,
+      "last_90d": 4.37
+    },
+    "StatTrak™ Glock-18 | Moonrise (Well-Worn)": {
+      "last_24h": 2.96,
+      "last_7d": 2.64,
+      "last_30d": 2.55,
+      "last_90d": 2.74
+    },
+    "MP9 | Sand Dashed (Field-Tested)": {
+      "last_24h": 0.03,
+      "last_7d": 0.03,
+      "last_30d": 0.03,
+      "last_90d": 0.04
+    },
+    "MP9 | Sand Dashed (Well-Worn)": {
+      "last_24h": 0.03,
+      "last_7d": 0.03,
+      "last_30d": 0.03,
+      "last_90d": 0.03
+    },
+    "AK-47 | Redline (Well-Worn)": {
+      "last_24h": 35.16,
+      "last_7d": 34.61,
+      "last_30d": 34.78,
+      "last_90d": 36.91
+    },
+    "AK-47 | Redline (Battle-Scarred)": {
+      "last_24h": 33.71,
+      "last_7d": 32.95,
+      "last_30d": 32.84,
+      "last_90d": 35.12
+    },
+    "MP9 | Sand Dashed (Battle-Scarred)": {
+      "last_24h": 0.03,
+      "last_7d": 0.03,
+      "last_30d": 0.03,
+      "last_90d": 0.04
+    },
+    "StatTrak™ AK-47 | Redline (Battle-Scarred)": {
+      "last_24h": 51.95,
+      "last_7d": 50.99,
+      "last_30d": 51.73,
+      "last_90d": 53.31
+    },
+    "AK-47 | Redline (Minimal Wear)": {
+      "last_24h": 210.11,
+      "last_7d": 211.6,
+      "last_30d": 213.53,
+      "last_90d": 232.43
+    },
+    "StatTrak™ AK-47 | Redline (Field-Tested)": {
+      "last_24h": 88.38,
+      "last_7d": 89.62,
+      "last_30d": 89.84,
+      "last_90d": 91.38
+    },
+    "AK-47 | Redline (Field-Tested)": {
+      "last_24h": 43.56,
+      "last_7d": 42.8,
+      "last_30d": 43.51,
+      "last_90d": 43.91
+    },
+    "MP9 | Sand Dashed (Factory New)": {
+      "last_24h": 2.04,
+      "last_7d": 2.08,
+      "last_30d": 1.76,
+      "last_90d": 2.27
+    },
+    "Souvenir MP9 | Sand Dashed (Field-Tested)": {
+      "last_24h": null,
+      "last_7d": 0.66,
+      "last_30d": 0.7,
+      "last_90d": 0.75
+    },
+    "StatTrak™ AK-47 | Redline (Well-Worn)": {
+      "last_24h": 69.63,
+      "last_7d": 69.67,
+      "last_30d": 69.84,
+      "last_90d": 69.72
+    },
+    "Souvenir MP9 | Sand Dashed (Well-Worn)": {
+      "last_24h": null,
+      "last_7d": 0.85,
+      "last_30d": 1.24,
+      "last_90d": 0.95
+    },
+    "MP9 | Sand Dashed (Minimal Wear)": {
+      "last_24h": 0.05,
+      "last_7d": 0.05,
+      "last_30d": 0.05,
+      "last_90d": 0.06
+    },
+    "Souvenir MP9 | Sand Dashed (Minimal Wear)": {
+      "last_24h": 1.1,
+      "last_7d": 1.25,
+      "last_30d": 1.24,
+      "last_90d": 1.31
+    },
+    "Souvenir MP9 | Sand Dashed (Battle-Scarred)": {
+      "last_24h": 0.54,
+      "last_7d": 0.54,
+      "last_30d": 0.53,
+      "last_90d": 0.53
+    },
+    "Souvenir MP9 | Sand Dashed (Factory New)": {
+      "last_24h": null,
+      "last_7d": null,
+      "last_30d": 5.78,
+      "last_90d": 6.77
+    },
+    "StatTrak™ AK-47 | Redline (Minimal Wear)": {
+      "last_24h": 508.41,
+      "last_7d": 475.66,
+      "last_30d": 492,
+      "last_90d": 467.44
+    },
+    "★ Karambit | Fade (Factory New)": {
+      "last_24h": null,
+      "last_7d": null,
+      "last_30d": null,
+      "last_90d": 1874.11
+    },
+    "★ Karambit | Fade (Minimal Wear)": {
+      "last_24h": null,
+      "last_7d": null,
+      "last_30d": null,
+      "last_90d": null
+    },
+    "Souvenir AK-47 | Redline (Field-Tested)": {
+      "last_24h": 92.51,
+      "last_7d": 92.51,
+      "last_30d": 92.51,
+      "last_90d": 92.51
+    }
+  }
+}

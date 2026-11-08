@@ -167,6 +167,7 @@ async fn main() -> Result<()> {
         telegram: Some(telegram.clone()),
     });
     hunt.load().await?;
+    hunt::bootstrap::spawn_refresh(db.clone());
     let rt = runtime::Runtime::new(
         db,
         settings,

@@ -147,6 +147,7 @@ pub async fn select(
                     .task
                     .strip_prefix("d:")
                     .or_else(|| a.task.strip_prefix("f:"))
+                    .or_else(|| a.task.strip_prefix("h:"))
                     .unwrap_or(&a.opp.name);
                 let code = items
                     .iter()
@@ -177,7 +178,9 @@ pub async fn select(
                         .then(|| catalog::wear_of(name))
                         .flatten(),
                     seeds,
-                    float: if a.task.starts_with("f:") {
+                    float: if a.task.starts_with("h:") {
+                        crate::pricing::groups::high_float_band(name)
+                    } else if a.task.starts_with("f:") {
                         crate::pricing::groups::float_band(name)
                     } else {
                         None

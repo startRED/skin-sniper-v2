@@ -1,0 +1,408 @@
+{
+  "date": "2026-11-08",
+  "status": "Pesquisa e candidatos, não aprovados para preço automático",
+  "meaning": {
+    "confirmed_sales": "Fonte informa vendas fechadas de pelo menos parte do grupo, não necessariamente cada seed nem prêmio para cada uma.",
+    "visual_only": "Fonte descreve visual ou anúncios; prêmio e vendas fechadas não demonstrados neste levantamento."
+  },
+  "limits": [
+    "Sem consulta à Steam ou suas APIs neste levantamento.",
+    "Dados de vendas são relatos de terceiros, não foram verificados individualmente; não converter diretamente preços em dinheiro para saldo Steam.",
+    "Seeds e grupos podem ter sobreposição: não somar preços nem presumir que todos os integrantes são equivalentes.",
+    "Catálogo é parcial; licença de reutilização do conjunto não identificada, verificar antes de redistribuir dados."
+  ],
+  "source_license": {
+    "site": "https://cs2pattern-prices.com",
+    "findings": "Páginas públicas apresentam listas e registros de vendas, com copyright no rodapé; widget permite incorporação com crédito. Não foi encontrada licença aberta para baixar/republicar o conjunto; URL /terms e robots.txt indisponíveis pela ferramenta. Nenhuma API pública de download e seus termos foram verificados. Visibilidade pública não implica permissão de redistribuição.",
+    "source": "https://cs2pattern-prices.com/how-it-works"
+  },
+  "groups": [
+    {
+      "market_base": "SSG 08 | Acid Fade",
+      "group_id": "acid_fade_100_round",
+      "label": "100% na classificação do operador",
+      "seeds": [
+        41,
+        80,
+        107,
+        236,
+        278,
+        345,
+        449,
+        468,
+        550,
+        575,
+        576,
+        648,
+        690,
+        807,
+        849,
+        897,
+        961
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/ssg-08/acid-fade/100",
+      "evidence": "confirmed_sales",
+      "notes": "Grupo arredondado do operador: não interpretar cada seed como 100.00% exato; verificar tabela original e vendas por seed."
+    },
+    {
+      "market_base": "SSG 08 | Acid Fade",
+      "group_id": "acid_max_black",
+      "label": "Max Black",
+      "seeds": [
+        8,
+        178,
+        182,
+        206,
+        230,
+        234,
+        457,
+        485,
+        522,
+        541,
+        546,
+        673,
+        685,
+        688,
+        705,
+        761,
+        773,
+        803,
+        858,
+        876,
+        982
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/ssg-08/acid-fade/max-black",
+      "evidence": "confirmed_sales",
+      "notes": "Há seeds sem venda na amostra; operador não encontrou prêmio no agregado."
+    },
+    {
+      "market_base": "Glock-18 | Moonrise",
+      "group_id": "moonrise_centered_star",
+      "label": "Centered Star",
+      "seeds": [
+        19,
+        109,
+        142,
+        165,
+        194,
+        237,
+        302,
+        403,
+        475,
+        487,
+        509,
+        800,
+        958
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/glock-18/moonrise/centered-star",
+      "evidence": "confirmed_sales",
+      "notes": "Este grupo corresponde ao Tier 2 no dataset local de outro guia, que usa outros critérios. Prêmio modesto em diversas condições; não somar classificação."
+    },
+    {
+      "market_base": "Galil AR | Sandstorm",
+      "group_id": "sandstorm_max_purple",
+      "label": "Max Purple",
+      "seeds": [
+        583,
+        761
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple",
+      "evidence": "confirmed_sales",
+      "notes": "Sem Factory New; comparar por seed e desgaste."
+    },
+    {
+      "market_base": "Galil AR | Sandstorm",
+      "group_id": "sandstorm_max_sand",
+      "label": "Max Sand (branco/areia)",
+      "seeds": [
+        449,
+        555
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-sand",
+      "evidence": "confirmed_sales",
+      "notes": "Não mesclar com Max Purple. Amostra pequena e variabilidade grande entre condições."
+    },
+    {
+      "market_base": "Five-SeveN | Kami",
+      "group_id": "kami_pussy",
+      "label": "Pussy",
+      "seeds": [
+        590,
+        662,
+        909
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/five-seven/kami/pussy",
+      "evidence": "confirmed_sales",
+      "notes": "Vendas reportadas pela fonte, incluindo 590; não verificadas individualmente. A captura anterior diferiu da consulta de 2026-11-08; podem existir diferenças de cache. Não atribuir o prêmio de uma seed às demais."
+    },
+    {
+      "market_base": "AWP | PAW",
+      "group_id": "paw_stoner_420",
+      "label": "Stoner Cat 420",
+      "seeds": [
+        420
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1",
+      "evidence": "confirmed_sales",
+      "notes": "Operador informa maior prêmio de 420."
+    },
+    {
+      "market_base": "AWP | PAW",
+      "group_id": "paw_stoner_788",
+      "label": "Stoner Cat 788",
+      "seeds": [
+        788
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1",
+      "evidence": "confirmed_sales",
+      "notes": "Mesmo desenho geral de 420, mas mediana FT próxima da comum na amostra."
+    },
+    {
+      "market_base": "AWP | PAW",
+      "group_id": "paw_golden_cat",
+      "label": "Golden Cat",
+      "seeds": [
+        19,
+        35,
+        41,
+        177,
+        350,
+        531,
+        581,
+        624,
+        644,
+        744
+      ],
+      "source": "https://cs2pattern-prices.com/deep-dives/awp-paw-patterns",
+      "evidence": "confirmed_sales",
+      "notes": "Classificação do operador; algumas seeds também mostram Stoner Cat. 41 e 350 têm maior histórico segundo operador."
+    },
+    {
+      "market_base": "AWP | PAW",
+      "group_id": "paw_gold_grenade_t1",
+      "label": "Gold Grenade T1",
+      "seeds": [
+        429,
+        926,
+        954
+      ],
+      "source": "https://csgoskins.gg/blog/awp-paw-guide-all-rare-seed-patterns",
+      "evidence": "visual_only",
+      "notes": "Desenho diferente do Golden Cat. Não atribuir preço do gato dourado."
+    },
+    {
+      "market_base": "AWP | PAW",
+      "group_id": "paw_gold_knife_t1",
+      "label": "Gold Cat Knife T1",
+      "seeds": [
+        212,
+        628,
+        737
+      ],
+      "source": "https://csgoskins.gg/blog/awp-paw-guide-all-rare-seed-patterns",
+      "evidence": "visual_only",
+      "notes": "Desenho diferente do Golden Cat; operador relata negociação próxima ao preço comum para esse grupo."
+    },
+    {
+      "market_base": "AWP | PAW",
+      "group_id": "paw_gas_mask_t1",
+      "label": "Gas Mask T1",
+      "seeds": [
+        29,
+        97,
+        685,
+        900
+      ],
+      "source": "https://csgoskins.gg/blog/awp-paw-guide-all-rare-seed-patterns",
+      "evidence": "visual_only",
+      "notes": "Grupo visual, sem prêmio verificado aqui."
+    },
+    {
+      "market_base": "XM1014 | Seasons",
+      "group_id": "seasons_blue_leaf",
+      "label": "Blue Leaf",
+      "seeds": [
+        26,
+        78,
+        115,
+        130,
+        182,
+        234,
+        286,
+        334,
+        338,
+        390,
+        442,
+        494,
+        546,
+        598,
+        605,
+        650,
+        659,
+        698,
+        955
+      ],
+      "source": "https://cs2pattern-prices.com/weapons/xm1014/seasons/blue-leaf",
+      "evidence": "confirmed_sales",
+      "notes": "Vendas observadas; prêmio varia com condição, seed, float e adesivos. Não pressupor um valor único."
+    },
+    {
+      "market_base": "UMP-45 | Minotaur's Labyrinth",
+      "group_id": "minotaur_centered",
+      "label": "Minotauro centrado",
+      "seeds": [
+        9,
+        272
+      ],
+      "source": "https://csskinlab.com/items/skin/ump-45-minotaur-s-labyrinth/seeds",
+      "evidence": "visual_only",
+      "notes": "CSSkinLab não registra vendas desses dois; outro guia classifica 272 como deslocado. Exige validação visual."
+    },
+    {
+      "market_base": "MAC-10 | Last Dive",
+      "group_id": "last_dive_diver_skull_shell",
+      "label": "Caveira, mergulhador e concha",
+      "seeds": [
+        509
+      ],
+      "source": "https://www.hotspawn.com/counter-strike/news/mac-10-last-dive-patterns-guide",
+      "evidence": "visual_only",
+      "notes": "Fonte descreve visual, não apresenta venda comprovada."
+    },
+    {
+      "market_base": "MAC-10 | Last Dive",
+      "group_id": "last_dive_seahorse",
+      "label": "Cavalo-marinho",
+      "seeds": [
+        146,
+        457,
+        465,
+        471,
+        486,
+        494,
+        648,
+        649,
+        653,
+        664,
+        705,
+        726,
+        736,
+        780,
+        787,
+        910
+      ],
+      "source": "https://www.hotspawn.com/counter-strike/news/mac-10-last-dive-patterns-guide",
+      "evidence": "visual_only",
+      "notes": "Grupo apenas cavalo-marinho da fonte; outros guias incluem seeds com outros elementos."
+    },
+    {
+      "market_base": "MAC-10 | Last Dive",
+      "group_id": "last_dive_diver_skull",
+      "label": "Caveira e mergulhador",
+      "seeds": [
+        169,
+        407,
+        422,
+        622,
+        681
+      ],
+      "source": "https://blog.uuskins.com/mac-10-last-dive-patterns-guide-every-rare-pattern",
+      "evidence": "visual_only",
+      "notes": "Sem comprovação de prêmio em vendas."
+    },
+    {
+      "market_base": "MP7 | Amberline",
+      "group_id": "amberline_full_white",
+      "label": "Full White",
+      "seeds": [
+        269,
+        350,
+        435,
+        543,
+        613,
+        890,
+        959
+      ],
+      "source": "https://white.market/blog/skins/mp7-amberline-the-ultimate-guide-to-best-and-rare-patterns",
+      "evidence": "visual_only",
+      "notes": "Fonte descreve classificação visual; CSPricer mostra anúncios, não vendas fechadas. Outra página de Skin.Land afirma ser fixo; conflito exige inspeção no jogo."
+    },
+    {
+      "market_base": "MP7 | Amberline",
+      "group_id": "amberline_full_gold_t1",
+      "label": "Full Gold T1",
+      "seeds": [
+        46,
+        47,
+        101,
+        135,
+        152,
+        193,
+        308,
+        379,
+        392,
+        397,
+        483,
+        608,
+        639,
+        643,
+        842,
+        855,
+        882,
+        899,
+        914
+      ],
+      "source": "https://white.market/blog/skins/mp7-amberline-the-ultimate-guide-to-best-and-rare-patterns",
+      "evidence": "visual_only",
+      "notes": "Manter separado de Full White. Fonte alternativa diverge sobre efeito da seed; validar no jogo."
+    }
+  ],
+  "unresolved": [
+    {
+      "market_base": "AUG | Midnight Lily",
+      "reason": "Fonte lista como skin que varia por padrão; não achei sementes especiais ou prêmio comprovado.",
+      "source": "https://www.hotspawn.com/counter-strike/news/all-pattern-based-cs2-skins"
+    },
+    {
+      "market_base": "Zeus x27 | Olympus",
+      "reason": "Não achei padrão raro estabelecido ou seeds comprovadas; fonte descreve acabamento fixo. Não criar alerta raro.",
+      "source": "https://www.skinvs.com/wiki/skins/zeus-x27-olympus/"
+    }
+  ],
+  "high_float": [
+    {
+      "market_base": "AWP | Asiimov",
+      "criteria": "Faixa de interesse aproximada 0.93–0.96 quase preto e ≥0.96 preto, sujeita à inspeção visual e divergência de fontes; não são limites oficiais.",
+      "sources": [
+        "https://blog.neshastore.com/colecao-asiimov/",
+        "https://shadowpay.com/blog/skins/awp-asiimov-cs2-price-guide-floats-trade-up-value/",
+        "https://fragprice.com/en/studies/"
+      ],
+      "evidence": "FragPrice relata estudo de vendas CSFloat para Blackiimov, sem aplicar valor fixo. Fontes divergem sobre limite e aparência."
+    },
+    {
+      "market_base": "Tec-9 | Hades",
+      "criteria": "Caveiras e aparência mudam com desgaste; estudar combinação seed e float, sem limiar definido.",
+      "sources": [
+        "https://fragprice.com/en/studies/"
+      ],
+      "evidence": "FragPrice cita amostra de vendas CSFloat; detalhes por faixa não foram conferidos aqui."
+    },
+    {
+      "market_base": "SSG 08 | Abyss",
+      "criteria": "Desgaste alto pode alterar aparência; não há limiar ou prêmio confirmado neste levantamento.",
+      "sources": [
+        "https://www.reddit.com/r/cs2/comments/1w3mqb6/pretty_high_float/"
+      ],
+      "evidence": "Relato de comunidade apenas; validar em CS2 e com vendas."
+    },
+    {
+      "market_base": "AWP | Medusa",
+      "criteria": "Mudança visual e extremos de desgaste são candidatos para pesquisa; não há limiar nem prêmio confirmado.",
+      "sources": [
+        "https://skinappraisal.com/guides/cs2-ranked-float-skins-guide"
+      ],
+      "evidence": "Raridade de posição em ranking não garante preço ou liquidez."
+    }
+  ]
+}

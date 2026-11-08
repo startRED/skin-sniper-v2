@@ -1,0 +1,60 @@
+{
+  "skins": {
+    "Galil AR | Sandstorm": {
+      "449": {
+        "label": "Max Sand #449",
+        "source": "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-sand"
+      },
+      "555": {
+        "label": "Max Sand #555",
+        "source": "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-sand"
+      },
+      "583": {
+        "label": "Max Purple #583",
+        "source": "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple"
+      },
+      "761": {
+        "label": "Max Purple #761",
+        "source": "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple"
+      }
+    },
+    "Five-SeveN | Kami": {
+      "590": {
+        "label": "Pussy #590",
+        "source": "https://cs2pattern-prices.com/weapons/five-seven/kami/pussy"
+      },
+      "662": {
+        "label": "Pussy #662",
+        "source": "https://cs2pattern-prices.com/weapons/five-seven/kami/pussy"
+      },
+      "909": {
+        "label": "Pussy #909",
+        "source": "https://cs2pattern-prices.com/weapons/five-seven/kami/pussy"
+      }
+    },
+    "AWP | PAW": {
+      "41": {
+        "label": "Golden Cat #41",
+        "source": "https://cs2pattern-prices.com/weapons/awp/paw"
+      },
+      "350": {
+        "label": "Golden Cat #350",
+        "source": "https://cs2pattern-prices.com/weapons/awp/paw"
+      },
+      "420": {
+        "label": "Stoner Cat #420",
+        "source": "https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1"
+      }
+    },
+    "XM1014 | Seasons": {
+      "26": {
+        "label": "Blue Leaf #26",
+        "source": "https://cs2pattern-prices.com/weapons/xm1014/seasons/blue-leaf"
+      },
+      "955": {
+        "label": "Blue Leaf #955",
+        "source": "https://cs2pattern-prices.com/weapons/xm1014/seasons/blue-leaf"
+      }
+    }
+  }
+}
