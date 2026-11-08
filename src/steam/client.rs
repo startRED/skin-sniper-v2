@@ -2,6 +2,7 @@
 //!
 //! Ritmo (docs/projeto.md, "Caça → Ritmo"): começa em 1 consulta a cada 6 s (também o piso); cada 10 min sem
 //! 429 encurta 15 %; um 429 pausa 60 s (dobrando até 30 min) e alonga o intervalo em 50 %.
+//! Leituras públicas começam com 30 min de pausa, dobrando até 2 h nas recusas seguintes.
 //! Actions, interface antiga/busca/livro e sessão/ações do usuário têm pausas independentes, com espaçamento
 //! global de pelo menos 3 s. Os breakers são por endpoint (conhecimento 2): falhas
 //! repetidas que não são 429 (5xx, rede) abrem só o breaker daquele endpoint.
@@ -43,9 +44,8 @@ const PAUSE_START: Duration = Duration::from_secs(60);
 // 30 min: em 04/11 a Steam seguiu dando 429 por horas com uma tentativa a cada 10 min; uma consulta depois de
 // minutos quietos passou. Tentar menos deixa a penalidade esfriar.
 const PAUSE_MAX: Duration = Duration::from_secs(30 * 60);
-// O degrau da pausa só volta a 60 s depois de tanto tempo sem 429: uma resposta boa de outro
-// endpoint entre dois 429 não pode zerar a escalada.
-const PAUSE_RESET_AFTER: Duration = Duration::from_secs(60 * 60); // maior que PAUSE_MAX, senão a escalada zera sozinha
+// Em 08/11 o render ainda recebeu 429 após 30 min quieto; repetir esse mesmo descanso não recuperou a leitura.
+const PUBLIC_PAUSE_MAX: Duration = Duration::from_secs(2 * 60 * 60);
 // Leitura logada levou 429: anúncios e histórico vão sem login por este tempo. Em 04/11 o logado tomou 429
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
 /// Espaço mínimo entre duas consultas quaisquer pela principal, somando os baldes (nunca rajada).
@@ -219,6 +219,8 @@ pub(crate) struct Limiter {
     next_at: Instant,
     paused_until: Option<Instant>,
     pause_len: Duration,
+    pause_start: Duration,
+    pause_max: Duration,
     last_429: Option<Instant>,
     /// Último 429 ou último encurtamento; o próximo encurta 10 min depois.
     last_adjust: Instant,
@@ -237,6 +239,8 @@ impl Limiter {
             next_at: now,
             paused_until: None,
             pause_len: PAUSE_START,
+            pause_start: PAUSE_START,
+            pause_max: PAUSE_MAX,
             last_429: None,
             last_adjust: now,
             last_query: None,
@@ -244,6 +248,15 @@ impl Limiter {
             floor_at_429: MIN_GAP,
             floor_since: None,
             last_ok: None,
+        }
+    }
+
+    fn public(now: Instant) -> Self {
+        Self {
+            pause_len: PAUSE_MAX,
+            pause_start: PAUSE_MAX,
+            pause_max: PUBLIC_PAUSE_MAX,
+            ..Self::new(now)
         }
     }
 
@@ -304,37 +317,37 @@ impl Limiter {
             self.paused_until = Some(end.max(requested));
             return;
         }
-        // 60 min sem 429 (mesmo sem nenhuma resposta no meio): a escalada recomeça.
+        // A série só recomeça após duas vezes a pausa máxima sem 429, inclusive após reiniciar.
         if self
             .last_429
-            .is_some_and(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
+            .is_some_and(|t| now.duration_since(t) >= self.pause_max * 2)
         {
-            self.pause_len = PAUSE_START;
+            self.pause_len = self.pause_start;
         }
         // 1º 429 da série: o intervalo em uso passou do que a Steam aguenta agora. Todo 429 recomeça as 6 h.
         if self
             .last_429
-            .is_none_or(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
+            .is_none_or(|t| now.duration_since(t) >= self.pause_max * 2)
         {
             self.floor_at_429 = self.gap.mul_f64(FLOOR_STEP).clamp(MIN_GAP, FLOOR_MAX);
         }
         self.floor_since = Some(now);
         let pause = self.pause_len.max(retry_after.unwrap_or_default());
         self.paused_until = Some(now + pause);
-        self.pause_len = (self.pause_len * 2).min(PAUSE_MAX);
+        self.pause_len = (self.pause_len * 2).min(self.pause_max);
         self.last_429 = Some(now);
         self.gap = self.gap.mul_f64(1.5).min(MAX_GAP);
         self.last_adjust = now;
     }
 
-    /// Resposta que não foi 429: o degrau da pausa volta ao início se o último 429 já tem 60 min.
+    /// Uma resposta boa de outro endpoint não apaga uma série de recusas ainda recente.
     pub(crate) fn on_ok(&mut self, now: Instant) {
         self.last_ok = Some(now);
         if self
             .last_429
-            .is_none_or(|t| now.duration_since(t) >= PAUSE_RESET_AFTER)
+            .is_none_or(|t| now.duration_since(t) >= self.pause_max * 2)
         {
-            self.pause_len = PAUSE_START;
+            self.pause_len = self.pause_start;
         }
     }
 
@@ -402,9 +415,9 @@ impl Limiter {
         // a hora do último 429 vem do 7º campo; texto antigo usa o 1º (o fim da pausa, se salvo durante uma)
         let last_429 = floor_since.filter(|t| *t > 0).unwrap_or(until);
         let quiet_for = (unix_in(Duration::ZERO) - last_429).max(0) as u64;
-        let quiet = quiet_for >= PAUSE_RESET_AFTER.as_secs();
+        let quiet = quiet_for >= (l.pause_max * 2).as_secs();
         if let Some(Ok(p)) = pause.filter(|_| !quiet) {
-            l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
+            l.pause_len = ms(p).clamp(l.pause_start, l.pause_max);
             // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
             // shortcut: texto antigo salvo durante uma pausa conta do fim da pausa (mais cauteloso que o 429 real).
             l.last_429 = Some(
@@ -653,8 +666,8 @@ impl SteamClient {
                 extra: Vec::new(),
                 on_pace: None,
                 anon_reads_until: None,
-                alt_limiter: Limiter::new(Instant::now()),
-                side: Limiter::new(Instant::now()),
+                alt_limiter: Limiter::public(Instant::now()),
+                side: Limiter::public(Instant::now()),
                 legacy_ok: None,
                 next_any: Instant::now(),
                 spacing: MIN_SPACING,
@@ -1058,7 +1071,7 @@ impl SteamClient {
                 let ago = Duration::from_secs((unix_now - last).max(0) as u64);
                 if ago < PAUSE_MAX {
                     limiter.on_429(now.checked_sub(ago).unwrap_or(now), Some(PAUSE_MAX));
-                    limiter.pause_len = PAUSE_MAX;
+                    limiter.pause_len = limiter.pause_len.max(PAUSE_MAX * 2);
                 }
             }
         }
@@ -1452,10 +1465,7 @@ impl SteamClient {
                 let retry = retry_after(&r);
                 let mut g = self.inner.lock().unwrap();
                 g.calls[1].limited += 1;
-                g.alt_limiter.on_429(
-                    Instant::now(),
-                    Some(retry.unwrap_or_default().max(PAUSE_MAX)),
-                );
+                g.alt_limiter.on_429(Instant::now(), retry);
                 Self::notify_pace(&mut g, Instant::now());
                 drop(g);
                 tracing::warn!(endpoint = ?ep,
@@ -1531,12 +1541,7 @@ impl SteamClient {
                 // Trocar o login não libera cota: a próxima leitura anônima também espera a pausa.
                 g.anon_reads_until = Some(now + ANON_AFTER_429);
             }
-            let wait = if side(ep) {
-                Some(retry.unwrap_or_default().max(PAUSE_MAX))
-            } else {
-                retry
-            };
-            g.bucket(ep).on_429(now, wait);
+            g.bucket(ep).on_429(now, retry);
             g.align_read_pauses(now);
             let until = g
                 .bucket(ep)
@@ -2205,7 +2210,7 @@ mod tests {
         let mut l = Limiter::new(t0());
         l.on_429(t0(), None);
         l.on_429(t0() + Duration::from_secs(120), None);
-        let later = t0() + Duration::from_secs(120) + PAUSE_RESET_AFTER;
+        let later = t0() + Duration::from_secs(120) + PAUSE_MAX * 2;
         l.on_429(later, None);
         assert_eq!(l.paused_until.unwrap().duration_since(later).as_secs(), 60);
     }
@@ -2375,8 +2380,8 @@ mod tests {
         );
         now += Duration::from_secs(1900);
         // 60 min sem 429: o degrau volta a 60 s
-        l.on_ok(now + PAUSE_RESET_AFTER);
-        now += PAUSE_RESET_AFTER + Duration::from_secs(1);
+        l.on_ok(now + PAUSE_MAX * 2);
+        now += PAUSE_MAX * 2 + Duration::from_secs(1);
         l.on_429(now, None);
         assert_eq!(l.paused_until.unwrap().duration_since(now).as_secs(), 60);
     }
