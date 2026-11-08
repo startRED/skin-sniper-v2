@@ -322,6 +322,13 @@ impl Hunt {
     // o painel usa o mesmo prazo (`bookLane` em store.svelte.ts)
     pub fn state(&self) -> State {
         let stats = self.steam.stats();
+        let book_ok_at = stats.book_ok_at.filter(|_| {
+            !self.steam.blocked(crate::steam::client::Endpoint::Book)
+                && self
+                    .steam
+                    .breaker_open_until(crate::steam::client::Endpoint::Book)
+                    .is_none()
+        });
         let filters_paused = self
             .steam
             .main_blocked(crate::steam::client::Endpoint::Listings);
@@ -334,9 +341,7 @@ impl Hunt {
         }
         let paused = stats.paused_until;
         // anúncios barrados, mas o livro respondeu há pouco: a caça segue por ele
-        let by_book = stats
-            .book_ok_at
-            .is_some_and(|t| self.now() - t < BOOK_LANE_FRESH_SECS);
+        let by_book = book_ok_at.is_some_and(|t| self.now() - t < BOOK_LANE_FRESH_SECS);
         State {
             saldo_cents: s.saldo,
             saldo_source: s.source,
@@ -346,7 +351,7 @@ impl Hunt {
                 last_query_at: stats.last_query_at,
                 paused_until: paused,
                 last_ok_at: stats.last_ok_at,
-                book_ok_at: stats.book_ok_at,
+                book_ok_at,
                 message: if paused.is_some() && by_book {
                     Some("a Steam barrou a leitura de anúncios (429); a caça segue pelo livro de ofertas".into())
                 } else if paused.is_some() {

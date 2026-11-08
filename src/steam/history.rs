@@ -32,9 +32,7 @@ pub async fn fetch_history(c: &SteamClient, market_hash_name: &str) -> Result<Ve
                 ("market_hash_name", market_hash_name.into()),
             ];
             let data = c.legacy_json("/market/pricehistory/", &q, true).await?;
-            let points = super::legacy::parse_history(&data)?;
-            c.note_legacy_ok();
-            Ok(points)
+            super::legacy::parse_history(&data)
         }
         Err(e) => Err(e),
     }

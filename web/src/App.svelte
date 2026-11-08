@@ -31,17 +31,16 @@
 
 {#if byBook && app.state}
   <div class="warn block" role="status">
-    <p><b>A Steam barrou a leitura de anúncios deste IP{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}; a caça segue pelo livro de ofertas.</b>
-      A Steam limita cada tipo de consulta à parte. O livro de ofertas ainda responde: por ele o app vê o menor preço de cada
-      skin barata. Abrir o anúncio e avisar você ainda depende da leitura de anúncios.</p>
+    <p><b>A leitura de anúncios está em pausa{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}; o app ainda pode consultar preços.</b>
+      Enquanto o livro de ofertas responder, o app acompanha o menor preço de cada skin barata.
+      Abrir o anúncio e avisar você ainda depende da leitura de anúncios.</p>
     <p>O app tenta de novo sozinho (próxima tentativa às {clock(app.state.hunt.paused_until!)}). As skins raras esperam,
       porque só os anúncios mostram o padrão.{#if noSaldo} O saldo não dá para ler agora: se quiser, digite-o lá em cima.{/if}</p>
   </div>
 {:else if blocked && app.state}
   <div class="warn block" role="status">
-    <p><b>A caça está parada{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}: a Steam bloqueou as consultas deste IP.</b>
-      Ela limita quantas consultas cada IP faz ao mercado e, passado o limite, barra por algumas horas. Não é erro do app nem da
-      sua conta, e reiniciar não libera.</p>
+    <p><b>A caça está em pausa{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}: a Steam recusou as consultas (429).</b>
+      O app respeita um descanso antes de tentar de novo. Reiniciar não encurta esse prazo.</p>
     <p>O app tenta de novo sozinho (próxima tentativa às {clock(app.state.hunt.paused_until!)}) e volta a caçar assim que a Steam
       liberar. Nada se perde.{#if noSaldo} Enquanto isso o saldo não dá para ler: se quiser, digite-o lá em cima.{/if}</p>
   </div>
