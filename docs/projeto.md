@@ -236,9 +236,10 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Os números ficam no `State` para o painel mostrar. Página antiga validada renova a última leitura boa e
    mantém o painel ativo enquanto sua fila estiver disponível; não apaga a pausa das actions. Tentativa que
    termina sem enviar requisição não aumenta as consultas do aprendizado nem o crédito de descoberta.
-   O painel identifica consultas/min como totais (incluindo livro, busca e histórico). O balanço de 10 min
-   separa páginas de anúncios processadas, IDs distintos vistos, IDs novos no monitoramento e avaliações de
-   lucro. Repetições não aumentam os distintos; novo no monitoramento não prova criação recente na Steam.
+   O painel identifica consultas/min como totais (incluindo livro, busca e histórico). O cabeçalho resume
+   o ciclo em tempo, anúncios únicos e novos no monitoramento. O log preserva
+   páginas processadas, avaliações, aprovações e recusas. Repetições não aumentam os distintos;
+   novo no monitoramento não prova criação recente na Steam.
    Filtros de seed/float em pausa continuam sinalizados mesmo quando o render mantém os comuns ativos.
    **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
    rede fixa autorizada por um celular com Tailscale; redes atuais em `pesquisa-web.md` 13) dá outro IP público,

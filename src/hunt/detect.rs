@@ -94,24 +94,17 @@ impl Cycle {
 
     fn text(&self, secs: i64) -> String {
         let min = (secs / 60).max(1);
-        let mut t = format!(
-            "{} páginas em {min} min; {} anúncios distintos vistos, {} novos no monitoramento; {} avaliações de lucro",
-            self.pages,
+        let listings = if self.seen.len() == 1 {
+            "anúncio único"
+        } else {
+            "anúncios únicos"
+        };
+        let fresh = if self.new == 1 { "novo" } else { "novos" };
+        format!(
+            "{min} min · {} {listings} · {} {fresh}",
             self.seen.len(),
-            self.new,
-            self.evaluated
-        );
-        if self.passed > 0 {
-            t += &format!("; {} deram lucro", self.passed);
-        } else if let Some(n) = self.near.first() {
-            t += &format!(
-                "; nenhum passou nos critérios de lucro e risco; o mais perto dava {} no preço médio",
-                profit_text(n.mid_cents)
-            );
-        } else if self.evaluated > 0 {
-            t += "; nenhum deu para estimar o preço de venda";
-        }
-        t
+            self.new
+        )
     }
 
     /// Último balanço fechado; antes do primeiro, o parcial.
