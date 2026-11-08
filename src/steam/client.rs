@@ -1458,7 +1458,15 @@ impl SteamClient {
                 );
                 Self::notify_pace(&mut g, Instant::now());
                 drop(g);
-                tracing::warn!(endpoint = ?ep, "Steam: 429 na saída extra; ela pausa e a principal segue");
+                tracing::warn!(endpoint = ?ep,
+                    servidor = ?r.headers().get("server").and_then(|v| v.to_str().ok()),
+                    tipo_conteudo = ?r.headers().get("content-type").and_then(|v| v.to_str().ok()),
+                    resposta_bytes = r.content_length(),
+                    idade_cache_segundos = ?r.headers().get("age").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()),
+                    retry_after_presente = r.headers().contains_key(RETRY_AFTER),
+                    retry_after_segundos = retry.map(|d| d.as_secs()),
+                    cabecalhos_resposta = ?r.headers().keys().map(|h| h.as_str()).collect::<Vec<_>>(),
+                    "Steam: 429 na saída extra; ela pausa e a principal segue");
                 None
             }
             Ok(r) => {
@@ -1541,6 +1549,13 @@ impl SteamClient {
             tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(),
                 pausa_segundos = until - unix_in(Duration::ZERO),
                 retry_after_segundos = retry.map(|d| d.as_secs()),
+                retry_after_presente = resp.headers().contains_key(RETRY_AFTER),
+                servidor = ?resp.headers().get("server").and_then(|v| v.to_str().ok()),
+                tipo_conteudo = ?resp.headers().get("content-type").and_then(|v| v.to_str().ok()),
+                resposta_bytes = resp.content_length(),
+                idade_cache_segundos = ?resp.headers().get("age").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()),
+                eresult = ?eresult,
+                cabecalhos_resposta = ?resp.headers().keys().map(|h| h.as_str()).collect::<Vec<_>>(),
                 proxima_sem_login = logged_read, "Steam: 429");
             return Err(Error::RateLimited { until });
         }
