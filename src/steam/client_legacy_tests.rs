@@ -9,6 +9,63 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 const NAME: &str = "Glock-18 | Moonrise (Field-Tested)";
 const CODE: &str = "G180420B6053004";
 
+#[test]
+fn repeated_public_refusals_increase_rest_without_advancing_twice_in_flight() {
+    let c = fast("http://127.0.0.1:9");
+    let g = &mut *c.inner.lock().unwrap();
+    for limiter in [&mut g.side, &mut g.alt_limiter] {
+        let mut now = Instant::now();
+        for seconds in [1800, 3600, 7200, 7200] {
+            limiter.on_429(now, Some(PAUSE_MAX));
+            let until = limiter.pause_end(now).unwrap();
+            assert_eq!(until.duration_since(now).as_secs(), seconds);
+            let next = limiter.pause_len;
+            limiter.on_429(now + Duration::from_secs(1), None);
+            assert_eq!(limiter.paused_until, Some(until));
+            assert_eq!(limiter.pause_len, next);
+            limiter.on_ok(until - Duration::from_secs(1));
+            assert_eq!(limiter.pause_len, next, "outra resposta não zera a série");
+            now = until + Duration::from_secs(1);
+        }
+        now += Duration::from_secs(4 * 3600);
+        limiter.on_429(now, None);
+        assert_eq!(limiter.pause_end(now).unwrap() - now, PAUSE_MAX);
+        limiter.on_429(
+            now + Duration::from_secs(1),
+            Some(Duration::from_secs(10800)),
+        );
+        assert_eq!(
+            limiter.pause_end(now).unwrap() - now,
+            Duration::from_secs(10801)
+        );
+    }
+}
+
+#[test]
+fn public_recovery_keeps_its_long_step_and_recent_failure_after_restart() {
+    let c = fast("http://127.0.0.1:9");
+    let now = unix_in(Duration::ZERO);
+    let public = format!(
+        "{}|12000|7200000|0|{}|7500|{}|0",
+        now + 3600,
+        now,
+        now - 3601
+    );
+    c.restore_pace(&format!("0|6000|60000|0;{public};{public};0|6000|60000|0"));
+    c.restore_public_backoff(Some(now - 10), Some(now - 10));
+    let g = c.inner.lock().unwrap();
+    for limiter in [&g.side, &g.alt_limiter] {
+        assert_eq!(limiter.pause_len, Duration::from_secs(7200));
+        assert!(limiter.last_429.is_some());
+        assert!(
+            limiter.pause_end(Instant::now()).unwrap()
+                >= Instant::now() + Duration::from_secs(3595)
+        );
+    }
+    assert_eq!(g.limiter.pause_len, PAUSE_START);
+    assert_eq!(g.control.pause_len, PAUSE_START);
+}
+
 #[tokio::test]
 async fn only_two_blocked_main_read_lanes_share_the_longer_recovery_time() {
     let base = serve(
@@ -148,7 +205,7 @@ fn upgrade_recovers_recent_public_pauses_without_touching_account_or_native_limi
     for (limiter, remaining) in [(&g.side, 1740), (&g.alt_limiter, 1680)] {
         let until = limiter.pause_end(Instant::now()).unwrap();
         assert!((until.duration_since(Instant::now()).as_secs() as i64 - remaining).abs() <= 2);
-        assert_eq!(limiter.pause_len, PAUSE_MAX);
+        assert_eq!(limiter.pause_len, PAUSE_MAX * 2);
     }
     assert!(g.limiter.paused_until.is_none());
     assert!(g.control.paused_until.is_none());
@@ -191,8 +248,9 @@ async fn public_and_account_429s_are_saved_and_remain_separate_after_restart() {
             limiter.pause_end(Instant::now()).unwrap()
                 >= Instant::now() + Duration::from_secs(3595)
         );
-        assert_eq!(limiter.pause_len, PAUSE_START * 2);
     }
+    assert_eq!(g.side.pause_len, PAUSE_MAX * 2);
+    assert_eq!(g.control.pause_len, PAUSE_START * 2);
 }
 
 #[tokio::test]
@@ -221,7 +279,7 @@ async fn alternative_public_429_notifies_and_survives_restart() {
         g.alt_limiter.pause_end(Instant::now()).unwrap()
             >= Instant::now() + Duration::from_secs(3595)
     );
-    assert_eq!(g.alt_limiter.pause_len, PAUSE_START * 2);
+    assert_eq!(g.alt_limiter.pause_len, PAUSE_MAX * 2);
 }
 
 #[tokio::test]

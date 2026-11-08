@@ -331,3 +331,10 @@ valendo sobre o corpo descomprimido.
   saudável ou às ações explícitas do usuário. A conferência de carteira em segundo plano também aguarda
   esse descanso integral. Testes locais verificam a pausa pública longa, o alinhamento condicional e a
   diferença entre verificação automática e explícita da sessão.
+- Às 03h58 de Fortaleza, a principal ainda recebeu 429 após cerca de 30 min sem leituras do v2; a extra
+  também continuou recusada. O prazo interno segue desconhecido. Repetir sempre a pausa de 30 min não
+  recuperou esta ocorrência. A política pública agora começa em 30 min e dobra para 60 min e 2 h em novas
+  recusas após o descanso; esses valores são uma decisão conservadora do cliente, não limites publicados
+  da Steam. A sequência só zera após 4 h sem 429. Testes com relógio injetado cobrem os degraus, a recusa
+  duplicada em voo, `Retry-After` maior que o teto e a restauração do degrau longo após reiniciar. As pausas
+  nativas e de controle mantêm a política anterior.
