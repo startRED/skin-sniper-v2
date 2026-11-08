@@ -14,6 +14,7 @@ const BLUEGEM: &str = include_str!("../../assets/patterns/bluegem.json");
 const FADE: &str = include_str!("../../assets/patterns/fade.json");
 const PHASES: &str = include_str!("../../assets/patterns/phases.json");
 const FLOATS: &str = include_str!("../../assets/patterns/floats.json");
+const RESEARCHED: &str = include_str!("../../assets/patterns/researched.json");
 
 /// Float de elite: a fração do desgaste (a partir do menor float possível da skin) que conta como "float
 /// baixo". Em 06/11, nas vendas do CSFloat de 157 skins, os 10 % melhores de cada desgaste saíram de 1,3× a 2,8×
@@ -60,6 +61,14 @@ struct FloatsFile {
     skins: HashMap<String, (f64, f64)>,
 }
 #[derive(Deserialize)]
+struct ResearchedFile {
+    skins: HashMap<String, HashMap<u16, ResearchedSeed>>,
+}
+#[derive(Deserialize)]
+struct ResearchedSeed {
+    label: String,
+}
+#[derive(Deserialize)]
 struct PhasesFile {
     phases: HashMap<u32, Phase>,
 }
@@ -75,6 +84,7 @@ struct Tables {
     fade: FadeFile,
     phases: PhasesFile,
     floats: FloatsFile,
+    researched: ResearchedFile,
 }
 
 fn tables() -> &'static Tables {
@@ -91,6 +101,7 @@ fn tables() -> &'static Tables {
             fade: load(FADE),
             phases: load(PHASES),
             floats: load(FLOATS),
+            researched: load(RESEARCHED),
         }
     })
 }
@@ -158,6 +169,13 @@ pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
     (lo < hi).then_some((lo, lo + (hi - lo) * FLOAT_ELITE_SHARE))
 }
 
+/// Faixa de desgaste alto de interesse; a aparência real ainda depende da inspeção.
+pub fn high_float_band(market_hash_name: &str) -> Option<(f64, f64)> {
+    (split_name(market_hash_name).0 == "AWP | Asiimov"
+        && wear_range(market_hash_name).is_some_and(|(wear, _, _)| wear == "Battle-Scarred"))
+    .then_some((0.96, 1.0))
+}
+
 /// Grupo raro do anúncio, ou `None` se não há tabela para a skin / a seed não está nela e o float não é de elite.
 /// `seed`, `paint_index` e `float` vêm das propriedades da listagem. Pattern vence float.
 pub fn group_of(
@@ -166,16 +184,25 @@ pub fn group_of(
     paint_index: Option<u32>,
     float: Option<f64>,
 ) -> Option<Group> {
-    pattern_group(market_hash_name, seed, paint_index).or_else(|| {
-        let (lo, hi) = float_band(market_hash_name)?;
-        float.filter(|f| (lo..=hi).contains(f))?;
-        let (base, _, _) = split_name(market_hash_name);
-        let (wear, _, _) = wear_range(market_hash_name)?;
-        Some(Group {
-            key: format!("float:{base}:{wear}"),
-            label: format!("Float ≤ {hi:.3}"),
+    pattern_group(market_hash_name, seed, paint_index)
+        .or_else(|| {
+            let (lo, hi) = high_float_band(market_hash_name)?;
+            float.filter(|f| (lo..=hi).contains(f))?;
+            Some(Group {
+                key: "highfloat:AWP | Asiimov:Battle-Scarred".into(),
+                label: "Blackiimov ≥ 0.96".into(),
+            })
         })
-    })
+        .or_else(|| {
+            let (lo, hi) = float_band(market_hash_name)?;
+            float.filter(|f| (lo..=hi).contains(f))?;
+            let (base, _, _) = split_name(market_hash_name);
+            let (wear, _, _) = wear_range(market_hash_name)?;
+            Some(Group {
+                key: format!("float:{base}:{wear}"),
+                label: format!("Float ≤ {hi:.3}"),
+            })
+        })
 }
 
 fn pattern_group(
@@ -222,6 +249,12 @@ fn pattern_group(
             label: format!("{pattern} 99%+"),
         });
     }
+    if let Some(entry) = t.researched.skins.get(base).and_then(|s| s.get(&seed)) {
+        return Some(Group {
+            key: format!("learned:{base}:{seed}"),
+            label: entry.label.clone(),
+        });
+    }
     None
 }
 
@@ -232,6 +265,9 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
     let t = tables();
     let (base, weapon, pattern) = split_name(market_hash_name);
     let mut seeds: BTreeSet<u16> = BTreeSet::new();
+    if let Some(s) = t.researched.skins.get(base) {
+        seeds.extend(s.keys());
+    }
     if let Some(s) = t.cs.skins.get(base).and_then(|s| s.tiers.get("1")) {
         seeds.extend(s);
     }
@@ -276,6 +312,7 @@ pub fn table_skins() -> Vec<String> {
         !(w.contains("Knife") || w.contains("Bayonet") || w.contains("Daggers") || w == "Karambit")
     };
     let mut out: BTreeSet<String> = t.cs.skins.keys().cloned().collect();
+    out.extend(t.researched.skins.keys().cloned());
     out.extend(
         t.blue
             .weapons
@@ -336,6 +373,45 @@ mod tests {
         assert!(t.blue.weapons.contains_key("AK-47"));
         assert!(t.phases.phases.contains_key(&415));
         assert_eq!(t.fade.finishes["Fade"]["Glock-18"].pct.len(), 1001);
+    }
+
+    #[test]
+    fn researched_seeds_are_separate_and_discoverable() {
+        for (base, seeds) in [
+            ("Galil AR | Sandstorm", &[449, 555, 583, 761][..]),
+            ("Five-SeveN | Kami", &[590, 662, 909][..]),
+            ("AWP | PAW", &[41, 350, 420][..]),
+            ("XM1014 | Seasons", &[26, 955][..]),
+        ] {
+            let name = format!("{base} (Field-Tested)");
+            assert!(table_skins().contains(&base.to_string()));
+            let ranges = seed_ranges(&name);
+            let mut keys = BTreeSet::new();
+            for &seed in seeds {
+                assert!(ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&seed)));
+                let group = group_of(&name, Some(u32::from(seed)), None, None).unwrap();
+                assert_eq!(group.key, format!("learned:{base}:{seed}"));
+                assert!(group.label.ends_with(&format!("#{seed}")));
+                assert!(keys.insert(group.key));
+            }
+            assert_eq!(group_of(&name, Some(1), None, None), None);
+        }
+    }
+
+    #[test]
+    fn blackiimov_only_in_high_battle_scarred_range() {
+        let name = "AWP | Asiimov (Battle-Scarred)";
+        assert_eq!(high_float_band(name), Some((0.96, 1.0)));
+        assert_eq!(group_of(name, None, None, Some(0.959999)), None);
+        assert_eq!(
+            group_of(name, None, None, Some(0.96)).unwrap().key,
+            "highfloat:AWP | Asiimov:Battle-Scarred"
+        );
+        assert!(group_of(name, None, None, Some(1.0)).is_some());
+        assert_eq!(group_of(name, None, None, Some(1.01)), None);
+        assert_eq!(high_float_band("AWP | Asiimov (Field-Tested)"), None);
+        assert_eq!(high_float_band("AWP | PAW (Battle-Scarred)"), None);
+        assert_eq!(float_band(name).unwrap().0, 0.45);
     }
 
     #[test]

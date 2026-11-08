@@ -1,0 +1,329 @@
+{
+  "date": "2026-11-08",
+  "purpose": "Pesquisa de apoio; não é catálogo de produção nem recomendação de preço.",
+  "method": "Fontes públicas consultadas via busca web; sem consulta ao Mercado Steam ou às suas APIs. Observações de vendas são relatadas pelo operador cs2pattern-prices com origem CSFloat; não verificadas individualmente neste levantamento.",
+  "limitations": [
+    "Listas não são exaustivas; ausência de seed não significa padrão comum.",
+    "Preço de venda CSFloat é em dinheiro e não equivale ao saldo Steam; comparar condição, data, variante, float, adesivos e quantidade de vendas.",
+    "Classificações de tiers diferem entre guias; raridade visual não garante prêmio, liquidez ou lucro.",
+    "Revisar licença e permissão antes de copiar bases ou conteúdo para distribuição.",
+    "Datas, preços e tabelas de sites podem mudar; não se definiu multiplicador de produção."
+  ],
+  "existing_assets": "principal/assets/patterns/{bluegem,fade,cspatterns,phases}.json; consultar LICENSES.md. Pesquisa anterior: principal/docs/pesquisa-web.md seção 5.",
+  "families": [
+    {
+      "id": "moonrise",
+      "names": [
+        "Glock-18 | Moonrise"
+      ],
+      "condition": "Estrela visível e posição; classificações de guias variam.",
+      "dataset": "principal/assets/patterns/cspatterns.json",
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/glock-18/moonrise"
+      ],
+      "evidence": "O operador lista vendas de estrela centrada; comparação agrupada não sustenta prêmio uniforme. Pesquisa local anterior registra vendas reais de T1."
+    },
+    {
+      "id": "heat_treated",
+      "names": [
+        "Desert Eagle | Heat Treated",
+        "Five-SeveN | Heat Treated"
+      ],
+      "condition": "Cobertura azul e posição específica da arma; seed e desgaste afetam valor.",
+      "dataset": "principal/assets/patterns/cspatterns.json",
+      "seed_groups": [
+        {
+          "skin": "Desert Eagle | Heat Treated",
+          "label": "Tier 1 do operador cs2pattern-prices",
+          "seeds": [
+            69,
+            148,
+            490,
+            704
+          ],
+          "source": "https://cs2pattern-prices.com/weapons/desert-eagle/heat-treated/blue-gems-1"
+        }
+      ],
+      "sources": [
+        "https://cs2pattern-prices.com/deep-dives/what-is-a-cs2-pattern-index"
+      ],
+      "evidence": "Vendas completadas apoiam prêmio para grupos blue gem; 490 difere dos outros. No arquivo local 43 seeds compartilham tier 1 de outro guia: não são classificações equivalentes."
+    },
+    {
+      "id": "case_hardened",
+      "names": [
+        "AK-47 | Case Hardened",
+        "Five-SeveN | Case Hardened",
+        "MAC-10 | Case Hardened"
+      ],
+      "condition": "Azul no lado visível e sua extensão; grupos específicos por arma.",
+      "dataset": "principal/assets/patterns/bluegem.json",
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/ak-47/case-hardened",
+        "https://cs2pattern-prices.com/deep-dives/what-is-a-cs2-pattern-index"
+      ],
+      "evidence": "O operador relata vendas por grupos e desgaste; não atribuir valores de AK a Five-SeveN ou MAC-10."
+    },
+    {
+      "id": "fade",
+      "names": [
+        "Glock-18 | Fade",
+        "AWP | Fade",
+        "R8 Revolver | Fade",
+        "MP7 | Fade",
+        "M4A1-S | Fade"
+      ],
+      "condition": "Percentual e distribuição de cores por arma; nem todo Fade usa cálculo intercambiável.",
+      "dataset": "principal/assets/patterns/fade.json",
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/glock-18/fade",
+        "https://skinory.io/en/patterns"
+      ],
+      "evidence": "O operador mostra vendas por grupos percentuais; não assumir que a escala de um site equivale à de outro."
+    },
+    {
+      "id": "kami",
+      "names": [
+        "Five-SeveN | Kami"
+      ],
+      "condition": "Motivo adulto visível ou outros desenhos específicos; procurar seed exata.",
+      "seed_groups": [
+        {
+          "label": "Pussy, grupo do operador",
+          "seeds": [
+            590,
+            662,
+            909
+          ],
+          "source": "https://cs2pattern-prices.com/weapons/five-seven/kami/pussy"
+        }
+      ],
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/five-seven/kami/pussy"
+      ],
+      "evidence": "Vendas reportadas pela fonte, incluindo 590; não verificadas individualmente. A captura anterior diferiu da consulta de 2026-11-08; podem existir diferenças de cache. Não extrapolar valores entre seeds."
+    },
+    {
+      "id": "sandstorm",
+      "names": [
+        "Galil AR | Sandstorm",
+        "Tec-9 | Sandstorm"
+      ],
+      "condition": "Cobertura roxa ou branca; o padrão depende da arma.",
+      "seed_groups": [
+        {
+          "skin": "Galil AR | Sandstorm",
+          "label": "Max Purple",
+          "seeds": [
+            583,
+            761
+          ],
+          "source": "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple"
+        }
+      ],
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm",
+        "https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple"
+      ],
+      "evidence": "Vendas por seed sustentam interesse em Galil roxa. Grupo max sand do operador próximo do preço comum; não transferir seeds da Galil para Tec-9."
+    },
+    {
+      "id": "paw",
+      "names": [
+        "AWP | PAW"
+      ],
+      "condition": "Gatos posicionados em regiões visíveis; seed numérica também pode ter demanda.",
+      "seed_groups": [
+        {
+          "label": "Stoner Cat Tier 1",
+          "seeds": [
+            420,
+            788
+          ],
+          "source": "https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1"
+        },
+        {
+          "label": "Golden Cat Tier 1",
+          "seeds": [
+            19,
+            35,
+            41,
+            177,
+            350,
+            531,
+            581,
+            624,
+            644,
+            744
+          ],
+          "source": "https://cs2pattern-prices.com/deep-dives/awp-paw-patterns"
+        }
+      ],
+      "sources": [
+        "https://cs2pattern-prices.com/deep-dives/awp-paw-patterns"
+      ],
+      "evidence": "Operador aponta vendas para 420 e Golden Cat, mas 788 próximo do preço comum; adesivos afetam comparação."
+    },
+    {
+      "id": "high_beam",
+      "names": [
+        "Glock-18 | High Beam"
+      ],
+      "condition": "Full Beam ou azul no furo do punho, conforme guia.",
+      "dataset": "principal/assets/patterns/cspatterns.json",
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/glock-18"
+      ],
+      "evidence": "Operador acompanha vendas; avaliar grupos e seeds separadamente."
+    },
+    {
+      "id": "seasons",
+      "names": [
+        "XM1014 | Seasons"
+      ],
+      "condition": "Folha azul visível.",
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/xm1014/seasons",
+        "https://cs2pattern-prices.com/weapons/xm1014/seasons/blue-leaf"
+      ],
+      "evidence": "Grupo visual acompanhado em vendas, mas comparação do operador indica grupo próximo ao preço comum; não presumir prêmio."
+    },
+    {
+      "id": "glock_patterns",
+      "names": [
+        "Glock-18 | Reactor",
+        "Glock-18 | Grinder",
+        "Glock-18 | Trace Lock"
+      ],
+      "condition": "Posição dos desenhos e cores conforme guia individual.",
+      "sources": [
+        "https://wiki.csdrop.com/guides/cs2-pattern-seeds-paint-index",
+        "https://cs2pattern-prices.com/weapons/glock-18"
+      ],
+      "evidence": "Padrões candidatos; faltam nesta pesquisa comparação de vendas por grupo para cada skin."
+    },
+    {
+      "id": "kimono",
+      "names": [
+        "Five-SeveN | Neon Kimono",
+        "P250 | Crimson Kimono"
+      ],
+      "condition": "Proporção e posição das cores e desenhos.",
+      "sources": [
+        "https://www.hotspawn.com/counter-strike/news/all-pattern-based-cs2-skins"
+      ],
+      "evidence": "Candidatos visuais; prêmio e seeds não verificados nesta pesquisa."
+    },
+    {
+      "id": "community_motifs",
+      "names": [
+        "P2000 | Acid Etched",
+        "P250 | Nevermore",
+        "MAC-10 | Last Dive",
+        "M4A4 | Daybreak",
+        "AWP | Electric Hive"
+      ],
+      "condition": "Motivos ou cor conforme aparência específica; conferir fonte por skin.",
+      "sources": [
+        "https://wiki.csdrop.com/guides/cs2-pattern-seeds-paint-index",
+        "https://cs2pattern-prices.com/weapons"
+      ],
+      "evidence": "Candidatos para pesquisa adicional; sem prova de prêmio em vendas por todos os grupos."
+    },
+    {
+      "id": "newer_tracked",
+      "names": [
+        "AK-47 | Aphrodite",
+        "Galil AR | Metallic Squeezer",
+        "Galil AR | Sky Mandala",
+        "Galil AR | Rainbow Spoon",
+        "MAC-10 | Snow Splash",
+        "P250 | Plum Netting",
+        "MP7 | Amberline",
+        "AWP | Exothermic",
+        "M4A1-S | Solitude",
+        "Desert Eagle | Serpent Strike"
+      ],
+      "condition": "Grupos de cor ou posicionamento definidos por cada página, verificar nomes e seed por página.",
+      "sources": [
+        "https://cs2pattern-prices.com/",
+        "https://cs2pattern-prices.com/weapons"
+      ],
+      "evidence": "Operador acompanha grupos e vendas; não significa que todos tenham prêmio. Ele aponta vendas para Snow Splash max white e Metallic Squeezer gold graffiti em condição específica."
+    },
+    {
+      "id": "amber_acid_fade",
+      "names": [
+        "SSG 08 | Acid Fade",
+        "P2000 | Amber Fade",
+        "R8 Revolver | Amber Fade",
+        "MAC-10 | Amber Fade",
+        "AUG | Amber Fade",
+        "Galil AR | Amber Fade",
+        "Sawed-Off | Amber Fade"
+      ],
+      "condition": "Percentual específico da família e arma.",
+      "sources": [
+        "https://skinory.io/en/patterns",
+        "https://skinory.io/da/patterns/amber-fade"
+      ],
+      "evidence": "Cálculo visual identificado; vendas e prêmio não verificados. Nomes sujeitos à conferência no catálogo antes do uso.",
+      "seed_groups": [
+        {
+          "label": "Amber Fade 100% conforme escala Skinory",
+          "seeds": [
+            763
+          ],
+          "source": "https://skinory.io/da/patterns/amber-fade"
+        }
+      ]
+    },
+    {
+      "id": "crimson_web_guns",
+      "names": [
+        "Desert Eagle | Crimson Web",
+        "Five-SeveN | Crimson Web",
+        "CZ75-Auto | Crimson Web",
+        "SCAR-20 | Crimson Web",
+        "R8 Revolver | Crimson Web"
+      ],
+      "condition": "Centros de teia visíveis; conferir modelo e desgaste.",
+      "sources": [
+        "https://skinory.io/en/patterns"
+      ],
+      "evidence": "Raridade visual descrita para a família; não há prova aqui de prêmio por seed nessas armas."
+    },
+    {
+      "id": "knives_gloves",
+      "names": [
+        "★ Knife | Slaughter",
+        "★ Knife | Crimson Web",
+        "★ Knife | Case Hardened",
+        "★ Knife | Fade",
+        "★ Gloves | Fade",
+        "★ Hydra Gloves | Case Hardened"
+      ],
+      "reference_only": true,
+      "condition": "Motivos Slaughter, teias, azul ou percentual dependem do modelo.",
+      "sources": [
+        "https://skinory.io/en/patterns",
+        "https://cs2pattern-prices.com/weapons/butterfly-knife/crimson-web/single-web-1",
+        "https://cs2pattern-prices.com/deep-dives/what-is-a-cs2-pattern-index"
+      ],
+      "evidence": "Faca e luva fora do radar; nomes de Knife são categorias descritivas e não nomes de mercado. Slaughter não foi confirmado por vendas nesta pesquisa."
+    },
+    {
+      "id": "gamma_doppler_glock",
+      "names": [
+        "Glock-18 | Gamma Doppler"
+      ],
+      "condition": "Fase e Emerald dependem do paint index; posicionamento de cor pode variar por seed.",
+      "dataset": "principal/assets/patterns/phases.json",
+      "sources": [
+        "https://cs2pattern-prices.com/weapons/glock-18",
+        "https://skinory.io/en/patterns"
+      ],
+      "evidence": "O operador acompanha vendas por fase e grupos; fase não é classificável exclusivamente por seed."
+    }
+  ]
+}

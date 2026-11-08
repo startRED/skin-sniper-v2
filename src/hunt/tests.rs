@@ -615,6 +615,51 @@ async fn sales_warmup_is_faster_only_while_normal_watched_cache_is_missing() {
 }
 
 #[tokio::test]
+async fn candidate_history_uses_legacy_once_during_native_pause() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    db.call(|c| {
+        for name in [MOON, ST_MOON] {
+            c.execute("INSERT INTO items(name,g_code,paint_index,updated_at) VALUES (?1,'G180420B6053004',694,?2)", rusqlite::params![name,NOW])?;
+            c.execute("INSERT INTO catalog_references(name,usd_cents,observed_at,rank) VALUES (?1,200,?2,1)", rusqlite::params![name,NOW])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    {
+        let mut s = h.lock();
+        s.ratio = Some((5.0, NOW));
+        s.history_retry_after.insert(ST_MOON.into(), NOW + 600);
+    }
+    bodies.listings_429.store(true, Ordering::Relaxed);
+    assert!(
+        h.steam
+            .action(
+                crate::steam::client::Endpoint::Listings,
+                "QueryListingsForItem",
+                &json!([])
+            )
+            .await
+            .is_err()
+    );
+    h.steam.set_cookie(Some(crate::steam::client::Cookie {
+        steam_login_secure: "local-test".into(),
+        sessionid: None,
+    }));
+    assert_eq!(tick(&h).await, Tick::Discovery);
+    let (fresh, waiting, attempts): (i64, Option<i64>, i64) = db.call(|c| {
+        Ok((
+            c.query_row("SELECT history_at FROM items WHERE name=?1", [MOON], |r| r.get(0))?,
+            c.query_row("SELECT history_at FROM items WHERE name=?1", [ST_MOON], |r| r.get(0))?,
+            c.query_row("SELECT count(*) FROM research_attempts WHERE endpoint='legacy' AND outcome != 'not_sent'", [], |r| r.get(0))?,
+        ))
+    }).await.unwrap();
+    assert_eq!((fresh, waiting, attempts), (NOW, None, 1));
+    assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn watched_history_renews_through_legacy_during_native_pause() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();

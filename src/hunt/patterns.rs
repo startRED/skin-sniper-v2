@@ -6,6 +6,7 @@
 //! guardadas são o prêmio do grupo. Os limites (2×, 60 dias) são hipóteses, não calibração.
 
 use super::Hunt;
+use super::catalog::{self, Item};
 use crate::csfloat::CsfloatSale;
 use crate::pricing::groups::{Group, group_of, skin_base};
 use crate::pricing::sell::{MAX_RARE_MULTIPLE, RARE_MIN_SALES};
@@ -29,6 +30,26 @@ const MIN_SALES_PER_DAY: f64 = 5.0;
 /// Skin-base → seed → razões (preço ÷ mediana da skin) das vendas que ensinaram.
 pub type Learned = HashMap<String, BTreeMap<u16, Vec<f64>>>;
 
+fn candidates(mut items: Vec<Item>, saldo: i64, ratio: Option<f64>, now: i64) -> Vec<String> {
+    items.retain(|i| {
+        i.sales_per_day.is_some_and(|s| s >= MIN_SALES_PER_DAY)
+            && !i.name.starts_with('★')
+            && i.name.contains('|')
+            && catalog::wear_of(&i.name).is_some()
+            && (saldo <= 0
+                || ratio
+                    .and_then(|r| i.triage_brl(now, r))
+                    .is_some_and(|price| price <= saldo))
+    });
+    items.sort_by(|a, b| {
+        b.sales_per_day
+            .unwrap_or_default()
+            .total_cmp(&a.sales_per_day.unwrap_or_default())
+            .then(a.name.cmp(&b.name))
+    });
+    items.into_iter().map(|i| i.name).collect()
+}
+
 /// Vendas da skin que pagaram prêmio de pattern ainda desconhecido: `(seed, razão, sold_at)`.
 pub fn premium_sales(name: &str, sales: &[CsfloatSale]) -> Vec<(u16, f64, i64)> {
     let clean: Vec<&CsfloatSale> = sales
@@ -46,7 +67,9 @@ pub fn premium_sales(name: &str, sales: &[CsfloatSale]) -> Vec<(u16, f64, i64)> 
         .filter_map(|s| {
             let seed = s.seed?;
             // tabela e float de elite já têm grupo próprio
-            if group_of(name, Some(seed.into()), s.paint_index, s.float).is_some() {
+            if group_of(name, Some(seed.into()), s.paint_index, s.float)
+                .is_some_and(|g| !g.key.starts_with("learned:"))
+            {
                 return None;
             }
             let r = s.multiple / median;
@@ -148,7 +171,7 @@ pub(crate) async fn cache_sales(h: &Hunt, name: &str, sales: &[crate::csfloat::C
 pub async fn maybe_step(h: &Hunt) {
     let now = h.now();
     // saldo desconhecido (0): qualquer piso; aprender não compra nada
-    let (saldo, seen) = {
+    let (saldo, ratio, seen) = {
         let mut s = h.lock();
         // a primeira leitura só depois de `GAP` ligado: a caça começa antes
         if s.learn_at == 0 {
@@ -166,21 +189,10 @@ pub async fn maybe_step(h: &Hunt) {
             return;
         }
         s.learn_at = now;
-        (s.saldo, s.learn_seen.clone())
+        (s.saldo, s.ratio.map(|(r, _)| r), s.learn_seen.clone())
     };
-    let names: Vec<String> = match h
-        .db
-        .call(move |c| {
-            c.prepare(
-                "SELECT name FROM items WHERE (floor_cents <= ?1 OR ?1 <= 0) AND sales_per_day >= ?2 AND name LIKE '%|%(%)'
-                 AND name NOT LIKE '★%' ORDER BY sales_per_day DESC",
-            )?
-            .query_map(params![saldo, MIN_SALES_PER_DAY], |r| r.get(0))?
-            .collect()
-        })
-        .await
-    {
-        Ok(n) => n,
+    let names = match catalog::load_items(&h.db).await {
+        Ok(items) => candidates(items, saldo, ratio, now),
         Err(e) => return tracing::warn!("patterns: catálogo ilegível: {e}"),
     };
     let name = {
@@ -250,6 +262,36 @@ pub async fn maybe_step(h: &Hunt) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn candidates_use_measured_or_fresh_reference_without_inventing_price_or_sales() {
+        let item = Item {
+            name: "AK-47 | Redline (Field-Tested)".into(),
+            code: None,
+            floor_usd_cents: None,
+            reference_usd_cents: Some(100),
+            reference_at: Some(100),
+            history_price_cents: None,
+            rank: 0,
+            sales_per_day: Some(5.0),
+            dispersion: None,
+            history_at: None,
+        };
+        assert_eq!(candidates(vec![item.clone()], 600, Some(5.0), 100).len(), 1);
+        assert!(candidates(vec![item.clone()], 400, Some(5.0), 100).is_empty());
+        assert!(candidates(vec![item.clone()], 600, None, 100).is_empty());
+        assert!(candidates(vec![item.clone()], 600, Some(5.0), 100 + 8 * 86_400).is_empty());
+        let mut missing = item.clone();
+        missing.sales_per_day = None;
+        assert!(candidates(vec![missing], 600, Some(5.0), 100).is_empty());
+        let mut no_price = item.clone();
+        no_price.reference_usd_cents = None;
+        assert_eq!(candidates(vec![no_price], 0, None, 100).len(), 1);
+        let mut measured = item;
+        measured.reference_usd_cents = None;
+        measured.floor_usd_cents = Some(100);
+        assert_eq!(candidates(vec![measured], 600, Some(5.0), 100).len(), 1);
+    }
+
     fn sale(seed: u16, multiple: f64, stickers: bool) -> CsfloatSale {
         CsfloatSale {
             price_usd_cents: (multiple * 100.0) as i64,
@@ -306,5 +348,23 @@ mod tests {
         );
         assert_eq!(group(&l, mw, Some(1)), None);
         assert_eq!(group(&l, mw, None), None);
+    }
+
+    #[test]
+    fn researched_seed_keeps_learning_with_the_existing_group_identity() {
+        let name = "Galil AR | Sandstorm (Field-Tested)";
+        let mut sales: Vec<_> = (1..=12).map(|i| sale(i, 1.0, false)).collect();
+        sales.push(sale(583, 5.0, false));
+        assert_eq!(premium_sales(name, &sales)[0].0, 583);
+        let learned = HashMap::from([(
+            "Galil AR | Sandstorm".into(),
+            BTreeMap::from([(583, vec![4.0, 5.0, 6.0])]),
+        )]);
+        let (g, evidence) = group(&learned, name, Some(583)).unwrap();
+        assert_eq!(
+            g.key,
+            group_of(name, Some(583), None, Some(0.3)).unwrap().key
+        );
+        assert_eq!(evidence.len(), 3);
     }
 }

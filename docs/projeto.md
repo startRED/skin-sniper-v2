@@ -44,6 +44,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `pricing/groups.rs` | grupo raro de um anúncio (tier de pattern, fase Doppler, faixa de fade) a partir das tabelas |
 | `pricing/combo.rs` | melhor combinação de anúncios que cabe no saldo (mochila em centavos) |
 | `hunt/catalog.rs` | descoberta e seleção do que vigiar dado o saldo |
+| `hunt/bootstrap.rs` | catálogo curado embutido, referências públicas separadas e renovação diária sem Steam |
 | `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador |
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
@@ -168,13 +169,24 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 
 ## Caça
 
-1. **Descoberta (1×/dia e quando o saldo muda muito):** `search/render` ordenado por popularidade nas
+1. **Catálogo e descoberta:** ao subir, importa `assets/catalog/curated.json` sem apagar medições anteriores.
+   Só os nomes da curadoria participam das novas seleções; itens removidos continuam no banco para histórico
+   e acompanhamento de oportunidades ativas. Nome-base, desgaste e variante são distintos; códigos gerados
+   só usam metadados sem ambiguidade. Referências USD ficam em `catalog_references`, nunca em campos de piso,
+   giro, dispersão ou histórico medidos. Um GET público diário renova apenas essas referências; falha conserva
+   o cache e tenta novamente em uma hora. Referência com mais de 7 dias não faz triagem. Vendas Steam realmente
+   capturadas na última semana também podem fazer triagem em BRL, sem converter média em anúncio mínimo.
+   A fila de históricos intercala duas candidatas novas para uma renovação vencida dentro das mesmas vagas;
+   as faixas de float podem ser pesquisadas abaixo do piso mínimo do desconto. Giro e estimativa continuam
+   exigindo histórico real. **Descoberta Steam (1×/dia e quando o saldo muda muito):** `search/render` ordenado por popularidade nas
    categorias de arma, sem faca/luva, até cobrir os itens com piso ≤ saldo. Para cada candidato,
    `QueryPriceHistory` (cache 6 h) dá vendas/dia e dispersão.
    A mesma parcela de consultas renova primeiro os históricos dos comuns vigiados nos 5 min antes de vencer.
    Durante uma pausa das actions, usa o histórico antigo autenticado somente se a rota principal estiver
    disponível; a saída pública não libera essa leitura. Erro enviado também gasta crédito; sem envio,
    a agenda segue para a caça normal. A candidata externa continua fora dessa prioridade.
+   Nessa pausa, as mesmas vagas também enriquecem candidatos do catálogo depois de renovar os vigiados;
+   sem fila autenticada disponível, aguardam. Não há consulta adicional fora da cota de descoberta.
 2. **Seleção:** vigia itens com piso entre o mínimo viável e o saldo e ≥ 1 venda/dia. Nota = vendas/dia
    (até 10: quem compra uma unidade não ganha com giro maior) × lucro possível em reais × fator aprendido do alvo (abaixo). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
@@ -497,15 +509,20 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
 
 ## Desvios registrados (caça, implementação)
 
-- Braço de float (`f:<nome>`, modo `float`): até 16 skins comuns × desgaste com faixa de float conhecida, ≥ 20 vendas/dia
+- Braço de float (`f:<nome>` e `h:<nome>`, modo `float`): até 16 skins comuns × desgaste com faixa de float conhecida, ≥ 20 vendas/dia
   e piso que cabe no saldo, as que mais vendem primeiro; consulta com o desgaste e o filtro de float da faixa de elite
   (propriedade 2). Faixa vista acima do saldo sai até a consulta envelhecer (6 h). Não usa o piso mínimo de desconto:
   o prêmio de float paga a taxa mesmo em skin barata. Um braço de float anterior (removido no #32) consultava a faixa
   mas avaliava como comum, sem prêmio, então nunca podia achar lucro de float.
+  `h:` pesquisa separadamente a AWP Asiimov Battle-Scarred com float ≥ 0,96, faixa visual aproximada da
+  Blackiimov; tem preferência dentro das mesmas 16 vagas e exige a mesma prova de vendas para prêmio.
+  Patterns de `assets/patterns/researched.json` têm grupos individuais por seed, compatíveis com as chaves
+  já aprendidas. Os preços de terceiros selecionam o que pesquisar; nunca viram multiplicador automático.
 
 - Varredura limitada a 6 páginas do topo (60 itens) e 6 amostras da cauda por categoria por ciclo, intercaladas
   entre as categorias: cada página é uma consulta e o catálogo tem milhares. A cauda pega uma página por faixa de
-  popularidade que dobra (60–120 … 1920–3840), outra a cada dia: é onde ficam as de giro lento. Os candidatos vêm só do que a varredura viu.
+  popularidade que dobra (60–120 … 1920–3840), outra a cada dia: é onde ficam as de giro lento. A varredura
+  complementa os metadados e referências já disponíveis no catálogo curado; não define sozinha a cobertura.
 - A razão BRL/USD é a mediana de até 3 amostras (menor anúncio em BRL ÷ menor ask em USD do mesmo item, de US$ 1 a
   US$ 20), guardada em `settings` (`usd_brl_ratio`) e remedida a cada 24 h.
 - Consulta de desconto leva o filtro de desgaste do nome (`Exterior`); a rara não leva: o código cobre todos os

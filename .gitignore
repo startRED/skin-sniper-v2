@@ -1,5 +1,6 @@
 /target
 /data
+/research
 /web/node_modules
 /web/dist/*
 !/web/dist/.gitkeep

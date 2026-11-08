@@ -665,7 +665,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
                 } else if !listings_blocked {
                     catalog::step(h).await
                 } else {
-                    Ok(false)
+                    catalog::refresh_candidate_history(h).await
                 }
             },
         )

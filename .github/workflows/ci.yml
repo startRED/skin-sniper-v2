@@ -33,5 +33,7 @@ jobs:
         run: npm ci
       - if: hashFiles('web/package.json') != ''
         run: npm run check
+      - run: node ../scripts/build-catalog.mjs --self-test
+      - run: node ../scripts/collect-market-sales.mjs --self-test
       - if: hashFiles('web/package.json') != ''
         run: npm run build

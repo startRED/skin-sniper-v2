@@ -10,15 +10,16 @@
 //!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
 //!    caber no saldo.
 //!
-//! shortcut: a varredura cobre `SCAN_ROUNDS` páginas do topo e `TAIL_ROUNDS` amostras da cauda por categoria,
-//! não o catálogo inteiro (cada página custa uma consulta e há milhares); subir se faltarem candidatos para o saldo.
+//! O catálogo público curado é carregado antes da caça; a varredura renova os dados Steam de uma amostra.
 
 use super::patterns::{self, Learned};
 use super::scheduler::Task;
 use super::{Hunt, detect, learn};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
-use crate::pricing::groups::{float_band, ranges, seed_ranges, skin_base, table_skins};
+use crate::pricing::groups::{
+    float_band, high_float_band, ranges, seed_ranges, skin_base, table_skins,
+};
 use crate::pricing::sell::{
     MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
 };
@@ -75,10 +76,34 @@ pub struct Item {
     pub name: String,
     pub code: Option<String>,
     pub floor_usd_cents: Option<i64>,
+    /// Média pública USD: só triagem, separada do menor anúncio medido na Steam.
+    pub reference_usd_cents: Option<i64>,
+    pub reference_at: Option<i64>,
+    pub history_price_cents: Option<i64>,
     pub rank: i64,
     pub sales_per_day: Option<f64>,
     pub dispersion: Option<f64>,
     pub history_at: Option<i64>,
+}
+
+impl Item {
+    pub(super) fn triage_usd(&self, now: i64) -> Option<i64> {
+        self.floor_usd_cents.or_else(|| {
+            self.reference_at
+                .filter(|at| (0..=7 * DAY).contains(&(now - at)))
+                .and(self.reference_usd_cents)
+        })
+    }
+
+    pub(super) fn triage_brl(&self, now: i64, ratio: f64) -> Option<i64> {
+        self.triage_usd(now)
+            .map(|usd| usd_to_brl(usd, ratio))
+            .or_else(|| {
+                self.history_at
+                    .filter(|at| (0..=7 * DAY).contains(&(now - at)))
+                    .and(self.history_price_cents)
+            })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -243,7 +268,7 @@ pub struct Ctx<'a> {
 /// `RARE_MAX_TASKS`, os que mais vendem primeiro), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
 pub(super) fn common_candidates(items: &[Item], c: &Ctx) -> Vec<Task> {
-    let ratio_floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, c.ratio));
+    let ratio_floor = |i: &Item| i.triage_brl(c.now, c.ratio);
     let min_floor = min_discount_floor();
     let mut common: Vec<(f64, Task)> = items
         .iter()
@@ -277,7 +302,7 @@ pub(super) fn common_candidates(items: &[Item], c: &Ctx) -> Vec<Task> {
 }
 
 pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
-    let ratio_floor = |i: &Item| i.floor_usd_cents.map(|u| usd_to_brl(u, c.ratio));
+    let ratio_floor = |i: &Item| i.triage_brl(c.now, c.ratio);
     let mut tasks = common_candidates(items, c);
     tasks.truncate(WATCH_MAX);
     let total: f64 = tasks.iter().map(|t| t.score).sum();
@@ -290,7 +315,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         let Some(code) = i.code.as_deref() else {
             continue;
         };
-        let f = ratio_floor(i).unwrap_or(0);
+        let Some(f) = ratio_floor(i) else { continue };
         let plain = !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir");
         if plain
             && wear_of(&i.name).is_some()
@@ -360,8 +385,16 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     let mut float: Vec<(f64, Task)> = items
         .iter()
         .filter(|i| !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir"))
-        .filter_map(|i| {
-            let id = format!("f:{}", i.name);
+        .flat_map(|i| {
+            [
+                ("f:", float_band(&i.name)),
+                ("h:", high_float_band(&i.name)),
+            ]
+            .into_iter()
+            .filter_map(move |(prefix, band)| band.map(|band| (i, prefix, band)))
+        })
+        .filter_map(|(i, prefix, band)| {
+            let id = format!("{prefix}{}", i.name);
             let spd = i.sales_per_day.filter(|s| *s >= FLOAT_MIN_SALES)?;
             let f = ratio_floor(i)?;
             let seen = observed(c.floors, &id, c.now);
@@ -376,13 +409,19 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
                     code: i.code.clone()?,
                     wear: Some(wear_of(&i.name)?),
                     seeds: vec![],
-                    float: Some(float_band(&i.name)?),
+                    float: Some(band),
                     score: 0.0,
                 },
             ))
         })
         .collect();
-    float.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.id.cmp(&b.1.id)));
+    float.sort_by(|a, b| {
+        b.1.id
+            .starts_with("h:")
+            .cmp(&a.1.id.starts_with("h:"))
+            .then(b.0.total_cmp(&a.0))
+            .then(a.1.id.cmp(&b.1.id))
+    });
     float.dedup_by(|a, b| a.1.id == b.1.id);
     float.truncate(FLOAT_MAX_TASKS);
     // Mesma nota-base somada dos raros: só desempata braços ainda não testados.
@@ -520,29 +559,82 @@ pub async fn step(h: &Hunt) -> Result<bool> {
                 return Ok(true);
             }
             Next::History(name) => {
-                let r = detect::fetch_and_store_history(h, &name).await;
-                {
-                    let mut s = h.lock();
-                    if r.as_ref().err().is_some_and(retryable) {
-                        s.disc.history.push_front(name);
-                    } else {
-                        s.disc.hist_tried.insert(name);
-                        s.disc.done_hist += 1;
-                    }
-                }
-                r?;
-                let reselect = {
-                    let s = h.lock();
-                    s.disc.done_hist >= RESELECT_EVERY || s.disc.history.is_empty()
-                };
-                if reselect {
-                    h.lock().disc.done_hist = 0;
-                    reselect_now(h).await?;
-                }
+                fetch_candidate_history(h, name).await?;
                 return Ok(true);
             }
         }
     }
+}
+
+async fn fetch_candidate_history(h: &Hunt, name: String) -> Result<()> {
+    let result = detect::fetch_and_store_history(h, &name).await;
+    {
+        let mut s = h.lock();
+        if result.as_ref().err().is_some_and(retryable) {
+            s.disc.history.push_front(name);
+        } else {
+            s.disc.hist_tried.insert(name);
+            s.disc.done_hist += 1;
+        }
+    }
+    result?;
+    let reselect = {
+        let s = h.lock();
+        s.disc.done_hist >= RESELECT_EVERY || s.disc.history.is_empty()
+    };
+    if reselect {
+        h.lock().disc.done_hist = 0;
+        reselect_now(h).await?;
+    }
+    Ok(())
+}
+
+/// Durante pausa das actions, usa a mesma cota de descoberta para históricos disponíveis pela rota antiga.
+pub(crate) async fn refresh_candidate_history(h: &Hunt) -> Result<bool> {
+    let now = h.now();
+    let (saldo, exclude, empty) = {
+        let s = h.lock();
+        let mut exclude = s.disc.hist_tried.clone();
+        exclude.extend(
+            s.history_retry_after
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(name, _)| name.clone()),
+        );
+        (s.saldo, exclude, s.disc.history.is_empty())
+    };
+    if empty {
+        let mut list = history_candidates(h, now, saldo, &exclude).await?;
+        if list.is_empty() {
+            let retrying: HashSet<String> = h
+                .lock()
+                .history_retry_after
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(name, _)| name.clone())
+                .collect();
+            h.lock().disc.hist_tried.clear();
+            list = history_candidates(h, now, saldo, &retrying).await?;
+        }
+        h.lock().disc.history = list.into();
+    }
+    let name = {
+        let mut s = h.lock();
+        loop {
+            let Some(name) = s.disc.history.pop_front() else {
+                break None;
+            };
+            if s.history_retry_after
+                .get(&name)
+                .is_none_or(|until| *until <= now)
+            {
+                break Some(name);
+            }
+        }
+    };
+    let Some(name) = name else { return Ok(false) };
+    fetch_candidate_history(h, name).await?;
+    Ok(true)
 }
 
 fn retryable(e: &anyhow::Error) -> bool {
@@ -707,9 +799,10 @@ async fn store_entries(h: &Hunt, entries: Vec<search::CatalogEntry>, rank_base: 
                 tx.execute(
                     "INSERT INTO items(name, g_code, paint_index, floor_cents, floor_usd_cents, icon_url, rank, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                     ON CONFLICT(name) DO UPDATE SET g_code = excluded.g_code, paint_index = excluded.paint_index,
-                        floor_cents = excluded.floor_cents, floor_usd_cents = excluded.floor_usd_cents,
-                        icon_url = excluded.icon_url, updated_at = excluded.updated_at,
+                     ON CONFLICT(name) DO UPDATE SET g_code = COALESCE(excluded.g_code, items.g_code),
+                        paint_index = COALESCE(excluded.paint_index, items.paint_index),
+                        floor_cents = COALESCE(excluded.floor_cents, items.floor_cents), floor_usd_cents = excluded.floor_usd_cents,
+                        icon_url = CASE WHEN excluded.icon_url = '' THEN items.icon_url ELSE excluded.icon_url END, updated_at = excluded.updated_at,
                         rank = CASE WHEN excluded.rank >= ?9 THEN COALESCE(items.rank, excluded.rank) ELSE excluded.rank END",
                     params![
                         e.name,
@@ -801,6 +894,7 @@ pub(crate) async fn refresh_watched_history(h: &Hunt) -> Result<bool> {
         .min_by_key(|i| (i.history_at, i.name.clone()));
     let Some(task) = task else { return Ok(false) };
     detect::fetch_and_store_history(h, &task.name).await?;
+    h.lock().disc.history.retain(|name| name != &task.name);
     Ok(true)
 }
 
@@ -829,8 +923,11 @@ fn history_order(
         .into_iter()
         .filter(|i| {
             i.code.is_some()
-                && i.floor_usd_cents
-                    .is_some_and(|u| (min_floor..=saldo).contains(&usd_to_brl(u, ratio)))
+                && i.triage_brl(now, ratio).is_some_and(|price| {
+                    price > 0
+                        && price <= saldo
+                        && (price >= min_floor || float_band(&i.name).is_some())
+                })
                 && i.history_at.is_none_or(|t| now - t >= HISTORY_TTL)
                 && !exclude.contains(&i.name)
         })
@@ -841,11 +938,20 @@ fn history_order(
             .then(a.rank.cmp(&b.rank))
             .then(a.name.cmp(&b.name))
     });
-    candidates
-        .into_iter()
-        .take(HISTORY_PER_ROUND)
-        .map(|i| i.name)
-        .collect()
+    let (new, old): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|i| i.history_at.is_none());
+    let (mut new, mut old) = (new.into_iter(), old.into_iter());
+    let mut out = Vec::new();
+    // Dois históricos novos para um vencido, nas mesmas vagas: catálogo grande não bloqueia renovação.
+    for slot in 0..HISTORY_PER_ROUND {
+        let next = if slot % 3 == 2 {
+            old.next().or_else(|| new.next())
+        } else {
+            new.next().or_else(|| old.next())
+        };
+        let Some(item) = next else { break };
+        out.push(item.name);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -909,12 +1015,18 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
 // Banco
 
 pub async fn load_items(db: &Db) -> Result<Vec<Item>> {
-    db.call(|c| {
+    let now = crate::db::now_unix();
+    db.call(move |c| {
         c.prepare(
-            "SELECT name, g_code, floor_usd_cents, COALESCE(rank, 1000000), sales_per_day, dispersion, history_at
-             FROM items ORDER BY COALESCE(rank, 1000000), name",
+            "SELECT i.name, i.g_code, i.floor_usd_cents, COALESCE(r.rank, i.rank, 1000000),
+                    i.sales_per_day, i.dispersion, i.history_at, r.usd_cents, r.observed_at,
+                    (SELECT median_cents FROM price_points p WHERE p.name=i.name
+                     AND p.ts >= ?1 AND p.ts <= ?2 AND p.purchases > 0 ORDER BY ts DESC LIMIT 1)
+             FROM items i LEFT JOIN catalog_references r ON r.name = i.name
+             WHERE r.name IS NOT NULL OR NOT EXISTS(SELECT 1 FROM catalog_references)
+             ORDER BY COALESCE(r.rank, i.rank, 1000000), i.name",
         )?
-        .query_map([], |r| {
+        .query_map(params![now - 7 * DAY, now], |r| {
             Ok(Item {
                 name: r.get(0)?,
                 code: r.get(1)?,
@@ -923,6 +1035,9 @@ pub async fn load_items(db: &Db) -> Result<Vec<Item>> {
                 sales_per_day: r.get(4)?,
                 dispersion: r.get(5)?,
                 history_at: r.get(6)?,
+                reference_usd_cents: r.get(7)?,
+                reference_at: r.get(8)?,
+                history_price_cents: r.get(9)?,
             })
         })?
         .collect()
@@ -977,6 +1092,9 @@ mod tests {
             name: name.into(),
             code: Some(format!("G{:08X}1", name.len() * 7 + rank as usize)),
             floor_usd_cents: Some(usd),
+            reference_usd_cents: None,
+            reference_at: None,
+            history_price_cents: None,
             rank,
             sales_per_day: Some(spd),
             dispersion: Some(disp),
@@ -1005,6 +1123,164 @@ mod tests {
             ),
             vec!["unseen", "old", "popular"]
         );
+    }
+
+    #[test]
+    fn large_catalog_keeps_history_renewal_and_cheap_float_research() {
+        let now = 10 * DAY;
+        let mut pool: Vec<Item> = (0..100)
+            .map(|rank| {
+                let mut i = item(&format!("new {rank}"), 1000, rank + 2, 10.0, 0.2);
+                i.history_at = None;
+                i
+            })
+            .collect();
+        let mut old = item("old", 1000, 1000, 10.0, 0.2);
+        old.history_at = Some(now - 2 * HISTORY_TTL);
+        pool.push(old);
+        let cheap = "MP9 | Sand Dashed (Factory New)";
+        let mut i = item(cheap, 10, 0, 10.0, 0.2);
+        i.history_at = None;
+        pool.push(i);
+        let names = history_order(pool, now, 2000, 1.0, &HashSet::new());
+        assert_eq!(names.len(), HISTORY_PER_ROUND);
+        assert_eq!(names[2], "old");
+        assert!(names.iter().any(|n| n == cheap));
+    }
+
+    #[test]
+    fn public_reference_is_only_triage_and_expires() {
+        let now = 10 * DAY;
+        let mut i = item("AK-47 | Slate (Field-Tested)", 1000, 1, 10.0, 0.2);
+        i.floor_usd_cents = None;
+        i.reference_usd_cents = Some(500);
+        i.reference_at = Some(now);
+        i.sales_per_day = None;
+        assert_eq!(i.triage_usd(now), Some(500));
+        assert_eq!(i.triage_usd(now + 7 * DAY + 1), None);
+        assert_eq!(i.triage_usd(now - 1), None);
+        assert!(
+            common_candidates(
+                &[i.clone()],
+                &Ctx {
+                    now,
+                    ratio: 1.0,
+                    saldo: 1000,
+                    boost: &HashMap::new(),
+                    floors: &HashMap::new(),
+                    learned: &Learned::new(),
+                }
+            )
+            .is_empty(),
+            "referência pública não inventa giro"
+        );
+        i.floor_usd_cents = Some(600);
+        assert_eq!(i.triage_usd(now + 30 * DAY), Some(600));
+        i.floor_usd_cents = None;
+        i.history_price_cents = Some(900);
+        i.history_at = Some(now + 30 * DAY);
+        assert_eq!(i.triage_brl(now + 30 * DAY, 5.0), Some(900));
+    }
+
+    #[tokio::test]
+    async fn history_triage_rejects_old_empty_or_future_sales_points() {
+        let (db, _dir) = crate::db::temp_db();
+        let now = crate::db::now_unix();
+        db.call(move |c| {
+            for (name, ts, purchases) in [
+                ("old", now - 8 * DAY, 1),
+                ("empty", now - 10, 0),
+                ("future", now + 10, 1),
+                ("recent", now - 10, 1),
+            ] {
+                c.execute(
+                    "INSERT INTO items(name,updated_at,history_at) VALUES (?1,?2,?2)",
+                    params![name, now],
+                )?;
+                c.execute(
+                    "INSERT INTO price_points VALUES (?1,?2,1000,?3)",
+                    params![name, ts, purchases],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let items = load_items(&db).await.unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .find(|i| i.name == "recent")
+                .unwrap()
+                .history_price_cents,
+            Some(1000)
+        );
+        assert!(
+            items
+                .iter()
+                .filter(|i| i.name != "recent")
+                .all(|i| i.history_price_cents.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_search_preserves_curated_codes_and_measured_prices() {
+        let (db, _dir) = crate::db::temp_db();
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let h = Hunt::new(super::super::HuntDeps {
+            db: db.clone(),
+            settings: crate::settings::SettingsStore::new(db.clone()),
+            events,
+            steam: std::sync::Arc::new(
+                crate::steam::client::SteamClient::with_base("http://127.0.0.1:1").unwrap(),
+            ),
+            csfloat: std::sync::Arc::new(
+                crate::csfloat::CsfloatClient::with_base("http://127.0.0.1:1").unwrap(),
+            ),
+            telegram: None,
+        });
+        db.call(|c| {
+            c.execute("INSERT INTO items(name,g_code,paint_index,icon_url,floor_cents,updated_at) VALUES ('Glock-18 | Moonrise (Field-Tested)','G180420B6053004',694,'existing',500,1)", [])?;
+            Ok(())
+        }).await.unwrap();
+        store_entries(
+            &h,
+            vec![search::CatalogEntry {
+                name: "Glock-18 | Moonrise (Field-Tested)".into(),
+                item_code: None,
+                sell_price_usd_cents: 100,
+                sell_listings: 1,
+                icon_url: String::new(),
+            }],
+            1,
+        )
+        .await
+        .unwrap();
+        db.call(|c| {
+            let row: (String, i64, String, i64) = c.query_row(
+                "SELECT g_code,paint_index,icon_url,floor_cents FROM items",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            assert_eq!(row, ("G180420B6053004".into(), 694, "existing".into(), 500));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn high_float_task_uses_separate_band_and_keeps_the_float_limit() {
+        let name = "AWP | Asiimov (Battle-Scarred)";
+        let mut i = item(name, 1000, 1, 50.0, 0.2);
+        i.code = Some("G180920BB033004".into());
+        let tasks = select(&[i], &ctx(100000, &NO_BOOST(), &HashMap::new()));
+        let high = tasks.iter().find(|t| t.id == format!("h:{name}")).unwrap();
+        assert_eq!(high.mode(), Mode::Float);
+        assert_eq!(high.float, Some((0.96, 1.0)));
+        assert_eq!(high.filters(), vec![PropFilter::float(0.96, 1.0)]);
+        assert!(tasks.iter().any(|t| t.id == format!("f:{name}")));
+        assert!(tasks.iter().filter(|t| t.mode() == Mode::Float).count() <= FLOAT_MAX_TASKS);
     }
 
     #[test]
@@ -1153,6 +1429,9 @@ mod tests {
                 name: name.into(),
                 code,
                 floor_usd_cents: i["floor_usd_cents"].as_i64(),
+                reference_usd_cents: None,
+                reference_at: None,
+                history_price_cents: None,
                 rank: i["rank"].as_i64().unwrap(),
                 sales_per_day: i["sales_per_day"].as_f64(),
                 dispersion: i["dispersion"].as_f64(),
