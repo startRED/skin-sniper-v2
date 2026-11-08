@@ -297,3 +297,37 @@ preservado. Habilitamos a descompressão nativa do reqwest, conforme a
 [documentação do próprio cliente](https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html#method.gzip),
 e uma fixture comprimida do JSON real cobre a resposta que ignora identity. O limite de 8 MiB continua
 valendo sobre o corpo descomprimido.
+
+## 16. Bloqueio público, ritmo total e reinício (08/11/2026)
+
+- Às 02h50min41s de Fortaleza, a sessão recebeu 429; logo depois, o render público recebeu 429 pela extra e
+  pela principal. Em `research_attempts`, a janela Unix `[1794113441,1794117041)` tinha 600 tentativas pela
+  principal e 575 pela extra. As marcas são de reserva da tentativa, anteriores ao envio. A coincidência com
+  o volume é indício de limitação por janela, não prova de uma cota oficial, da origem exata da contagem ou
+  de que só este app consumiu essas redes. A comparação atual das saídas confirmou IPs públicos diferentes,
+  sem gravar os endereços. Não foram emitidas sondas adicionais contra a Steam.
+- Das 803 leituras públicas bem-sucedidas nessa hora, 360 repetiam o alvo antes de 60 s; havia 46 alvos
+  distintos. A fila principal não compartilhava a espera por alvo do leitor paralelo. Agora compartilham o
+  último instante de página válida e deixam 60 s entre leituras comuns sem oportunidade ativa. Consultas
+  filtradas continuam cobrindo suas próprias faixas e não são substituídas por páginas públicas.
+- Falha comprovada no cliente: a pausa/ritmo público, extra e de controle não sobreviviam ao reinício; o
+  gancho nem era chamado no 429 público anônimo ou extra. O novo snapshot conserva as quatro filas e os
+  estados antigos continuam legíveis. A migração usa recusas públicas recentes do próprio registro para não
+  reabrir essas filas durante a penalidade. Um teste local reproduziu a falta do aviso de persistência antes
+  da correção; os testes verificam restauração, separação das filas, `Retry-After` de 3600 s e migração.
+- O envio real agora tem um piso agregado de 10 s entre leituras por saída, inclusive ao alternar endpoints
+  e após reiniciar. Isso corresponde a aproximadamente 360 leituras/h por saída, abaixo do volume observado
+  antes do bloqueio, sem tratar esse número como regra da Valve. A fila de compra/login preserva o próprio
+  ritmo. Testes locais verificam os intervalos reais recebidos por um servidor e a prioridade das ações do usuário.
+- O [RFC 6585, seção 4](https://www.rfc-editor.org/rfc/rfc6585#section-4) define o 429, mas deixa a identificação
+  do cliente e a forma de contar pedidos ao servidor. As causas internas e o prazo final da restrição da Steam
+  permanecem opacos. A proteção corrige o tráfego e o reinício do app; não promete impedir qualquer restrição
+  futura causada por tráfego externo ou mudanças da plataforma.
+- Com o v2 parado das 03h02min04s às 03h26min16s de Fortaleza, as primeiras respostas de sessão, histórico e
+  render extra ainda foram 429. Isso confirma que uma pausa de cerca de 24 min do programa não bastou nesta
+  ocorrência, sem revelar o prazo interno da Steam nem excluir tráfego externo. O cliente passa a aplicar
+  pelo menos 30 min de descanso nas recusas públicas, preservando `Retry-After` maior. Quando as duas filas
+  de leitura da principal já estão recusadas, alinha seus prazos pelo maior; não propaga a recusa a uma fila
+  saudável ou às ações explícitas do usuário. A conferência de carteira em segundo plano também aguarda
+  esse descanso integral. Testes locais verificam a pausa pública longa, o alinhamento condicional e a
+  diferença entre verificação automática e explícita da sessão.

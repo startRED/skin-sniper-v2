@@ -50,6 +50,9 @@ const PAUSE_RESET_AFTER: Duration = Duration::from_secs(60 * 60); // maior que P
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
 /// Espaço mínimo entre duas consultas quaisquer pela principal, somando os baldes (nunca rajada).
 const MIN_SPACING: Duration = Duration::from_secs(3);
+// Na hora anterior ao bloqueio de 08/11, a principal somou 600 consultas e a extra 575.
+// 360 leituras/h por saída deixam margem; não é uma cota oficial da Steam.
+const READ_SPACING: Duration = Duration::from_secs(10);
 const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Saída extra: proxy local que sai por outro IP público (o `saida-celular` deste PC, pela Starlink). Leva só
@@ -269,6 +272,7 @@ impl Limiter {
     }
 
     /// `Ok` toma a vaga (e conta a consulta); `Err(espera)` diz quanto falta.
+    #[cfg(test)]
     pub(crate) fn try_acquire(&mut self, now: Instant) -> std::result::Result<(), Duration> {
         self.try_reserve(now)?;
         self.note_query(now);
@@ -332,6 +336,87 @@ impl Limiter {
         {
             self.pause_len = PAUSE_START;
         }
+    }
+
+    fn saved(&mut self, now: Instant, anon: i64) -> String {
+        let s = self.stats(now);
+        let last_429 = self
+            .last_429
+            .map(|t| unix_in(Duration::ZERO) - now.duration_since(t).as_secs() as i64);
+        let adjusted =
+            unix_in(Duration::ZERO) - now.duration_since(self.last_adjust).as_secs() as i64;
+        let floor_since = self.floor_since.map_or(0, |t| {
+            unix_in(Duration::ZERO) - now.saturating_duration_since(t).as_secs() as i64
+        });
+        let last_ok = self.last_ok.map_or(0, |t| {
+            unix_in(Duration::ZERO) - now.saturating_duration_since(t).as_secs() as i64
+        });
+        format!(
+            "{}|{}|{}|{anon}|{adjusted}|{}|{floor_since}|{last_ok}",
+            s.paused_until.or(last_429).unwrap_or(0),
+            s.gap_ms,
+            self.pause_len.as_millis(),
+            self.floor_at_429.as_millis()
+        )
+    }
+
+    fn restore(&mut self, saved: &str, now: Instant) -> Option<Instant> {
+        let mut parts = saved.split('|').map(str::parse::<i64>);
+        let (Some(Ok(until)), Some(Ok(gap)), pause) = (parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let anon = parts.next();
+        // shortcut: texto antigo (4 campos) encurta a partir do 1º campo; se foi salvo num 429 logado ou numa troca de
+        // conta, encurta duas vezes uma única vez (nunca abaixo do piso de 6 s). Some no próximo 429, que grava o 5º.
+        let adjusted = parts.next().and_then(|r| r.ok()).unwrap_or(until);
+        let floor = parts.next().and_then(|r| r.ok());
+        let floor_since = parts.next().and_then(|r| r.ok());
+        let last_ok = parts.next().and_then(|r| r.ok()).filter(|t| *t > 0);
+        let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
+        let anon_left = anon.and_then(|r| r.ok()).unwrap_or(0) - unix_in(Duration::ZERO);
+        let anon_until = (anon_left > 0)
+            .then(|| now + Duration::from_secs(anon_left as u64).min(ANON_AFTER_429));
+        let l = self;
+        if let Some(t) = last_ok {
+            let ago = (unix_in(Duration::ZERO) - t).max(0) as u64;
+            l.last_ok = now.checked_sub(Duration::from_secs(ago));
+        }
+        if let (Some(f), Some(t)) = (floor, floor_since.filter(|t| *t > 0)) {
+            let ago = (unix_in(Duration::ZERO) - t).max(0) as u64;
+            l.floor_at_429 = ms(f).clamp(MIN_GAP, FLOOR_MAX);
+            l.floor_since = now.checked_sub(Duration::from_secs(ago));
+        }
+        // O tempo desde o último encurtamento salvo continua encurtando; sem isso cada reinício voltava ao
+        // intervalo de horas atrás e levava mais 2,5 h para sair dele (visto ao vivo em 04/11).
+        let since = (unix_in(Duration::ZERO) - adjusted).max(0) as u64;
+        let every = SHORTEN_EVERY.as_secs();
+        l.gap = ms(gap)
+            .mul_f64(SHORTEN_FACTOR.powi((since / every).min(100) as i32))
+            .clamp(MIN_GAP, MAX_GAP)
+            .max(l.floor(now));
+        // o pedaço de 10 min já andado também conta para o próximo encurtamento
+        l.last_adjust = now
+            .checked_sub(Duration::from_secs(since % every))
+            .unwrap_or(now);
+        // a hora do último 429 vem do 7º campo; texto antigo usa o 1º (o fim da pausa, se salvo durante uma)
+        let last_429 = floor_since.filter(|t| *t > 0).unwrap_or(until);
+        let quiet_for = (unix_in(Duration::ZERO) - last_429).max(0) as u64;
+        let quiet = quiet_for >= PAUSE_RESET_AFTER.as_secs();
+        if let Some(Ok(p)) = pause.filter(|_| !quiet) {
+            l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
+            // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
+            // shortcut: texto antigo salvo durante uma pausa conta do fim da pausa (mais cauteloso que o 429 real).
+            l.last_429 = Some(
+                now.checked_sub(Duration::from_secs(quiet_for))
+                    .unwrap_or(now),
+            );
+        }
+        let left = until - unix_in(Duration::ZERO);
+        if left > 0 {
+            l.paused_until = Some(now + Duration::from_secs(left as u64));
+        }
+        anon_until
     }
 
     pub(crate) fn stats(&mut self, now: Instant) -> Stats {
@@ -424,20 +509,19 @@ struct Inner {
     on_pace: Option<PaceHook>,
     /// Até quando `action` lê sem login (depois de um 429 logado).
     anon_reads_until: Option<Instant>,
-    /// Ritmo da saída extra; outro IP não garante outra cota. Fica só em memória.
-    // shortcut: reiniciar volta a 6 s nessa saída; se a Steam castigar esse IP por horas, salvar como `steam_pace`
+    /// Ritmo da saída extra; outro IP não garante outra cota. Sobrevive ao reinício.
     alt_limiter: Limiter,
     /// Saída extra recusou ou falhou na rede: fica de lado até aqui.
     alt_down_until: Option<Instant>,
     /// Interface antiga, livro de ofertas e busca: medidos disponíveis com actions em 429 (06/11; com
     /// `/market/actions` em 429 havia horas, `orderbook`, `search/render` e `priceoverview` respondiam 200).
-    // shortcut: ritmo só em memória (reiniciar volta a 6 s); salvar como `steam_pace` se esse balde também levar horas
     side: Limiter,
     /// Última página legada validada: anúncios e histórico seguem mesmo com `/actions` em pausa.
     legacy_ok: Option<Instant>,
     /// Próxima vaga de qualquer consulta pela principal, de qualquer balde (`MIN_SPACING`).
     next_any: Instant,
     spacing: Duration,
+    read_spacing: Duration,
     /// [principal, extra, livro e busca], para o balanço de 10 min no log.
     calls: [Calls; 3],
     sent: u64,
@@ -462,6 +546,17 @@ impl Inner {
     fn alt_held(&self, now: Instant) -> bool {
         self.alt_down_until.is_some_and(|t| now < t) || self.alt_limiter.pause_end(now).is_some()
     }
+
+    fn align_read_pauses(&mut self, now: Instant) {
+        if let (Some(native), Some(public)) =
+            (self.limiter.pause_end(now), self.side.pause_end(now))
+        {
+            // Só quando as duas já foram recusadas: tentativas desencontradas não deixam a saída descansar.
+            let until = Some(native.max(public));
+            self.limiter.paused_until = until;
+            self.side.paused_until = until;
+        }
+    }
 }
 
 pub struct SteamClient {
@@ -479,6 +574,7 @@ pub struct SteamClient {
 #[derive(Default)]
 struct SendPace {
     last_any: Option<Instant>,
+    last_read: Option<Instant>,
     last_bucket: [Option<Instant>; 3],
 }
 
@@ -532,7 +628,12 @@ fn unix_in(d: Duration) -> i64 {
 
 impl SteamClient {
     pub fn new() -> anyhow::Result<Self> {
-        Self::with_base(BASE)
+        let mut client = Self::with_base(BASE)?;
+        let now = Instant::now();
+        // Um reinício também precisa respeitar o intervalo do último processo.
+        client.main_send_pace.get_mut().last_read = Some(now);
+        client.alt_send_pace.get_mut().last_read = Some(now);
+        Ok(client)
     }
 
     pub(crate) fn with_base(base: &str) -> anyhow::Result<Self> {
@@ -557,6 +658,7 @@ impl SteamClient {
                 legacy_ok: None,
                 next_any: Instant::now(),
                 spacing: MIN_SPACING,
+                read_spacing: READ_SPACING,
                 calls: [Calls::default(); 3],
                 sent: 0,
                 alt_down_until: None,
@@ -617,14 +719,24 @@ impl SteamClient {
                 };
                 let any = pace.last_any.map_or(now, |last| last + spacing);
                 let bucket_at = pace.last_bucket[bucket].map_or(now, |last| last + gap);
-                let at = any.max(bucket_at);
+                let read_at = if bucket == 2 {
+                    now
+                } else {
+                    pace.last_read.map_or(now, |last| last + inner.read_spacing)
+                };
+                let at = any.max(bucket_at).max(read_at);
                 if at <= now {
                     // O contador representa transporte iniciado, não vaga reservada.
                     inner.sent += 1;
                     if alt {
                         inner.alt_limiter.note_query(now);
+                    } else {
+                        inner.bucket(ep).note_query(now);
                     }
                     pace.last_any = Some(now);
+                    if bucket != 2 {
+                        pace.last_read = Some(now);
+                    }
                     pace.last_bucket[bucket] = Some(now);
                     return Ok(());
                 }
@@ -815,6 +927,7 @@ impl SteamClient {
         g.side.gap = gap;
         g.control.gap = gap;
         g.spacing = gap;
+        g.read_spacing = gap;
     }
 
     /// `true` = uma consulta desse endpoint agora falharia sem ir à Steam: o balde dele está em pausa por 429 e a
@@ -890,104 +1003,66 @@ impl SteamClient {
         }
     }
 
-    /// Pausa e intervalo salvos depois do último 429 (`fim da pausa Unix|intervalo ms|próxima pausa ms|fim
-    /// das leituras sem login Unix|último encurtamento Unix|piso ms|último 429 Unix|última resposta sem 429 Unix`). Sem pausa ativa, o 1º campo é a hora do último 429: ao subir, a
-    /// escalada só zera 60 min depois dele.
+    /// Quatro estados separados por `;`: nativo, público, extra e controle. O primeiro conserva o formato
+    /// antigo, incluindo o prazo sem login; os outros usam esse mesmo formato com o campo zerado.
     fn saved_pace(g: &mut Inner, now: Instant) -> String {
-        let s = g.limiter.stats(now);
-        let last_429 = g
-            .limiter
-            .last_429
-            .map(|t| unix_in(Duration::ZERO) - now.duration_since(t).as_secs() as i64);
         let anon = g
             .anon_reads_until
             .filter(|t| *t > now)
             .map_or(0, |t| unix_in(t - now));
-        let adjusted =
-            unix_in(Duration::ZERO) - now.duration_since(g.limiter.last_adjust).as_secs() as i64;
-        let floor_since = g.limiter.floor_since.map_or(0, |t| {
-            unix_in(Duration::ZERO) - now.saturating_duration_since(t).as_secs() as i64
-        });
-        let last_ok = g.limiter.last_ok.map_or(0, |t| {
-            unix_in(Duration::ZERO) - now.saturating_duration_since(t).as_secs() as i64
-        });
         format!(
-            "{}|{}|{}|{anon}|{adjusted}|{}|{floor_since}|{last_ok}",
-            s.paused_until.or(last_429).unwrap_or(0),
-            s.gap_ms,
-            g.limiter.pause_len.as_millis(),
-            g.limiter.floor_at_429.as_millis()
+            "{};{};{};{}",
+            g.limiter.saved(now, anon),
+            g.side.saved(now, 0),
+            g.alt_limiter.saved(now, 0),
+            g.control.saved(now, 0)
         )
     }
 
-    /// Retoma o que `saved_pace` gravou antes de um reinício: reiniciar não zera a cota da Steam.
-    /// Texto que não é desse formato é ignorado.
+    /// Retoma também as filas pública, extra e de controle; aceita o texto nativo das versões anteriores.
     pub fn restore_pace(&self, saved: &str) {
-        let mut parts = saved.split('|').map(str::parse::<i64>);
-        let (Some(Ok(until)), Some(Ok(gap)), pause) = (parts.next(), parts.next(), parts.next())
-        else {
-            return;
-        };
-        let anon = parts.next();
-        // shortcut: texto antigo (4 campos) encurta a partir do 1º campo; se foi salvo num 429 logado ou numa troca de
-        // conta, encurta duas vezes uma única vez (nunca abaixo do piso de 6 s). Some no próximo 429, que grava o 5º.
-        let adjusted = parts.next().and_then(|r| r.ok()).unwrap_or(until);
-        let floor = parts.next().and_then(|r| r.ok());
-        let floor_since = parts.next().and_then(|r| r.ok());
-        let last_ok = parts.next().and_then(|r| r.ok()).filter(|t| *t > 0);
+        let mut lanes = saved.split(';');
         let now = Instant::now();
-        let ms = |v: i64| Duration::from_millis(v.max(0) as u64);
         let g = &mut *self.inner.lock().unwrap();
-        let anon_left = anon.and_then(|r| r.ok()).unwrap_or(0) - unix_in(Duration::ZERO);
-        if anon_left > 0 {
-            g.anon_reads_until =
-                Some(now + Duration::from_secs(anon_left as u64).min(ANON_AFTER_429));
+        if let Some(until) = g.limiter.restore(lanes.next().unwrap_or_default(), now) {
+            g.anon_reads_until = Some(until);
         }
-        let l = &mut g.limiter;
-        if let Some(t) = last_ok {
-            let ago = (unix_in(Duration::ZERO) - t).max(0) as u64;
-            l.last_ok = now.checked_sub(Duration::from_secs(ago));
+        for limiter in [&mut g.side, &mut g.alt_limiter, &mut g.control] {
+            if let Some(saved) = lanes.next() {
+                limiter.restore(saved, now);
+            }
         }
-        if let (Some(f), Some(t)) = (floor, floor_since.filter(|t| *t > 0)) {
-            let ago = (unix_in(Duration::ZERO) - t).max(0) as u64;
-            l.floor_at_429 = ms(f).clamp(MIN_GAP, FLOOR_MAX);
-            l.floor_since = now.checked_sub(Duration::from_secs(ago));
-        }
-        // O tempo desde o último encurtamento salvo continua encurtando; sem isso cada reinício voltava ao
-        // intervalo de horas atrás e levava mais 2,5 h para sair dele (visto ao vivo em 04/11).
-        let since = (unix_in(Duration::ZERO) - adjusted).max(0) as u64;
-        let every = SHORTEN_EVERY.as_secs();
-        l.gap = ms(gap)
-            .mul_f64(SHORTEN_FACTOR.powi((since / every).min(100) as i32))
-            .clamp(MIN_GAP, MAX_GAP)
-            .max(l.floor(now));
-        // o pedaço de 10 min já andado também conta para o próximo encurtamento
-        l.last_adjust = now
-            .checked_sub(Duration::from_secs(since % every))
-            .unwrap_or(now);
-        // a hora do último 429 vem do 7º campo; texto antigo usa o 1º (o fim da pausa, se salvo durante uma)
-        let last_429 = floor_since.filter(|t| *t > 0).unwrap_or(until);
-        let quiet_for = (unix_in(Duration::ZERO) - last_429).max(0) as u64;
-        let quiet = quiet_for >= PAUSE_RESET_AFTER.as_secs();
-        if let Some(Ok(p)) = pause.filter(|_| !quiet) {
-            l.pause_len = ms(p).clamp(PAUSE_START, PAUSE_MAX);
-            // A escalada segue valendo depois de subir, contada da hora salva (não do reinício).
-            // shortcut: texto antigo salvo durante uma pausa conta do fim da pausa (mais cauteloso que o 429 real).
-            l.last_429 = Some(
-                now.checked_sub(Duration::from_secs(quiet_for))
-                    .unwrap_or(now),
-            );
-        }
-        let left = until - unix_in(Duration::ZERO);
-        if left > 0 {
-            l.paused_until = Some(now + Duration::from_secs(left as u64));
-        }
+        g.align_read_pauses(now);
     }
 
     /// Chamado (sob o lock do cliente) a cada 429 e ao trocar de conta, de qualquer endpoint, com o texto para `restore_pace` (o 4º
     /// campo é o fim das leituras sem login).
     pub fn on_pace_change(&self, f: impl Fn(String) + Send + Sync + 'static) {
         self.inner.lock().unwrap().on_pace = Some(Arc::new(f));
+    }
+
+    pub fn checkpoint_pace(&self) {
+        Self::notify_pace(&mut self.inner.lock().unwrap(), Instant::now());
+    }
+
+    /// Primeira atualização: preserva um descanso de 30 min desde recusas públicas ainda sem snapshot.
+    pub fn restore_public_backoff(&self, main: Option<i64>, alt: Option<i64>) {
+        let now = Instant::now();
+        let unix_now = unix_in(Duration::ZERO);
+        let g = &mut *self.inner.lock().unwrap();
+        for (limiter, last) in [(&mut g.side, main), (&mut g.alt_limiter, alt)] {
+            let saved_last = limiter
+                .last_429
+                .map(|at| unix_now - now.saturating_duration_since(at).as_secs() as i64);
+            if let Some(last) = last.into_iter().chain(saved_last).max() {
+                let ago = Duration::from_secs((unix_now - last).max(0) as u64);
+                if ago < PAUSE_MAX {
+                    limiter.on_429(now.checked_sub(ago).unwrap_or(now), Some(PAUSE_MAX));
+                    limiter.pause_len = PAUSE_MAX;
+                }
+            }
+        }
+        g.align_read_pauses(now);
     }
 
     /// Fim da pausa do breaker do endpoint (segundos Unix), se estiver aberto.
@@ -1225,7 +1300,7 @@ impl SteamClient {
                     let main = if now < g.next_any {
                         Err(g.next_any - now)
                     } else {
-                        g.bucket(ep).try_acquire(now)
+                        g.bucket(ep).try_reserve(now)
                     };
                     match main {
                         Ok(()) => {
@@ -1377,7 +1452,11 @@ impl SteamClient {
                 let retry = retry_after(&r);
                 let mut g = self.inner.lock().unwrap();
                 g.calls[1].limited += 1;
-                g.alt_limiter.on_429(Instant::now(), retry);
+                g.alt_limiter.on_429(
+                    Instant::now(),
+                    Some(retry.unwrap_or_default().max(PAUSE_MAX)),
+                );
+                Self::notify_pace(&mut g, Instant::now());
                 drop(g);
                 tracing::warn!(endpoint = ?ep, "Steam: 429 na saída extra; ela pausa e a principal segue");
                 None
@@ -1444,15 +1523,19 @@ impl SteamClient {
                 // Trocar o login não libera cota: a próxima leitura anônima também espera a pausa.
                 g.anon_reads_until = Some(now + ANON_AFTER_429);
             }
-            g.bucket(ep).on_429(now, retry);
+            let wait = if side(ep) {
+                Some(retry.unwrap_or_default().max(PAUSE_MAX))
+            } else {
+                retry
+            };
+            g.bucket(ep).on_429(now, wait);
+            g.align_read_pauses(now);
             let until = g
                 .bucket(ep)
                 .stats(now)
                 .paused_until
                 .unwrap_or_else(|| unix_in(PAUSE_START));
-            if !side(ep) || logged_read {
-                Self::notify_pace(&mut g, now);
-            }
+            Self::notify_pace(&mut g, now);
             drop(g);
             // Qual consulta levou o 429 (e se ia logada): sem isso não dá para saber o que a Steam segura.
             tracing::warn!(endpoint = ?ep, logado = sent_by.is_some(),

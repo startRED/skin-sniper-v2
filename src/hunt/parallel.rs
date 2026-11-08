@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 
 // shortcut: uma página a cada 12 s e cada alvo no máximo uma vez por minuto; ajustar após medir 429 e achados.
 const GAP: Duration = Duration::from_secs(12);
-const TARGET_GAP: Duration = Duration::from_secs(60);
+const TARGET_GAP: Duration = Duration::from_secs(super::COMMON_REVISIT_SECS as u64);
 const MAX_AGE: Duration = Duration::from_secs(20);
 
 struct Completed {
@@ -125,6 +125,11 @@ fn pick(h: &Hunt, recent: &HashMap<String, Instant>) -> Option<Task> {
         .filter(|t| s.queue.external.as_ref() != Some(&t.id))
         .filter(|t| !s.active.values().any(|a| a.task == t.id))
         .filter(|t| !recent.contains_key(&t.id))
+        .filter(|t| {
+            s.floors
+                .get(&t.floor_key())
+                .is_none_or(|(_, at)| now - at >= super::COMMON_REVISIT_SECS)
+        })
         .min_by_key(|t| {
             (
                 s.floors.get(&t.floor_key()).map_or(0, |(_, at)| *at),
@@ -582,6 +587,16 @@ mod tests {
             let mut s = h.lock();
             s.books.insert(task.name.clone(), (NOW, None));
         }
+        assert_eq!(pick(&h, &HashMap::new()), Some(task.clone()));
+        h.lock().floors.insert(task.floor_key(), (Some(700), NOW));
+        assert!(
+            pick(&h, &HashMap::new()).is_none(),
+            "a principal já leu essa página"
+        );
+        h.lock().floors.insert(
+            task.floor_key(),
+            (Some(700), NOW - super::super::COMMON_REVISIT_SECS),
+        );
         assert_eq!(pick(&h, &HashMap::new()), Some(task));
     }
 

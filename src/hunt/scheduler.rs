@@ -350,6 +350,7 @@ impl Queue {
 
     /// Decide o próximo alvo e já conta a consulta (como antes: reagenda antes de consultar, uma falha não
     /// deixa o mesmo alvo ocupando a frente). Uma chamada = uma consulta; rende crédito à descoberta.
+    #[cfg(test)]
     pub fn next(&mut self, now: i64) -> Option<Task> {
         self.next_matching(now, |_| true)
     }
@@ -721,10 +722,22 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             s.queue.record_scan(&task.id, now);
             s.queue.last_exploring = false;
             (Some(task), credit)
-        } else if listings_blocked {
-            (s.queue.next_matching(now, |t| !t.rare()), credit)
         } else {
-            (s.queue.next(now), credit)
+            let recent: HashSet<String> = s
+                .floors
+                .iter()
+                .filter(|(id, (_, at))| {
+                    now - at < super::COMMON_REVISIT_SECS
+                        && !s.active.values().any(|a| a.task == id.as_str())
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            (
+                s.queue.next_matching(now, |t| {
+                    (!listings_blocked || !t.rare()) && (t.rare() || !recent.contains(&t.id))
+                }),
+                credit,
+            )
         }
     };
     let Some(task) = next else {
@@ -1117,7 +1130,18 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             break;
         }
         seen.insert(queried.name.as_str());
-        let Some(next) = targets.iter().find(|t| !seen.contains(t.name.as_str())) else {
+        let next = {
+            let s = h.lock();
+            let now = h.now();
+            targets.iter().find(|t| {
+                !seen.contains(t.name.as_str())
+                    && (s.active.values().any(|a| a.task == t.id)
+                        || s.floors
+                            .get(&t.floor_key())
+                            .is_none_or(|(_, at)| now - at >= super::COMMON_REVISIT_SECS))
+            })
+        };
+        let Some(next) = next else {
             break;
         };
         queried = next;
@@ -1133,9 +1157,20 @@ const PACE_KEY: &str = "steam_pace";
 
 /// Retoma o ritmo salvo e passa a salvar a cada 429, venha de qual endpoint vier.
 pub async fn load_pace(h: &Hunt) -> anyhow::Result<()> {
-    if let Some(v) = catalog::get_setting(&h.db, PACE_KEY).await? {
-        h.steam.restore_pace(&v);
+    let saved = catalog::get_setting(&h.db, PACE_KEY).await?;
+    if let Some(v) = &saved {
+        h.steam.restore_pace(v);
     }
+    // Recusas recentes preservam o descanso público, inclusive ao atualizar um snapshot curto antigo.
+    let limits: Vec<(String, i64)> = h.db.call(|c| {
+        c.prepare("SELECT route, max(at) FROM research_attempts WHERE endpoint IN ('legacy','book','search') AND outcome='rate_limited' AND route IN ('main','alt') AND at>=?1 GROUP BY route")?
+            .query_map([crate::db::now_unix() - 1800], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }).await?;
+    h.steam.restore_public_backoff(
+        limits.iter().find(|(r, _)| r == "main").map(|(_, at)| *at),
+        limits.iter().find(|(r, _)| r == "alt").map(|(_, at)| *at),
+    );
     let db = h.db.clone();
     // Gravações em fila, cada uma com o ritmo mais novo: uma gravação antiga que termina por último não
     // apaga a mais nova.
@@ -1152,6 +1187,7 @@ pub async fn load_pace(h: &Hunt) -> anyhow::Result<()> {
             }
         });
     });
+    h.steam.checkpoint_pace();
     Ok(())
 }
 
@@ -1179,6 +1215,7 @@ async fn backoff(h: &Hunt, e: &anyhow::Error) {
 
 /// Grava no banco as notas alteradas.
 pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
+    h.steam.checkpoint_pace();
     let (rows, progress) = {
         let mut s = h.lock();
         let q = &mut s.queue;
