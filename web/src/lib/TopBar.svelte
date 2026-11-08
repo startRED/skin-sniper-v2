@@ -91,7 +91,7 @@
       {:else if st.hunt.watching === 0}
         <span>Escolhendo o que caçar…</span>
       {:else}
-        <span>Caçando <b>{st.hunt.watching}</b> skins · {st.hunt.queries_per_min} consultas/min ·
+        <span>Caçando <b>{st.hunt.watching}</b> skins · {st.hunt.queries_per_min} consultas totais/min ·
           {st.hunt.last_query_at ? ago(st.hunt.last_query_at, app.now) : 'ainda sem consulta'}</span>
       {/if}
       {#if app.conn !== 'down' && st?.hunt.message && !(paused && st.hunt.message.includes('429')) && !readingSaldo()}<span class="msg">{st.hunt.message}</span>{/if}

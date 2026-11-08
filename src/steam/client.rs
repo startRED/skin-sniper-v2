@@ -694,13 +694,16 @@ impl SteamClient {
         {
             let g = self.inner.lock().unwrap();
             // Não prende o comum ao piso aprendido das actions quando o render da principal tem vaga antes.
-            if g.limiter.pause_end(now).is_none()
-                && g.side.pause_end(now).is_none()
+            if g.side.pause_end(now).is_none()
                 && g.breakers[Endpoint::Legacy.idx()]
                     .open_until
                     .is_none_or(|t| now >= t)
-                && now.max(g.next_any).max(g.side.next_at)
-                    < now.max(g.next_any).max(g.limiter.next_at)
+                && (g.limiter.pause_end(now).is_some()
+                    || g.breakers[Endpoint::Listings.idx()]
+                        .open_until
+                        .is_some_and(|t| now < t)
+                    || now.max(g.next_any).max(g.side.next_at)
+                        < now.max(g.next_any).max(g.limiter.next_at))
             {
                 return true;
             }

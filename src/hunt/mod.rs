@@ -317,6 +317,9 @@ impl Hunt {
     // o painel usa o mesmo prazo (`bookLane` em store.svelte.ts)
     pub fn state(&self) -> State {
         let stats = self.steam.stats();
+        let filters_paused = self
+            .steam
+            .main_blocked(crate::steam::client::Endpoint::Listings);
         let csfloat_status = self.csfloat.status();
         let s = self.lock();
         let mut keys = s.keys.clone();
@@ -345,7 +348,15 @@ impl Hunt {
                     Some("a Steam pediu calma (429); caça em pausa".into())
                 } else {
                     let now = self.now();
-                    s.message.clone().or_else(|| s.cycle.message(now))
+                    let message = s.message.clone().or_else(|| s.cycle.message(now));
+                    if filters_paused {
+                        Some(format!(
+                            "Filtros de seed/float em pausa na Steam; conferindo anúncios públicos. {}",
+                            message.unwrap_or_default()
+                        ))
+                    } else {
+                        message
+                    }
                 },
             },
             combo: s.combo.clone(),

@@ -224,8 +224,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    login libera a tentativa. É hipótese de recuo; falha nunca renova o histórico salvo. Filtros de seed/float
    continuam nas actions: uma página comum não equivale à consulta filtrada. A seleção aprendida continua sendo
    atualizada a cada 15 min, mesmo durante essa pausa; descoberta de nomes novos e raros filtrados aguardam as actions.
-   Comuns também usam o render da principal quando sua próxima vaga vem antes da fila nativa, mesmo sem a
-   saída extra; o piso aprendido das actions não segura uma leitura pública disponível. O espaçamento
+   Comuns também usam o render da principal quando sua próxima vaga vem antes da fila nativa ou quando as
+   actions estão em pausa/breaker, mesmo sem a saída extra; a pausa das actions não deve forçar triagens por
+   livro/busca na fila pública disponível. Pausa ou breaker do próprio render continuam impedindo a preferência. O espaçamento
    global, o intervalo do livro/render e as pausas de cada fila continuam valendo. Nessa situação, a agenda
    lê a página diretamente, antes das triagens por livro ou busca que gastariam a mesma fila disponível.
    Com o livro barrado, não há pedidos sugeridos. Com as duas leituras barradas, a caça para.
@@ -235,6 +236,10 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Os números ficam no `State` para o painel mostrar. Página antiga validada renova a última leitura boa e
    mantém o painel ativo enquanto sua fila estiver disponível; não apaga a pausa das actions. Tentativa que
    termina sem enviar requisição não aumenta as consultas do aprendizado nem o crédito de descoberta.
+   O painel identifica consultas/min como totais (incluindo livro, busca e histórico). O balanço de 10 min
+   separa páginas de anúncios processadas, IDs distintos vistos, IDs novos no monitoramento e avaliações de
+   lucro. Repetições não aumentam os distintos; novo no monitoramento não prova criação recente na Steam.
+   Filtros de seed/float em pausa continuam sinalizados mesmo quando o render mantém os comuns ativos.
    **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
    rede fixa autorizada por um celular com Tailscale; redes atuais em `pesquisa-web.md` 13) dá outro IP público,
    sem garantia de cota independente. As sondas de
