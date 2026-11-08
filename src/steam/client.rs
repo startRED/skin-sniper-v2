@@ -48,10 +48,10 @@ const PAUSE_MAX: Duration = Duration::from_secs(30 * 60);
 const PUBLIC_PAUSE_MAX: Duration = Duration::from_secs(2 * 60 * 60);
 // Leitura logada levou 429: anúncios e histórico vão sem login por este tempo. Em 04/11 o logado tomou 429
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
-/// Espaço mínimo entre duas consultas quaisquer pela principal, somando os baldes (nunca rajada).
+/// Espaço mínimo entre duas consultas quaisquer, somando baldes e saídas (nunca rajada).
 const MIN_SPACING: Duration = Duration::from_secs(3);
 // Na hora anterior ao bloqueio de 08/11, a principal somou 600 consultas e a extra 575.
-// 360 leituras/h por saída deixam margem; não é uma cota oficial da Steam.
+// As duas rotas podem sair pelo mesmo IP: 360 leituras/h somadas deixam margem, sem presumir cotas distintas.
 const READ_SPACING: Duration = Duration::from_secs(10);
 const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -535,6 +535,8 @@ struct Inner {
     next_any: Instant,
     spacing: Duration,
     read_spacing: Duration,
+    last_any: Option<Instant>,
+    last_read: Option<Instant>,
     /// [principal, extra, livro e busca], para o balanço de 10 min no log.
     calls: [Calls; 3],
     sent: u64,
@@ -586,8 +588,6 @@ pub struct SteamClient {
 
 #[derive(Default)]
 struct SendPace {
-    last_any: Option<Instant>,
-    last_read: Option<Instant>,
     last_bucket: [Option<Instant>; 3],
 }
 
@@ -644,8 +644,9 @@ impl SteamClient {
         let mut client = Self::with_base(BASE)?;
         let now = Instant::now();
         // Um reinício também precisa respeitar o intervalo do último processo.
-        client.main_send_pace.get_mut().last_read = Some(now);
-        client.alt_send_pace.get_mut().last_read = Some(now);
+        let inner = client.inner.get_mut().unwrap();
+        inner.last_any = Some(now);
+        inner.last_read = Some(now);
         Ok(client)
     }
 
@@ -672,6 +673,8 @@ impl SteamClient {
                 next_any: Instant::now(),
                 spacing: MIN_SPACING,
                 read_spacing: READ_SPACING,
+                last_any: None,
+                last_read: None,
                 calls: [Calls::default(); 3],
                 sent: 0,
                 alt_down_until: None,
@@ -730,12 +733,14 @@ impl SteamClient {
                     let spacing = inner.spacing;
                     (spacing, inner.bucket(ep).gap)
                 };
-                let any = pace.last_any.map_or(now, |last| last + spacing);
+                let any = inner.last_any.map_or(now, |last| last + spacing);
                 let bucket_at = pace.last_bucket[bucket].map_or(now, |last| last + gap);
                 let read_at = if bucket == 2 {
                     now
                 } else {
-                    pace.last_read.map_or(now, |last| last + inner.read_spacing)
+                    inner
+                        .last_read
+                        .map_or(now, |last| last + inner.read_spacing)
                 };
                 let at = any.max(bucket_at).max(read_at);
                 if at <= now {
@@ -746,9 +751,9 @@ impl SteamClient {
                     } else {
                         inner.bucket(ep).note_query(now);
                     }
-                    pace.last_any = Some(now);
+                    inner.last_any = Some(now);
                     if bucket != 2 {
-                        pace.last_read = Some(now);
+                        inner.last_read = Some(now);
                     }
                     pace.last_bucket[bucket] = Some(now);
                     return Ok(());
@@ -843,7 +848,6 @@ impl SteamClient {
         let g = self.inner.lock().unwrap();
         !g.alt_held(now)
             && g.alt_limiter.next_at <= now
-            && pace.last_any.is_none_or(|t| t + g.spacing <= now)
             && pace.last_bucket[1].is_none_or(|t| t + g.alt_limiter.gap <= now)
             && (g.next_any > now || g.limiter.next_at > now || g.limiter.pause_end(now).is_some())
     }
@@ -1897,7 +1901,7 @@ mod tests {
         let app = Router::new().route("/ok", get(|| async { "{}" }));
         let c = Arc::new(fast(&serve(app).await));
         c.set_gap_for_test(Duration::from_millis(400));
-        c.main_send_pace.lock().await.last_any = Some(Instant::now());
+        c.inner.lock().unwrap().last_any = Some(Instant::now());
         let (db, _dir) = crate::db::temp_db();
         c.set_research_db(db.clone());
         for _ in 0..15 {
@@ -2531,7 +2535,8 @@ mod tests {
         let c = SteamClient::with_base(&base)
             .unwrap()
             .with_alt(alt_marked());
-        c.set_gap_for_test(Duration::from_secs(3600));
+        c.set_gap_for_test(Duration::from_millis(1));
+        c.inner.lock().unwrap().limiter.gap = Duration::from_secs(3600);
         c.set_cookie(Some(Cookie {
             steam_login_secure: "x".into(),
             sessionid: None,
