@@ -251,6 +251,11 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Na primeira atualização de um valor antigo, recusas públicas registradas há menos de 30 min recuperam um
    descanso de 30 min desde a última recusa, sem zerar a pausa nativa existente. O estado é salvo em todo 429
    e conferido a cada 30 s. Breaker por endpoint.
+   Recusa pública espera pelo menos 30 min (ou `Retry-After` maior). Se as duas filas de leitura da
+   principal já foram recusadas, ambas aguardam o maior prazo, evitando tentativas desencontradas na
+   mesma saída; uma fila saudável não herda a recusa da outra. Verificações automáticas da carteira
+   aguardam enquanto ambas estão indisponíveis. A verificação explícita usada pela compra continua
+   disponível no seu próprio grupo de controle.
    Os números ficam no `State` para o painel mostrar. Página antiga validada renova a última leitura boa e
    mantém o painel ativo enquanto sua fila estiver disponível; não apaga a pausa das actions. Tentativa que
    termina sem enviar requisição não aumenta as consultas do aprendizado nem o crédito de descoberta.

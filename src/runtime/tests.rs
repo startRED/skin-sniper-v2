@@ -141,6 +141,36 @@ async fn set_cookie(rt: &Arc<Runtime>) {
     rt.verify_session().await;
 }
 
+#[tokio::test]
+async fn automatic_wallet_checks_defer_during_main_read_cooldown_but_explicit_checks_do_not() {
+    let (base, _) = serve(vec![(200, "{}".into())]).await;
+    let (rt, _rx, _dir) = runtime(&base);
+    set_cookie(&rt).await;
+    rt.steam
+        .restore_pace(&format!("{}|6000|60000", now_unix() + 3600));
+    let before = rt.steam.sent();
+    rt.verify_session_automatically().await;
+    assert_eq!(
+        rt.steam.sent(),
+        before + 1,
+        "uma leitura principal ainda saudável permite a carteira"
+    );
+    rt.steam.restore_public_backoff(Some(now_unix()), None);
+    let before = rt.steam.sent();
+    rt.verify_session_automatically().await;
+    assert_eq!(
+        rt.steam.sent(),
+        before,
+        "não interrompe o descanso automático da saída"
+    );
+    rt.verify_session().await;
+    assert_eq!(
+        rt.steam.sent(),
+        before + 1,
+        "a verificação explícita da compra permanece disponível"
+    );
+}
+
 async fn purchase_row(rt: &Runtime) -> Purchase {
     let j: String = rt
         .db

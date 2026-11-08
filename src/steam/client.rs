@@ -546,6 +546,17 @@ impl Inner {
     fn alt_held(&self, now: Instant) -> bool {
         self.alt_down_until.is_some_and(|t| now < t) || self.alt_limiter.pause_end(now).is_some()
     }
+
+    fn align_read_pauses(&mut self, now: Instant) {
+        if let (Some(native), Some(public)) =
+            (self.limiter.pause_end(now), self.side.pause_end(now))
+        {
+            // Só quando as duas já foram recusadas: tentativas desencontradas não deixam a saída descansar.
+            let until = Some(native.max(public));
+            self.limiter.paused_until = until;
+            self.side.paused_until = until;
+        }
+    }
 }
 
 pub struct SteamClient {
@@ -1021,6 +1032,7 @@ impl SteamClient {
                 limiter.restore(saved, now);
             }
         }
+        g.align_read_pauses(now);
     }
 
     /// Chamado (sob o lock do cliente) a cada 429 e ao trocar de conta, de qualquer endpoint, com o texto para `restore_pace` (o 4º
@@ -1039,7 +1051,10 @@ impl SteamClient {
         let unix_now = unix_in(Duration::ZERO);
         let g = &mut *self.inner.lock().unwrap();
         for (limiter, last) in [(&mut g.side, main), (&mut g.alt_limiter, alt)] {
-            if let Some(last) = last {
+            let saved_last = limiter
+                .last_429
+                .map(|at| unix_now - now.saturating_duration_since(at).as_secs() as i64);
+            if let Some(last) = last.into_iter().chain(saved_last).max() {
                 let ago = Duration::from_secs((unix_now - last).max(0) as u64);
                 if ago < PAUSE_MAX {
                     limiter.on_429(now.checked_sub(ago).unwrap_or(now), Some(PAUSE_MAX));
@@ -1047,6 +1062,7 @@ impl SteamClient {
                 }
             }
         }
+        g.align_read_pauses(now);
     }
 
     /// Fim da pausa do breaker do endpoint (segundos Unix), se estiver aberto.
@@ -1436,7 +1452,10 @@ impl SteamClient {
                 let retry = retry_after(&r);
                 let mut g = self.inner.lock().unwrap();
                 g.calls[1].limited += 1;
-                g.alt_limiter.on_429(Instant::now(), retry);
+                g.alt_limiter.on_429(
+                    Instant::now(),
+                    Some(retry.unwrap_or_default().max(PAUSE_MAX)),
+                );
                 Self::notify_pace(&mut g, Instant::now());
                 drop(g);
                 tracing::warn!(endpoint = ?ep, "Steam: 429 na saída extra; ela pausa e a principal segue");
@@ -1504,7 +1523,13 @@ impl SteamClient {
                 // Trocar o login não libera cota: a próxima leitura anônima também espera a pausa.
                 g.anon_reads_until = Some(now + ANON_AFTER_429);
             }
-            g.bucket(ep).on_429(now, retry);
+            let wait = if side(ep) {
+                Some(retry.unwrap_or_default().max(PAUSE_MAX))
+            } else {
+                retry
+            };
+            g.bucket(ep).on_429(now, wait);
+            g.align_read_pauses(now);
             let until = g
                 .bucket(ep)
                 .stats(now)

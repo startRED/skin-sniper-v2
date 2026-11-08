@@ -10,6 +10,59 @@ const NAME: &str = "Glock-18 | Moonrise (Field-Tested)";
 const CODE: &str = "G180420B6053004";
 
 #[tokio::test]
+async fn only_two_blocked_main_read_lanes_share_the_longer_recovery_time() {
+    let base = serve(
+        Router::new()
+            .route(
+                "/native",
+                get(|| async { (AxStatus::TOO_MANY_REQUESTS, [("retry-after", "3600")], "") }),
+            )
+            .route("/public", get(|| async { AxStatus::TOO_MANY_REQUESTS }))
+            .route("/account", get(|| async { "{}" })),
+    )
+    .await;
+    let c = fast(&base);
+    assert!(c.get_json(Endpoint::History, "/native", &[]).await.is_err());
+    assert!(
+        !c.main_blocked(Endpoint::Legacy),
+        "uma fila saudável não herda a recusa da outra"
+    );
+    assert!(matches!(c.get_json(Endpoint::Legacy, "/public", &[]).await,
+        Err(Error::RateLimited { until }) if until >= unix_in(Duration::from_secs(3595))));
+    {
+        let g = c.inner.lock().unwrap();
+        assert_eq!(g.limiter.paused_until, g.side.paused_until);
+    }
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        c.get_json(Endpoint::Session, "/account", &[]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+#[tokio::test]
+async fn public_429_waits_thirty_minutes_instead_of_retrying_every_minute() {
+    let base = serve(Router::new().fallback(get(|| async { AxStatus::TOO_MANY_REQUESTS }))).await;
+    let c = fast(&base);
+    assert!(matches!(c.get_json(Endpoint::Legacy, "/busy", &[]).await,
+        Err(Error::RateLimited { until }) if until >= unix_in(Duration::from_secs(1795))));
+    assert!(!c.blocked(Endpoint::Listings));
+    assert!(!c.blocked(Endpoint::Session));
+    let alt = fast(&base).with_public_alt_for_test(http_builder().build().unwrap());
+    assert!(alt.legacy_json_public_alt("/busy", &[]).await.is_none());
+    let until = alt
+        .inner
+        .lock()
+        .unwrap()
+        .alt_limiter
+        .pause_end(Instant::now())
+        .unwrap();
+    assert!(until >= Instant::now() + Duration::from_secs(1795));
+}
+
+#[tokio::test]
 async fn a_read_cancelled_while_waiting_does_not_count_as_a_sent_query() {
     let base = serve(Router::new().fallback(get(|| async { "{}" }))).await;
     let c = fast(&base);

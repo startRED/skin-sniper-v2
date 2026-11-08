@@ -1161,18 +1161,16 @@ pub async fn load_pace(h: &Hunt) -> anyhow::Result<()> {
     if let Some(v) = &saved {
         h.steam.restore_pace(v);
     }
-    if saved.as_deref().is_none_or(|v| !v.contains(';')) {
-        // Versões antigas não salvaram essas filas; as recusas recentes permitem uma migração cautelosa.
-        let limits: Vec<(String, i64)> = h.db.call(|c| {
-            c.prepare("SELECT route, max(at) FROM research_attempts WHERE endpoint IN ('legacy','book','search') AND outcome='rate_limited' AND route IN ('main','alt') AND at>=?1 GROUP BY route")?
-                .query_map([crate::db::now_unix() - 1800], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect()
-        }).await?;
-        h.steam.restore_public_backoff(
-            limits.iter().find(|(r, _)| r == "main").map(|(_, at)| *at),
-            limits.iter().find(|(r, _)| r == "alt").map(|(_, at)| *at),
-        );
-    }
+    // Recusas recentes preservam o descanso público, inclusive ao atualizar um snapshot curto antigo.
+    let limits: Vec<(String, i64)> = h.db.call(|c| {
+        c.prepare("SELECT route, max(at) FROM research_attempts WHERE endpoint IN ('legacy','book','search') AND outcome='rate_limited' AND route IN ('main','alt') AND at>=?1 GROUP BY route")?
+            .query_map([crate::db::now_unix() - 1800], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }).await?;
+    h.steam.restore_public_backoff(
+        limits.iter().find(|(r, _)| r == "main").map(|(_, at)| *at),
+        limits.iter().find(|(r, _)| r == "alt").map(|(_, at)| *at),
+    );
     let db = h.db.clone();
     // Gravações em fila, cada uma com o ritmo mais novo: uma gravação antiga que termina por último não
     // apaga a mais nova.

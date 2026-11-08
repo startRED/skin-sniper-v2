@@ -323,3 +323,11 @@ valendo sobre o corpo descomprimido.
   do cliente e a forma de contar pedidos ao servidor. As causas internas e o prazo final da restrição da Steam
   permanecem opacos. A proteção corrige o tráfego e o reinício do app; não promete impedir qualquer restrição
   futura causada por tráfego externo ou mudanças da plataforma.
+- Com o v2 parado das 03h02min04s às 03h26min16s de Fortaleza, as primeiras respostas de sessão, histórico e
+  render extra ainda foram 429. Isso confirma que uma pausa de cerca de 24 min do programa não bastou nesta
+  ocorrência, sem revelar o prazo interno da Steam nem excluir tráfego externo. O cliente passa a aplicar
+  pelo menos 30 min de descanso nas recusas públicas, preservando `Retry-After` maior. Quando as duas filas
+  de leitura da principal já estão recusadas, alinha seus prazos pelo maior; não propaga a recusa a uma fila
+  saudável ou às ações explícitas do usuário. A conferência de carteira em segundo plano também aguarda
+  esse descanso integral. Testes locais verificam a pausa pública longa, o alinhamento condicional e a
+  diferença entre verificação automática e explícita da sessão.

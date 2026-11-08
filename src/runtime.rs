@@ -7,7 +7,7 @@ use crate::hunt::{Hunt, detect};
 use crate::notify::{NotifyError, Telegram};
 use crate::settings::SettingsStore;
 use crate::steam::buy::{BuyOutcome, Buyer, CONFIRM_TIMEOUT, ListingState, TokioClock};
-use crate::steam::client::{Cookie, Error as SteamError, SteamClient};
+use crate::steam::client::{Cookie, Endpoint, Error as SteamError, SteamClient};
 use crate::steam::listings::Listing;
 use crate::steam::session;
 use crate::web::api::{
@@ -223,7 +223,7 @@ impl Runtime {
     fn spawn_verify(self: &Arc<Self>, p: Pending) {
         if p.steam {
             let rt = self.clone();
-            tokio::spawn(async move { rt.verify_session().await });
+            tokio::spawn(async move { rt.verify_session_automatically().await });
         }
         if p.telegram {
             let rt = self.clone();
@@ -231,7 +231,16 @@ impl Runtime {
         }
     }
 
-    /// Valida o cookie, lê a carteira e atualiza o saldo e o estado da chave.
+    /// Sondas de fundo não devem interromper o descanso de uma saída inteiramente recusada.
+    async fn verify_session_automatically(&self) {
+        if !(self.steam.main_blocked(Endpoint::History)
+            && self.steam.main_blocked(Endpoint::Legacy))
+        {
+            self.verify_session().await;
+        }
+    }
+
+    /// Verificação explícita continua disponível para a compra, independentemente da pausa das leituras.
     pub async fn verify_session(&self) {
         let queried = self.steam.cookie();
         if queried.is_none() {
@@ -328,7 +337,7 @@ impl Runtime {
             tick.tick().await; // o primeiro é imediato; a verificação inicial já cuida disso
             loop {
                 tick.tick().await;
-                rt.verify_session().await;
+                rt.verify_session_automatically().await;
             }
         });
     }
