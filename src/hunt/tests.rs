@@ -1570,7 +1570,7 @@ async fn blocked_native_listings_prioritize_public_ads_over_book_prefilters() {
         recovered
             .message
             .unwrap()
-            .contains("Filtros de seed/float em pausa")
+            .contains("Steam: seed/float em pausa")
     );
     let (l0, b0) = (listings(), books());
     let legacy0 = legacy();
@@ -2038,15 +2038,13 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .hunt
             .message
             .unwrap()
-            .starts_with("2 páginas em 1 min; 2 anúncios distintos vistos, 2 novos no monitoramento; 6 avaliações de lucro")
+            .starts_with("1 min · 2 anúncios únicos · 2 novos")
     );
     T.store(NOW + 600, Ordering::SeqCst);
     detect::roll_cycle(&h);
     assert_eq!(
         h.state().hunt.message.as_deref(),
-        Some(
-            "2 páginas em 10 min; 2 anúncios distintos vistos, 2 novos no monitoramento; 6 avaliações de lucro; nenhum passou nos critérios de lucro e risco; o mais perto dava R$ 0,12 de lucro no preço médio"
-        )
+        Some("10 min · 2 anúncios únicos · 2 novos")
     );
     // o ciclo novo começa zerado e o balanço antigo segue até o próximo fechar
     assert!(
@@ -2054,7 +2052,7 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .cycle
             .message(NOW + 601)
             .unwrap()
-            .starts_with("2 páginas")
+            .starts_with("10 min · 2 anúncios únicos")
     );
     T.store(NOW + 1200, Ordering::SeqCst);
     detect::roll_cycle(&h);
@@ -2063,7 +2061,16 @@ async fn cycle_summary_is_plain_and_rolls_every_ten_minutes() {
             .hunt
             .message
             .unwrap()
-            .starts_with("0 páginas em 10 min; 0 anúncios distintos vistos, 0 novos no monitoramento; 0 avaliações de lucro")
+            .starts_with("10 min · 0 anúncios únicos · 0 novos")
+    );
+    let mut cycle = detect::Cycle::default();
+    cycle.pages = 1;
+    cycle.seen.insert("only".into());
+    cycle.new = 1;
+    cycle.record(true, None);
+    assert_eq!(
+        cycle.message(60).as_deref(),
+        Some("1 min · 1 anúncio único · 1 novo")
     );
 }
 

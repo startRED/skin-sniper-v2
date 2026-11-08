@@ -352,9 +352,9 @@ impl Hunt {
                     let now = self.now();
                     let message = s.message.clone().or_else(|| s.cycle.message(now));
                     if filters_paused {
-                        Some(format!(
-                            "Filtros de seed/float em pausa na Steam; conferindo anúncios públicos. {}",
-                            message.unwrap_or_default()
+                        Some(message.map_or_else(
+                            || "Steam: seed/float em pausa".into(),
+                            |message| format!("Steam: seed/float em pausa · {message}"),
                         ))
                     } else {
                         message
