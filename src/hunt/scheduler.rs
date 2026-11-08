@@ -1130,7 +1130,18 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             break;
         }
         seen.insert(queried.name.as_str());
-        let Some(next) = targets.iter().find(|t| !seen.contains(t.name.as_str())) else {
+        let next = {
+            let s = h.lock();
+            let now = h.now();
+            targets.iter().find(|t| {
+                !seen.contains(t.name.as_str())
+                    && (s.active.values().any(|a| a.task == t.id)
+                        || s.floors
+                            .get(&t.floor_key())
+                            .is_none_or(|(_, at)| now - at >= super::COMMON_REVISIT_SECS))
+            })
+        };
+        let Some(next) = next else {
             break;
         };
         queried = next;

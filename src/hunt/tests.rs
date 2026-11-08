@@ -1514,6 +1514,66 @@ async fn a_recent_common_page_does_not_spend_another_listing_query() {
 }
 
 #[tokio::test]
+async fn grouped_public_pages_reuse_recent_siblings_but_recheck_active_ones() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let active = run_until_two(&h, &mut rx)
+        .await
+        .into_iter()
+        .find(|o| o.id == ID_CHEAP)
+        .unwrap();
+    let mut task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    task.code = "G180420B6053004".into();
+    let sibling = Task {
+        id: format!("d:{ST_MOON}"),
+        name: ST_MOON.into(),
+        ..task.clone()
+    };
+    {
+        let mut s = h.lock();
+        s.queue.set_tasks(vec![task.clone(), sibling.clone()]);
+        s.active.clear();
+        s.floors.clear();
+        s.floors.insert(sibling.floor_key(), (Some(700), NOW));
+    }
+    h.steam
+        .restore_pace(&format!("{}|6000|60000", crate::db::now_unix() + 600));
+    let before = bodies.legacy_queries.load(Ordering::Relaxed);
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!(
+        bodies.legacy_queries.load(Ordering::Relaxed),
+        before + 1,
+        "não relê a versão irmã recente"
+    );
+    h.lock().active.insert(
+        "active-st".into(),
+        Active {
+            task: sibling.id.clone(),
+            attempted_at: 0,
+            opp: Opportunity {
+                id: "active-st".into(),
+                name: ST_MOON.into(),
+                ..active
+            },
+        },
+    );
+    scheduler::run_task(&h, &task).await.unwrap();
+    assert_eq!(
+        bodies.legacy_queries.load(Ordering::Relaxed),
+        before + 3,
+        "oportunidade ativa continua sendo reconferida"
+    );
+}
+
+#[tokio::test]
 async fn old_pace_snapshot_recovers_public_429_from_the_attempt_ledger() {
     let (db, _dir) = temp_db();
     let (h, _) = hunt_against("http://127.0.0.1:9", db.clone());
@@ -1762,6 +1822,7 @@ async fn legacy_queries_each_name_without_marking_other_version_gone() {
             },
         );
         s.queue.set_tasks(vec![task.clone(), other.clone()]);
+        s.floors.clear(); // As duas versões precisam de leitura neste cenário de cobertura.
     }
     bodies.listings_429.store(true, Ordering::Relaxed);
     let before = bodies.legacy_queries.load(Ordering::Relaxed);
