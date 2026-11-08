@@ -9,6 +9,42 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 const NAME: &str = "Glock-18 | Moonrise (Field-Tested)";
 const CODE: &str = "G180420B6053004";
 
+#[tokio::test]
+async fn both_exits_share_read_spacing_and_leave_room_for_user_actions() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hits = seen.clone();
+    let base = serve(Router::new().fallback(get(move |uri: axum::http::Uri| {
+        hits.lock()
+            .unwrap()
+            .push((uri.path().to_owned(), Instant::now()));
+        async { "{}" }
+    })))
+    .await;
+    let c = fast(&base).with_public_alt_for_test(http_builder().build().unwrap());
+    let read_gap = Duration::from_millis(250);
+    let any_gap = Duration::from_millis(50);
+    {
+        let mut g = c.inner.lock().unwrap();
+        g.read_spacing = read_gap;
+        g.spacing = any_gap;
+        g.alt_limiter.gap = Duration::ZERO;
+    }
+    c.get_json(Endpoint::History, "/main", &[]).await.unwrap();
+    let (alt, control) = tokio::join!(
+        c.legacy_json_public_alt("/alt", &[]),
+        c.get_json(Endpoint::Session, "/account", &[])
+    );
+    alt.unwrap().unwrap();
+    control.unwrap();
+    let hits = seen.lock().unwrap();
+    let at = |path: &str| hits.iter().find(|(p, _)| p == path).unwrap().1;
+    assert!(at("/alt") - at("/main") >= read_gap - Duration::from_millis(10));
+    assert!(at("/account") - at("/main") < read_gap);
+    for pair in hits.windows(2) {
+        assert!(pair[1].1 - pair[0].1 >= any_gap - Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn repeated_public_refusals_increase_rest_without_advancing_twice_in_flight() {
     let c = fast("http://127.0.0.1:9");

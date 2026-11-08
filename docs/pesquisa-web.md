@@ -338,3 +338,12 @@ valendo sobre o corpo descomprimido.
   da Steam. A sequência só zera após 4 h sem 429. Testes com relógio injetado cobrem os degraus, a recusa
   duplicada em voo, `Retry-After` maior que o teto e a restauração do degrau longo após reiniciar. As pausas
   nativas e de controle mantêm a política anterior.
+- Às 05h16–05h18 de Fortaleza, consultas IPv4 de identificação de saída, sem Steam, por dois serviços
+  (`api.ipify.org` e `icanhazip.com`) deram o mesmo endereço pela principal e pelo proxy. A resolução local
+  de `steamcommunity.com` tinha A e nenhum AAAA. Isso prova que as duas rotas compartilham a saída IPv4
+  neste momento; não prova quando passaram a coincidir nem a regra interna da Steam. A comparação anterior
+  sem registrar endereços não sustenta uma garantia permanente de saídas independentes. O piso de envio
+  passa a ser global: 3 s entre quaisquer consultas e 10 s entre leituras, somando as duas rotas. Mantêm-se
+  pausas e ritmos adaptativos próprios, sem parar ou alterar o auxiliar de rede. Teste local reproduziu os
+  envios simultâneos nas rotas antes da correção e verifica o intervalo agregado e a passagem das ações do
+  usuário sem esperar o piso de leitura.

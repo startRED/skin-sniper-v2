@@ -227,8 +227,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      um achado de R$ 0,32. Os 30 % são hipótese, não medida.
 3. **Ritmo:** grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
    sessão/login/compra. São divisões operacionais baseadas nas respostas medidas, não cotas oficiais da Valve.
-   Sessão e compra não herdam o 429 de uma varredura de anúncios. Entre duas consultas quaisquer pela principal há no mínimo 3 s, de
-   qualquer balde: nunca rajada. As leituras de mercado somadas têm ainda um piso de 10 s por saída, inclusive
+   Sessão e compra não herdam o 429 de uma varredura de anúncios. Entre duas consultas quaisquer há no mínimo 3 s, de
+   qualquer balde ou saída: nunca rajada. As leituras de mercado somadas nas duas saídas têm ainda um piso de 10 s, inclusive
    entre endpoints diferentes e na primeira leitura após reiniciar; sessão, login e compra mantêm a fila própria.
    Cada balde tem o próprio intervalo e a própria pausa por 429, preservados no banco. Com um balde em pausa e a saída extra sem vaga, a consulta falha na hora
    em vez de segurar a caça. Com as actions barradas, alvos comuns usam `/render` da interface antiga e o histórico
@@ -273,7 +273,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    `pesquisa-web.md` 11 encontraram actions recusadas e livro/render públicos disponíveis nessa rota. Por isso a
    produção usa a extra só para livro e anúncios antigos públicos; histórico, actions filtradas, compra, sessão e
    login ficam na principal. A extra nunca recebe o cookie de login. Tem limitador próprio,
-   persistente, com pelo menos 3 s entre quaisquer envios e 10 s entre leituras somadas dessa saída,
+   persistente; compartilha com a principal os pisos de 3 s entre quaisquer envios e 10 s entre leituras,
    além do intervalo adaptativo por grupo.
    Anúncios comuns aproveitam a alternativa pública livre enquanto a principal aguarda o ritmo; a cobertura
    continua por nome e o leitor valida BRL, identidade e paginação. Recusa, erro de rede ou 429 na extra não tocam no breaker nem no limitador da principal: a
