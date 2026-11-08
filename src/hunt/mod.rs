@@ -35,6 +35,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{Notify, broadcast};
 
+/// Uma página comum recente já cobre as duas saídas; oportunidades ativas continuam sendo reconferidas.
+pub(super) const COMMON_REVISIT_SECS: i64 = 60;
+
 /// O que a caça precisa de fora.
 pub struct HuntDeps {
     pub db: Db,

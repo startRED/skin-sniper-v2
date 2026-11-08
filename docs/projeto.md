@@ -228,8 +228,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 3. **Ritmo:** grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
    sessão/login/compra. São divisões operacionais baseadas nas respostas medidas, não cotas oficiais da Valve.
    Sessão e compra não herdam o 429 de uma varredura de anúncios. Entre duas consultas quaisquer pela principal há no mínimo 3 s, de
-   qualquer balde: nunca rajada. Cada balde tem o próprio intervalo e a própria pausa por 429; o do livro e da busca
-   fica só em memória (reiniciar volta a 6 s). Com um balde em pausa e a saída extra sem vaga, a consulta falha na hora
+   qualquer balde: nunca rajada. As leituras de mercado somadas têm ainda um piso de 10 s por saída, inclusive
+   entre endpoints diferentes e na primeira leitura após reiniciar; sessão, login e compra mantêm a fila própria.
+   Cada balde tem o próprio intervalo e a própria pausa por 429, preservados no banco. Com um balde em pausa e a saída extra sem vaga, a consulta falha na hora
    em vez de segurar a caça. Com as actions barradas, alvos comuns usam `/render` da interface antiga e o histórico
    usa `/pricehistory` com a sessão do app (contratos em `pesquisa-web.md` 10). Histórico com erro HTTP ou JSON
    inválido espera 10 min antes de repetir o mesmo nome, compartilhado entre descoberta e avaliação; trocar o
@@ -244,7 +245,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Com o livro barrado, não há pedidos sugeridos. Com as duas leituras barradas, a caça para.
    O balde de anúncios e histórico: começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios, histórico ou livro) aplica a pausa normal antes de as leituras seguirem sem login por 6 h. Trocar entre logado e anônimo não libera outra cota. O prazo `Retry-After`, quando informado, é respeitado também no primeiro 429 logado. Um 429
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até o piso aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso (até 20 s), e cada 6 h sem 429 desce um degrau até 6 s (a 6 s fixos a Steam bloqueava a cada 1–2 h, e cada série custava até 2 h paradas). O degrau da pausa só volta a 60 s após 60 min sem 429.
-   Pausa, intervalo, piso aprendido e a última resposta sem 429 ficam salvos (`steam_pace`) e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. Breaker por endpoint.
+   Pausa, intervalo, piso aprendido e a última resposta sem 429 ficam salvos em todas as filas (`steam_pace`)
+   e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. O valor
+   conserva o texto nativo antigo antes do primeiro `;`, seguido dos estados público, extra e de controle.
+   Na primeira atualização de um valor antigo, recusas públicas registradas há menos de 30 min recuperam um
+   descanso de 30 min desde a última recusa, sem zerar a pausa nativa existente. O estado é salvo em todo 429
+   e conferido a cada 30 s. Breaker por endpoint.
    Os números ficam no `State` para o painel mostrar. Página antiga validada renova a última leitura boa e
    mantém o painel ativo enquanto sua fila estiver disponível; não apaga a pausa das actions. Tentativa que
    termina sem enviar requisição não aumenta as consultas do aprendizado nem o crédito de descoberta.
@@ -259,7 +265,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    `pesquisa-web.md` 11 encontraram actions recusadas e livro/render públicos disponíveis nessa rota. Por isso a
    produção usa a extra só para livro e anúncios antigos públicos; histórico, actions filtradas, compra, sessão e
    login ficam na principal. A extra nunca recebe o cookie de login. Tem limitador próprio,
-   só em memória (reiniciar volta a 6 s), com pelo menos 3 s entre envios e intervalo conservador de 6 s por grupo.
+   persistente, com pelo menos 3 s entre quaisquer envios e 10 s entre leituras somadas dessa saída,
+   além do intervalo adaptativo por grupo.
    Anúncios comuns aproveitam a alternativa pública livre enquanto a principal aguarda o ritmo; a cobertura
    continua por nome e o leitor valida BRL, identidade e paginação. Recusa, erro de rede ou 429 na extra não tocam no breaker nem no limitador da principal: a
    consulta volta para a fila dela, e a extra descansa 5 min (rede/recusa) ou pausa pelo próprio 429. Consultas por
@@ -273,6 +280,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    mudar, o alvo ficar ativo ou o resultado passar de 20 s, descarta. Uma leitura validada entra no registro e
    na nota do alvo, identificada como `paralela`, sem inflar a cota externa nem se misturar aos blocos do ensaio.
    A referência de alvos comuns conta achados e consultas normais e paralelos; cada anúncio rende crédito uma vez.
+   Uma página comum lida há menos de 60 s é compartilhada entre a agenda principal e a paralela: escolhem outro
+   alvo em vez de gastar outra consulta nela. Oportunidades ativas continuam sendo reconferidas; os filtros
+   de seed/float e a prioridade de acompanhar ativos atrasados não mudam.
 4. **Triagem e detecção:** tarefas de desconto da mesma skin-base compartilham uma busca; preço em USD convertido pela razão medida até 10 % acima do teto prioriza anúncios. A tolerância e o frescor do preço da busca são hipóteses, sem medição. Resultado ou teto ausente mantém consulta direta; oportunidades ativas também são conferidas.
    Busca em pausa por 429 ou suspensa por falhas é dispensada: o alvo segue pelo livro e pelos anúncios disponíveis,
    mesmo sem a saída do celular. O primeiro 429 da busca também faz essa troca no mesmo passo, respeitando as pausas de cada consulta.

@@ -1472,6 +1472,74 @@ async fn newly_unaffordable_page_reselects_without_waiting_fifteen_minutes() {
 }
 
 #[tokio::test]
+async fn a_recent_common_page_does_not_spend_another_listing_query() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let task = lone_moonrise(&h, &mut rx).await;
+    {
+        let mut s = h.lock();
+        let tasks = boot_tasks(task.clone());
+        for t in &tasks {
+            s.floors.insert(t.floor_key(), (Some(700), NOW));
+        }
+        s.queue.set_tasks(tasks);
+        for _ in 0..4 {
+            s.queue.spend_discovery();
+        }
+        s.book_at = NOW;
+    }
+    let before = (
+        bodies.listing_queries.load(Ordering::Relaxed),
+        bodies.legacy_queries.load(Ordering::Relaxed),
+    );
+    assert_eq!(tick(&h).await, Tick::Idle);
+    assert_eq!(
+        (
+            bodies.listing_queries.load(Ordering::Relaxed),
+            bodies.legacy_queries.load(Ordering::Relaxed)
+        ),
+        before
+    );
+    {
+        let mut s = h.lock();
+        for (_, at) in s.floors.values_mut() {
+            *at = NOW - super::COMMON_REVISIT_SECS;
+        }
+    }
+    assert!(
+        matches!(tick(&h).await, Tick::Watched(_)),
+        "página vencida volta à fila"
+    );
+}
+
+#[tokio::test]
+async fn old_pace_snapshot_recovers_public_429_from_the_attempt_ledger() {
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against("http://127.0.0.1:9", db.clone());
+    let now = crate::db::now_unix();
+    catalog::set_setting(&db, "steam_pace", format!("{}|12000|120000|0", now + 3600))
+        .await
+        .unwrap();
+    db.call(move |c| {
+        c.execute("INSERT INTO research_attempts(at,source,endpoint,route,outcome) VALUES (?1,'normal','legacy','main','rate_limited')", [now - 60])?;
+        Ok(())
+    }).await.unwrap();
+    scheduler::load_pace(&h).await.unwrap();
+    assert!(h.steam.blocked(crate::steam::client::Endpoint::Listings));
+    assert!(
+        matches!(h.steam.get_json(crate::steam::client::Endpoint::Legacy, "/blocked", &[]).await,
+        Err(crate::steam::client::Error::RateLimited { until }) if until >= now + 1735)
+    );
+    assert!(!h.steam.blocked(crate::steam::client::Endpoint::Session));
+    assert_eq!(
+        h.steam.sent(),
+        0,
+        "a migração não testa a Steam durante a pausa"
+    );
+}
+
+#[tokio::test]
 async fn ready_public_listings_skip_the_book_and_search_prefilters() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();

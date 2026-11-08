@@ -10,6 +10,168 @@ const NAME: &str = "Glock-18 | Moonrise (Field-Tested)";
 const CODE: &str = "G180420B6053004";
 
 #[tokio::test]
+async fn a_read_cancelled_while_waiting_does_not_count_as_a_sent_query() {
+    let base = serve(Router::new().fallback(get(|| async { "{}" }))).await;
+    let c = fast(&base);
+    c.inner.lock().unwrap().read_spacing = Duration::from_millis(400);
+    c.get_json(Endpoint::History, "/first", &[]).await.unwrap();
+    let (result, ()) = tokio::join!(c.get_json(Endpoint::Legacy, "/cancelled", &[]), async {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            c.stats().queries_per_min,
+            1,
+            "vaga reservada ainda não é consulta enviada"
+        );
+        c.inner.lock().unwrap().side.on_429(Instant::now(), None);
+    });
+    assert!(matches!(result, Err(Error::RateLimited { .. })));
+    assert_eq!(c.sent(), 1);
+    assert_eq!(c.stats().queries_per_min, 1);
+}
+
+#[tokio::test]
+async fn read_spacing_covers_endpoint_groups_and_each_exit_without_holding_user_actions() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hits = seen.clone();
+    let base = serve(Router::new().fallback(get(move |uri: axum::http::Uri| {
+        hits.lock()
+            .unwrap()
+            .push((uri.path().to_owned(), Instant::now()));
+        async { "{}" }
+    })))
+    .await;
+    let gap = Duration::from_millis(200);
+    let c = fast(&base);
+    c.inner.lock().unwrap().read_spacing = gap;
+    c.get_json(Endpoint::History, "/a", &[]).await.unwrap();
+    c.get_json(Endpoint::Legacy, "/b", &[]).await.unwrap();
+    c.get_json(Endpoint::Buy, "/buy", &[]).await.unwrap();
+    c.get_json(Endpoint::Book, "/c", &[]).await.unwrap();
+    let alt = fast(&base).with_public_alt_for_test(http_builder().build().unwrap());
+    {
+        let mut g = alt.inner.lock().unwrap();
+        g.read_spacing = gap;
+        g.alt_limiter.gap = Duration::ZERO;
+    }
+    alt.legacy_json_public_alt("/alt-a", &[])
+        .await
+        .unwrap()
+        .unwrap();
+    alt.get_json(Endpoint::Book, "/alt-b", &[]).await.unwrap();
+    let hits = seen.lock().unwrap();
+    assert_eq!(
+        hits.iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        ["/a", "/b", "/buy", "/c", "/alt-a", "/alt-b"]
+    );
+    for (before, after) in [(0, 1), (1, 3), (4, 5)] {
+        assert!(hits[after].1.duration_since(hits[before].1) >= gap - Duration::from_millis(10));
+    }
+    assert!(
+        hits[2].1.duration_since(hits[1].1) < gap,
+        "ação do usuário não espera a fila de leitura"
+    );
+}
+
+#[tokio::test]
+async fn startup_waits_before_its_first_market_read() {
+    let base = serve(Router::new().fallback(get(|| async { "{}" }))).await;
+    let started = Instant::now();
+    let mut c = SteamClient::new().unwrap();
+    c.base = base;
+    c.inner.lock().unwrap().read_spacing = Duration::from_millis(100);
+    c.get_json(Endpoint::Legacy, "/first", &[]).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(95));
+    assert_eq!(c.sent(), 1);
+}
+
+#[test]
+fn upgrade_recovers_recent_public_pauses_without_touching_account_or_native_limits() {
+    let c = fast("http://127.0.0.1:9");
+    let now = unix_in(Duration::ZERO);
+    c.restore_public_backoff(Some(now - 60), Some(now - 120));
+    let g = c.inner.lock().unwrap();
+    for (limiter, remaining) in [(&g.side, 1740), (&g.alt_limiter, 1680)] {
+        let until = limiter.pause_end(Instant::now()).unwrap();
+        assert!((until.duration_since(Instant::now()).as_secs() as i64 - remaining).abs() <= 2);
+        assert_eq!(limiter.pause_len, PAUSE_MAX);
+    }
+    assert!(g.limiter.paused_until.is_none());
+    assert!(g.control.paused_until.is_none());
+    drop(g);
+    let old = fast("http://127.0.0.1:9");
+    old.restore_public_backoff(Some(now - 3600), None);
+    assert!(old.inner.lock().unwrap().side.paused_until.is_none());
+}
+
+#[tokio::test]
+async fn public_and_account_429s_are_saved_and_remain_separate_after_restart() {
+    let base = serve(Router::new().fallback(get(|| async {
+        (AxStatus::TOO_MANY_REQUESTS, [("retry-after", "3600")], "")
+    })))
+    .await;
+    let c = fast(&base);
+    let saved = Arc::new(Mutex::new(None));
+    let hook = saved.clone();
+    c.on_pace_change(move |value| *hook.lock().unwrap() = Some(value));
+    assert!(c.get_json(Endpoint::Legacy, "/busy", &[]).await.is_err());
+    let value = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("429 público precisa ser salvo");
+    let again = fast(&base);
+    again.restore_pace(&value);
+    assert!(again.main_blocked(Endpoint::Legacy));
+    assert!(!again.blocked(Endpoint::Listings));
+    assert!(!again.blocked(Endpoint::Session));
+    assert_eq!(again.sent(), 0, "restaurar não envia consultas");
+    assert!(c.get_json(Endpoint::Session, "/busy", &[]).await.is_err());
+    again.restore_pace(&saved.lock().unwrap().clone().unwrap());
+    assert!(again.blocked(Endpoint::Session));
+    assert!(again.main_blocked(Endpoint::Legacy));
+    assert!(!again.blocked(Endpoint::Listings));
+    let g = again.inner.lock().unwrap();
+    for limiter in [&g.side, &g.control] {
+        assert!(
+            limiter.pause_end(Instant::now()).unwrap()
+                >= Instant::now() + Duration::from_secs(3595)
+        );
+        assert_eq!(limiter.pause_len, PAUSE_START * 2);
+    }
+}
+
+#[tokio::test]
+async fn alternative_public_429_notifies_and_survives_restart() {
+    let base = serve(Router::new().fallback(get(|| async {
+        (AxStatus::TOO_MANY_REQUESTS, [("retry-after", "3600")], "")
+    })))
+    .await;
+    let c = fast(&base).with_public_alt_for_test(http_builder().build().unwrap());
+    let saved = Arc::new(Mutex::new(None));
+    let hook = saved.clone();
+    c.on_pace_change(move |value| *hook.lock().unwrap() = Some(value));
+    assert!(c.legacy_json_public_alt("/busy", &[]).await.is_none());
+    let value = saved
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("429 da extra precisa ser salvo");
+    let again = fast(&base).with_public_alt_for_test(http_builder().build().unwrap());
+    again.restore_pace(&value);
+    assert!(!again.public_alt_available());
+    assert!(!again.main_blocked(Endpoint::Legacy));
+    assert!(!again.blocked(Endpoint::Session));
+    let g = again.inner.lock().unwrap();
+    assert!(
+        g.alt_limiter.pause_end(Instant::now()).unwrap()
+            >= Instant::now() + Duration::from_secs(3595)
+    );
+    assert_eq!(g.alt_limiter.pause_len, PAUSE_START * 2);
+}
+
+#[tokio::test]
 async fn paused_or_broken_native_prefers_public_ads_but_respects_public_failures() {
     for pause in [false, true] {
         let c = fast("http://127.0.0.1:9");
