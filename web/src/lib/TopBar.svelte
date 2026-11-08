@@ -81,10 +81,10 @@
       {:else if !st}
         <span>Conectando…</span>
       {:else if bookLane()}
-        <span>Caçando pelo livro de ofertas · a Steam barrou a leitura de anúncios{st.hunt.last_ok_at ? ' ' + ago(st.hunt.last_ok_at, app.now) : ''} ·
+        <span>Consultando preços · leitura de anúncios em pausa{st.hunt.last_ok_at ? ' ' + ago(st.hunt.last_ok_at, app.now) : ''} ·
           tenta de novo às {clock(st.hunt.paused_until!)}</span>
       {:else if steamBlocked()}
-        <span>Caça parada{st.hunt.last_ok_at ? ' ' + ago(st.hunt.last_ok_at, app.now) : ''} · a Steam bloqueou este IP ·
+        <span>Caça em pausa{st.hunt.last_ok_at ? ' ' + ago(st.hunt.last_ok_at, app.now) : ''} · a Steam recusou as consultas ·
           tenta de novo às {clock(st.hunt.paused_until!)}</span>
       {:else if paused}
         <span>Em pausa · a Steam pediu calma · volta em {st.hunt.paused_until! - app.now} s</span>

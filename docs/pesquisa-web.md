@@ -347,3 +347,10 @@ valendo sobre o corpo descomprimido.
   pausas e ritmos adaptativos próprios, sem parar ou alterar o auxiliar de rede. Teste local reproduziu os
   envios simultâneos nas rotas antes da correção e verifica o intervalo agregado e a passagem das ações do
   usuário sem esperar o piso de leitura.
+- Na tentativa das 05h28, após o descanso de cerca de 1 h, render extra e principal continuaram em 429,
+  sem `Retry-After`; o histórico antigo autenticado respondeu, sem anúncios novos observados. O painel
+  interpretava esse histórico como recuperação de anúncios e mantinha a mensagem de caça pelo livro
+  mesmo após a pausa pública. O histórico agora não marca recuperação de anúncios; o estado só expõe
+  frescor da fila pública enquanto ela pode consultar. Teste com a captura real de histórico reproduziu
+  a falsa recuperação e verifica a pausa completa depois das duas recusas. O texto não atribui o bloqueio
+  a uma cota, prazo ou identidade que a resposta da Steam não informa.

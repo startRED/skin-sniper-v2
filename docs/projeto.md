@@ -83,7 +83,7 @@ State = {
   saldo_cents: number, saldo_source: "steam" | "manual" | "none",
   hunt: { watching: number, queries_per_min: number, last_query_at: number | null,
           paused_until: number | null, last_ok_at: number | null,   // última resposta sem 429
-          book_ok_at: number | null,   // última resposta boa do livro de ofertas ou da busca (outro balde)
+          book_ok_at: number | null,   // última resposta boa da fila pública, se ainda disponível; null em pausa
           message: string | null },
   combo: { ids: string[], cost_cents: number, profit_cents: number },   // melhor combinação no saldo
   keys: { steam: KeyStatus, csfloat: KeyStatus, telegram: KeyStatus }

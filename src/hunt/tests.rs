@@ -28,6 +28,81 @@ const ST_MOON: &str = "StatTrak™ Glock-18 | Moonrise (Field-Tested)";
 const ID_CHEAP: &str = "6624491228774232473";
 const ID_T1: &str = "8709556594461768769";
 
+#[tokio::test]
+async fn history_success_does_not_restore_ads_or_claim_a_paused_book_is_running() {
+    use crate::steam::client::{Cookie, Endpoint};
+    let app = Router::new()
+        .route(
+            "/market/actions",
+            get(|| async { axum::http::StatusCode::TOO_MANY_REQUESTS }),
+        )
+        .route(
+            "/market/pricehistory/",
+            get(|| async {
+                include_str!("../../testdata/steam_legacy_history_moonrise_2026-11.json")
+            }),
+        )
+        .route(
+            "/busy",
+            get(|| async { axum::http::StatusCode::TOO_MANY_REQUESTS }),
+        )
+        .route(
+            "/broken",
+            get(|| async { axum::http::StatusCode::BAD_GATEWAY }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against(&base, db);
+    h.steam.set_cookie(Some(Cookie {
+        steam_login_secure: "test".into(),
+        sessionid: None,
+    }));
+    assert!(
+        !crate::steam::history::fetch_history(&h.steam, MOON)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let after_history = h.state().hunt;
+    assert!(
+        after_history.paused_until.is_some(),
+        "histórico válido não recupera anúncios"
+    );
+    assert!(after_history.last_ok_at.is_none());
+    for _ in 0..3 {
+        assert!(
+            h.steam
+                .get_json(Endpoint::Book, "/broken", &[])
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        h.state().hunt.book_ok_at.is_none(),
+        "via suspensa por falhas não aparece ativa"
+    );
+    assert!(
+        h.steam
+            .get_json(Endpoint::Legacy, "/busy", &[])
+            .await
+            .is_err()
+    );
+    let stopped = h.state().hunt;
+    assert!(stopped.paused_until.is_some());
+    assert!(
+        stopped.book_ok_at.is_none(),
+        "uma via pausada não aparece como caça ativa"
+    );
+    assert_eq!(
+        stopped.message.as_deref(),
+        Some("a Steam pediu calma (429); caça em pausa")
+    );
+}
+
 #[test]
 fn recorded_stattrak_moonrise_alerts_without_quick_profit() {
     // Registro original do achado perdido, sem alterar preço, seed, risco ou estimativas.
