@@ -265,9 +265,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    páginas processadas, avaliações, aprovações e recusas. Repetições não aumentam os distintos;
    novo no monitoramento não prova criação recente na Steam.
    Filtros de seed/float em pausa continuam sinalizados mesmo quando o render mantém os comuns ativos.
-   **Saída extra (desligada desde 09/11):** o executável usa uma saída só, como o robô antigo. O proxy abaixo
-   saiu pelo mesmo IP (PR #88) e às 05h UTC de 08/11 somou 410 leituras às 345 da principal, na hora que abriu um
-   bloqueio de mais de 1 dia. O código continua para os testes. Desenho anterior: um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
+   **Saída extra só com IP diferente (09/11):** a cada 5 min o app confere o IP público das duas saídas
+   (`api.ipify.org`, fora da Steam) e só usa a extra quando é diferente do de casa; conferência falha ou IP igual
+   = extra parada. Em 08/11 as duas saíram pelo mesmo IP (PR #88) e somaram ~1 000/h, abrindo um bloqueio de mais
+   de 1 dia; em 09/11, com o IP de casa ainda em 429, a Starlink devolveu 200 em `/actions`. Com IP diferente, a
+   extra leva toda leitura pública (anúncios, histórico, livro, busca, interface antiga) e tem o próprio piso de
+   12 s entre leituras; o mínimo de 3 s entre quaisquer envios continua somando as duas. Desenho anterior: um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
    rede fixa autorizada por um celular com Tailscale; redes atuais em `pesquisa-web.md` 13) dá outro IP público,
    sem garantia de cota independente. As sondas de
    `pesquisa-web.md` 11 encontraram actions recusadas e livro/render públicos disponíveis nessa rota. Por isso a

@@ -60,6 +60,8 @@ const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 /// `ALT_DOWN`; ligado fora da rede certa, responde 503 e dá no mesmo.
 pub const ALT_PROXY: &str = "http://127.0.0.1:1056";
 const ALT_DOWN: Duration = Duration::from_secs(5 * 60);
+/// Conferência do IP da saída extra; reprovada, ela fica parada até a próxima.
+pub const ALT_RECHECK: Duration = Duration::from_secs(5 * 60);
 const MAX_BODY: usize = 16 * 1024 * 1024;
 
 const BREAKER_THRESHOLD: u32 = 3;
@@ -543,6 +545,8 @@ struct Inner {
     read_spacing: Duration,
     last_any: Option<Instant>,
     last_read: Option<Instant>,
+    /// Piso de leituras da saída extra: só é usada com IP diferente da principal (`set_alt_usable`).
+    alt_last_read: Option<Instant>,
     /// [principal, extra, livro e busca], para o balanço de 10 min no log.
     calls: [Calls; 3],
     sent: u64,
@@ -683,6 +687,7 @@ impl SteamClient {
                 read_spacing: READ_SPACING,
                 last_any: None,
                 last_read: None,
+                alt_last_read: None,
                 calls: [Calls::default(); 3],
                 sent: 0,
                 alt_down_until: None,
@@ -751,12 +756,15 @@ impl SteamClient {
                 };
                 let any = inner.last_any.map_or(now, |last| last + spacing);
                 let bucket_at = pace.last_bucket[bucket].map_or(now, |last| last + gap);
+                let last_read = if alt {
+                    inner.alt_last_read
+                } else {
+                    inner.last_read
+                };
                 let read_at = if bucket == 2 {
                     now
                 } else {
-                    inner
-                        .last_read
-                        .map_or(now, |last| last + inner.read_spacing)
+                    last_read.map_or(now, |last| last + inner.read_spacing)
                 };
                 let at = any.max(bucket_at).max(read_at);
                 if at <= now {
@@ -768,7 +776,9 @@ impl SteamClient {
                         inner.bucket(ep).note_query(now);
                     }
                     inner.last_any = Some(now);
-                    if bucket != 2 {
+                    if bucket != 2 && alt {
+                        inner.alt_last_read = Some(now);
+                    } else if bucket != 2 {
                         inner.last_read = Some(now);
                     }
                     pace.last_bucket[bucket] = Some(now);
@@ -817,6 +827,17 @@ impl SteamClient {
         let mut c = self.with_alt_proxy(url)?;
         c.alt_public_only = true;
         Ok(c)
+    }
+
+    /// Liga ou desliga a saída extra conforme a conferência de IP: mesmo IP da principal não é outra cota
+    /// (PR #88: as duas saíram pelo mesmo IP e somaram a carga que abriu o bloqueio de 08/11).
+    pub fn set_alt_usable(&self, ok: bool) {
+        let mut g = self.inner.lock().unwrap();
+        g.alt_down_until = if ok {
+            None
+        } else {
+            Some(Instant::now() + ALT_RECHECK * 2)
+        };
     }
 
     /// A saída pública aceita uma reserva para os próximos 6 s, sem pausa nem falha de rede.
@@ -1024,10 +1045,9 @@ impl SteamClient {
             s.last_query_at = s.last_query_at.max(a.last_query_at);
             if self.alt_public_only {
                 s.book_ok_at = s.book_ok_at.max(a.last_ok_at);
-            } else {
-                s.last_ok_at = s.last_ok_at.max(a.last_ok_at);
             }
-            if !self.alt_public_only && g.alt_down_until.is_none_or(|t| now >= t) {
+            s.last_ok_at = s.last_ok_at.max(a.last_ok_at);
+            if g.alt_down_until.is_none_or(|t| now >= t) {
                 s.paused_until = s.paused_until.zip(a.paused_until).map(|(m, x)| m.min(x));
             }
         }
@@ -1470,7 +1490,15 @@ impl SteamClient {
     fn alt_reads(&self, ep: Endpoint) -> bool {
         self.alt.is_some()
             && if self.alt_public_only {
-                matches!(ep, Endpoint::Book | Endpoint::Legacy)
+                // 09/11: com o IP de casa em 429, a Starlink devolveu 200 em `/actions`; toda leitura pública vale.
+                matches!(
+                    ep,
+                    Endpoint::Listings
+                        | Endpoint::History
+                        | Endpoint::Book
+                        | Endpoint::Legacy
+                        | Endpoint::Search
+                )
             } else {
                 matches!(ep, Endpoint::Listings | Endpoint::History)
             }
@@ -1695,6 +1723,37 @@ impl SteamClient {
 
 /// `None` se o corpo é o envelope de `/market/actions` (JSON com `data` não nulo). Senão, um diagnóstico
 /// sem conteúdo do usuário: status, tamanho, nomes das chaves do topo e `success` se for número ou booleano.
+/// Confere a cada `ALT_RECHECK` o IP público das duas saídas (`api.ipify.org`, fora da Steam) e só libera a
+/// extra com IP diferente. Conferência falhou = extra parada: sem prova de outra cota.
+pub async fn watch_alt_ip(steam: Arc<SteamClient>) {
+    const ECHO: &str = "https://api.ipify.org";
+    let build = |proxy: Option<&str>| {
+        let b = reqwest::Client::builder().timeout(Duration::from_secs(20));
+        match proxy {
+            Some(p) => reqwest::Proxy::all(p).and_then(|p| b.proxy(p).build()),
+            None => b.build(),
+        }
+    };
+    let (Ok(direct), Ok(alt)) = (build(None), build(Some(ALT_PROXY))) else {
+        return;
+    };
+    let ip = |c: reqwest::Client| async move {
+        let text = c.get(ECHO).send().await.ok()?.text().await.ok()?;
+        text.trim().parse::<std::net::IpAddr>().ok()
+    };
+    let mut last = None;
+    loop {
+        let (a, b) = tokio::join!(ip(direct.clone()), ip(alt.clone()));
+        let ok = matches!((a, b), (Some(a), Some(b)) if a != b);
+        if last != Some(ok) {
+            tracing::info!(principal = ?a, extra = ?b, usa_extra = ok, "IP das saídas conferido");
+            last = Some(ok);
+        }
+        steam.set_alt_usable(ok);
+        tokio::time::sleep(ALT_RECHECK).await;
+    }
+}
+
 fn envelope_problem(status: u16, body: &[u8]) -> Option<String> {
     let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return Some(format!("status {status}, {} bytes, não é JSON", body.len()));
