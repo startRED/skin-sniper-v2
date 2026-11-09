@@ -69,7 +69,6 @@ export type Purchase = {
 };
 export type History = { points: [number, number, number][]; sell: Sell };
 export type Settings = {
-  steam_login_secure: string | null;
   csfloat_key: string | null;
   telegram_token: string | null;
   telegram_chat_id: string | null;

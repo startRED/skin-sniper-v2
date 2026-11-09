@@ -50,9 +50,9 @@ const PUBLIC_PAUSE_MAX: Duration = Duration::from_secs(2 * 60 * 60);
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
 /// Espaço mínimo entre duas consultas quaisquer, somando baldes e saídas (nunca rajada).
 const MIN_SPACING: Duration = Duration::from_secs(3);
-// Na hora anterior ao bloqueio de 08/11, a principal somou 600 consultas e a extra 575.
-// As duas rotas podem sair pelo mesmo IP: 360 leituras/h somadas deixam margem, sem presumir cotas distintas.
-const READ_SPACING: Duration = Duration::from_secs(10);
+// Teto de leituras somando todos os endpoints (300/h). Tabela research_attempts: 290–380/h no total rodaram
+// 4–5 h sem bloqueio em 07/11; ~500/h bloquearam em 1–2 h; ~1 000/h às 05h de 08/11 abriram o bloqueio de 1+ dia.
+const READ_SPACING: Duration = Duration::from_secs(12);
 const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Saída extra: proxy local que sai por outro IP público (o `saida-celular` deste PC, pela Starlink). Leva só
@@ -127,6 +127,7 @@ pub enum Error {
     Parse(String),
     /// Cookie ausente, expirado ou recusado.
     SessionExpired,
+    PublicOnly,
     /// A Steam mandou o /market/ para fora da verificação de elegibilidade (conta sem acesso ao Mercado).
     MarketBlocked,
     /// A conta/resposta está em outra moeda que não BRL.
@@ -150,6 +151,10 @@ impl fmt::Display for Error {
             ),
             Self::Parse(e) => write!(f, "resposta inesperada: {e}"),
             Self::SessionExpired => write!(f, "sessão da Steam ausente ou expirada"),
+            Self::PublicOnly => write!(
+                f,
+                "Skin Sniper usa somente consultas públicas, sem conta Steam"
+            ),
             Self::MarketBlocked => write!(f, "a Steam não liberou o Mercado para esta conta"),
             Self::WrongCurrency { got } => write!(f, "moeda {got} em vez de BRL (7)"),
         }
@@ -528,6 +533,7 @@ struct Inner {
     alt_down_until: Option<Instant>,
     /// Interface antiga, livro de ofertas e busca: medidos disponíveis com actions em 429 (06/11; com
     /// `/market/actions` em 429 havia horas, `orderbook`, `search/render` e `priceoverview` respondiam 200).
+    /// De 08/11 a 09/11 a interface antiga levou 429 junto com `/actions` em todas as tentativas.
     side: Limiter,
     /// Última página legada validada: anúncios e histórico seguem mesmo com `/actions` em pausa.
     legacy_ok: Option<Instant>,
@@ -579,6 +585,7 @@ pub struct SteamClient {
     /// Saída extra (`ALT_PROXY`); `None` nos testes e enquanto ninguém liga.
     alt: Option<reqwest::Client>,
     alt_public_only: bool,
+    public_only: bool,
     base: String,
     inner: Mutex<Inner>,
     research_db: Mutex<Option<crate::db::Db>>,
@@ -641,7 +648,7 @@ fn unix_in(d: Duration) -> i64 {
 
 impl SteamClient {
     pub fn new() -> anyhow::Result<Self> {
-        let mut client = Self::with_base(BASE)?;
+        let mut client = Self::build(BASE)?;
         let now = Instant::now();
         // Um reinício também precisa respeitar o intervalo do último processo.
         let inner = client.inner.get_mut().unwrap();
@@ -650,7 +657,7 @@ impl SteamClient {
         Ok(client)
     }
 
-    pub(crate) fn with_base(base: &str) -> anyhow::Result<Self> {
+    fn build(base: &str) -> anyhow::Result<Self> {
         Ok(Self {
             research_db: Mutex::new(None),
             main_send_pace: tokio::sync::Mutex::new(SendPace::default()),
@@ -658,6 +665,7 @@ impl SteamClient {
             http: http_builder().build()?,
             alt: None,
             alt_public_only: false,
+            public_only: true,
             base: base.trim_end_matches('/').to_string(),
             inner: Mutex::new(Inner {
                 limiter: Limiter::new(Instant::now()),
@@ -680,6 +688,14 @@ impl SteamClient {
                 alt_down_until: None,
             }),
         })
+    }
+
+    // Mantém os testes locais dos protocolos antigos; o executável só constrói o cliente público.
+    #[cfg(test)]
+    pub(crate) fn with_base(base: &str) -> anyhow::Result<Self> {
+        let mut client = Self::build(base)?;
+        client.public_only = false;
+        Ok(client)
     }
 
     pub fn set_research_db(&self, db: crate::db::Db) {
@@ -867,6 +883,11 @@ impl SteamClient {
     /// Troca (ou remove) o cookie em tempo de execução. Vale para as próximas requisições `auth`.
     pub fn set_cookie(&self, cookie: Option<Cookie>) {
         let mut g = self.inner.lock().unwrap();
+        if self.public_only {
+            g.cookie = None;
+            g.extra.clear();
+            return;
+        }
         // Outra conta: o prazo sem login era da anterior. Ao subir (sem cookie antes) o prazo salvo fica.
         let login = |c: &Option<Cookie>| c.as_ref().map(|c| c.steam_login_secure.clone());
         if g.cookie.is_some() && login(&g.cookie) != login(&cookie) {
@@ -934,6 +955,24 @@ impl SteamClient {
 
     pub fn cookie(&self) -> Option<Cookie> {
         self.inner.lock().unwrap().cookie.clone()
+    }
+
+    fn public_request(&self, ep: Endpoint, request: &mut reqwest::Request) -> Result<()> {
+        if !self.public_only {
+            return Ok(());
+        }
+        if request.method() != Method::GET
+            || matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth)
+        {
+            return Err(Error::PublicOnly);
+        }
+        let headers = request.headers_mut();
+        headers.remove(COOKIE);
+        headers.remove(reqwest::header::AUTHORIZATION);
+        if ep == Endpoint::Legacy {
+            headers.insert(COOKIE, HeaderValue::from_static("bMarketOptOut=1"));
+        }
+        Ok(())
     }
 
     /// Só para teste: encurta o intervalo do limitador para não dormir 3 s por consulta.
@@ -1289,6 +1328,10 @@ impl SteamClient {
         check: Option<EnvelopeCheck>,
         reset_on_success: bool,
     ) -> Result<(Parts, Vec<u8>)> {
+        if self.public_only && matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
+            return Err(Error::PublicOnly);
+        }
+        let auth = auth && !self.public_only;
         if !matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
             crate::research::check_budget().await.map_err(|e| match e {
                 crate::research::ReserveError::Budget => Error::BudgetExhausted,
@@ -1383,9 +1426,10 @@ impl SteamClient {
                 req = req.header(COOKIE, "bMarketOptOut=1");
             }
         }
-        let request = req
+        let mut request = req
             .build()
             .map_err(|e| Error::Transport(e.without_url().to_string()))?;
+        self.public_request(ep, &mut request)?;
         let attempt = self.reserve_read(ep, "main").await?;
         if let Err(e) = self.pace_send(ep, false).await {
             crate::research::finish(attempt, "not_sent").await;
@@ -1443,6 +1487,9 @@ impl SteamClient {
     ) -> Option<Result<(Parts, Vec<u8>)>> {
         let alt = self.alt.as_ref()?;
         let mut request = req.try_clone()?.build().ok()?;
+        if let Err(e) = self.public_request(ep, &mut request) {
+            return Some(Err(e));
+        }
         if self.alt_public_only {
             request.headers_mut().remove(COOKIE);
             if ep == Endpoint::Legacy {
@@ -1685,6 +1732,76 @@ pub(crate) struct Parts {
 mod tests {
     use super::*;
     use axum::{Router, http::StatusCode as AxStatus, routing::get};
+
+    #[tokio::test]
+    async fn production_client_sends_only_public_gets_on_both_routes() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = Router::new().fallback(get({
+            let hits = hits.clone();
+            move |headers: axum::http::HeaderMap| {
+                let hits = hits.clone();
+                async move {
+                    assert!(!headers.contains_key("authorization"));
+                    assert!(headers.get("cookie").is_none_or(|v| v == "bMarketOptOut=1"));
+                    hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    r#"{"data":{"ok":true}}"#
+                }
+            }
+        }));
+        let base = serve(app).await;
+        let c = SteamClient::build(&base)
+            .unwrap()
+            .with_alt(http_builder().build().unwrap());
+        c.set_gap_for_test(Duration::ZERO);
+        c.set_cookie(Some(Cookie {
+            steam_login_secure: "must-not-send".into(),
+            sessionid: Some("must-not-send".into()),
+        }));
+        assert!(c.cookie().is_none());
+        assert!(SteamClient::new().unwrap().public_only);
+        c.action(Endpoint::Listings, "Q", &serde_json::json!([]))
+            .await
+            .unwrap();
+        let request = || {
+            c.request(Method::GET, "/public")
+                .header(
+                    COOKIE,
+                    "steamLoginSecure=must-not-send; sessionid=must-not-send",
+                )
+                .header("authorization", "Bearer must-not-send")
+        };
+        c.send(Endpoint::Legacy, request(), true).await.unwrap();
+        c.send_alt(Endpoint::History, &request(), None, true)
+            .await
+            .unwrap()
+            .unwrap();
+        for ep in [Endpoint::Session, Endpoint::Buy, Endpoint::Auth] {
+            assert!(matches!(
+                c.send(ep, request(), true).await,
+                Err(Error::PublicOnly)
+            ));
+        }
+        assert!(matches!(
+            c.send(
+                Endpoint::Listings,
+                c.request(Method::POST, "/public"),
+                false
+            )
+            .await,
+            Err(Error::PublicOnly)
+        ));
+        assert!(matches!(
+            c.send_alt(
+                Endpoint::Listings,
+                &c.request(Method::POST, "/public"),
+                None,
+                true
+            )
+            .await,
+            Some(Err(Error::PublicOnly))
+        ));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
 
     #[tokio::test]
     async fn research_limits_retry_but_never_blocks_account_calls() {
@@ -2455,7 +2572,7 @@ mod tests {
 
     #[test]
     fn response_cookies_only_for_the_session_that_sent() {
-        let c = SteamClient::new().unwrap();
+        let c = SteamClient::with_base("http://127.0.0.1:1").unwrap();
         let login = |s: &str| {
             c.set_cookie(Some(Cookie {
                 steam_login_secure: s.into(),

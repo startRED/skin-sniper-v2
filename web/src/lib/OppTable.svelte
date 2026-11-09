@@ -1,7 +1,6 @@
 <script lang="ts">
   import { app, loadHistory, lostRows, purchaseOf, rows, setSort, toggleExpanded, type SortKey } from './store.svelte';
   import { ago, eta, floatTxt, money, pct, signed } from './format';
-  import BuyButton from './BuyButton.svelte';
   import Chart from './Chart.svelte';
   import type { GoneReason, Opportunity, Tier } from './types';
 
@@ -74,7 +73,7 @@
     {@render th('eta', 'Prazo', 'Ordenar pelo tempo estimado para vender (menor primeiro)')}
     <div class="h hide" role="columnheader">Confiança</div>
     {@render th('new', lost ? 'Sumiu' : 'Mais novo', 'Ordenar pelas que apareceram agora')}
-    <div class="h hide" role="columnheader"><span class="sr-only">Comprar</span></div>
+    <div class="h hide" role="columnheader"><span class="sr-only">Abrir na Steam</span></div>
   </div>
 
   {#each list as o (o.id)}
@@ -131,7 +130,7 @@
           </div>
         {:else}
           <div class="c seen muted" role="cell" data-l="Apareceu">{ago(o.seen_at, app.now)}</div>
-          <div class="c act" role="cell"><BuyButton {o} /></div>
+          <div class="c act" role="cell"><a class="btn primary" href={o.steam_url} target="_blank" rel="noopener noreferrer" aria-label="Abrir {o.name} na Steam">Abrir na Steam</a></div>
         {/if}
       </div>
 

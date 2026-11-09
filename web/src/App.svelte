@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { app, bookLane, load, lostRows, readingSaldo, start, steamBlocked } from './lib/store.svelte';
+  import { app, bookLane, load, lostRows, start, steamBlocked } from './lib/store.svelte';
   import { ago, clock } from './lib/format';
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
@@ -15,8 +15,6 @@
   const count = $derived(Object.values(app.opps).filter((o) => !o.gone_at).length);
   const lostCount = $derived(lostRows().length);
   const noSaldo = $derived(app.state?.saldo_source === 'none');
-  const noSteam = $derived(app.state != null && !app.state.keys.steam.set);
-  const reading = $derived(readingSaldo());
   const blocked = $derived(steamBlocked());
   const byBook = $derived(bookLane());
 </script>
@@ -25,7 +23,7 @@
 
 {#if app.conn === 'down'}
   <div class="banner" role="status">
-    Sem conexão com o Skin Sniper. Estamos tentando de novo — enquanto isso a lista abaixo pode estar desatualizada e não dá para comprar.
+    Sem conexão com o Skin Sniper. Estamos tentando de novo — enquanto isso a lista abaixo pode estar desatualizada.
   </div>
 {/if}
 
@@ -35,14 +33,14 @@
       Enquanto o livro de ofertas responder, o app acompanha o menor preço de cada skin barata.
       Abrir o anúncio e avisar você ainda depende da leitura de anúncios.</p>
     <p>O app tenta de novo sozinho (próxima tentativa às {clock(app.state.hunt.paused_until!)}). As skins raras esperam,
-      porque só os anúncios mostram o padrão.{#if noSaldo} O saldo não dá para ler agora: se quiser, digite-o lá em cima.{/if}</p>
+      porque só os anúncios mostram o padrão.{#if noSaldo} Digite seu saldo lá em cima.{/if}</p>
   </div>
 {:else if blocked && app.state}
   <div class="warn block" role="status">
     <p><b>A caça está em pausa{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}: a Steam recusou as consultas (429).</b>
       O app respeita um descanso antes de tentar de novo. Reiniciar não encurta esse prazo.</p>
     <p>O app tenta de novo sozinho (próxima tentativa às {clock(app.state.hunt.paused_until!)}) e volta a caçar assim que a Steam
-      liberar. Nada se perde.{#if noSaldo} Enquanto isso o saldo não dá para ler: se quiser, digite-o lá em cima.{/if}</p>
+      liberar. Nada se perde.{#if noSaldo} Digite seu saldo lá em cima.{/if}</p>
   </div>
 {/if}
 
@@ -60,6 +58,7 @@
   {:else if !app.loaded}
     <div class="empty" role="status"><p>Carregando as oportunidades…</p></div>
   {:else}
+    <p class="muted">Consultas públicas, sem login. Digite seu saldo e abra a Steam para comprar.</p>
     <ComboBar />
 
     <section aria-labelledby="h-opp">
@@ -73,18 +72,11 @@
 
       {#if count === 0}
         <div class="empty compact" role="status">
-          {#if reading}
-            <h3>Lendo seu saldo na Steam…</h3>
-            <p>Assim que a Steam responder eu escolho as skins que cabem. Se ela pediu calma, isso espera a pausa lá em cima acabar.</p>
-          {:else if noSaldo}
+          {#if noSaldo}
             <h3>Falta o seu saldo</h3>
-            <p>Digite quanto você tem para gastar (lá em cima, em “Saldo”) ou conecte a Steam em Configurações. Com isso eu sei quais skins cabem.</p>
+            <p>Digite quanto você tem para gastar lá em cima, em “Saldo”. Assim eu sei quais skins cabem.</p>
           {:else}
             <h3>Nenhuma skin com lucro agora.</h3>
-          {/if}
-          {#if noSteam}
-            <p>Dica: conecte a sua conta da Steam para eu ler o saldo e poder comprar.</p>
-            <button class="btn" onclick={() => (app.settingsOpen = true)}>Abrir configurações</button>
           {/if}
         </div>
       {:else}

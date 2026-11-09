@@ -32,8 +32,8 @@
   }
 
   const STATUS: Record<Purchase['status'], [string, string]> = {
-    pending: ['mute', 'Comprando…'],
-    need_confirmation: ['warn', 'Confirme no app Steam'],
+    pending: ['warn', 'Resultado pendente: confira na Steam'],
+    need_confirmation: ['warn', 'Confirme a situação na Steam'],
     bought: ['ok', 'Comprada'],
     failed: ['bad', 'Não comprou']
   };
@@ -42,7 +42,7 @@
 <section aria-labelledby="h-compras">
   <h2 id="h-compras">Compras</h2>
   {#if app.purchases.length === 0}
-    <p class="empty">Você ainda não comprou nada por aqui. Quando comprar, a skin aparece nesta lista com o dia em que ela destrava e os preços para vender.</p>
+    <p class="empty">Nenhuma compra antiga registrada. Compras feitas diretamente na Steam não aparecem aqui automaticamente.</p>
   {:else}
     <ul>
       {#each app.purchases as p (p.id)}

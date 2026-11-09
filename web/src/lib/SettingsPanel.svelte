@@ -1,7 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import { app, load, notify, saveSettings } from './store.svelte';
-  import { api } from './api';
+  import { app, notify, saveSettings } from './store.svelte';
   import { centsToInput, parseBRL } from './format';
   import { unlockAudio } from './sound';
   import SecretField from './SecretField.svelte';
@@ -12,59 +10,6 @@
   let minDraft = $state('');
   let panelDraft = $state('');
   let msg = $state('');
-  type Phase = 'idle' | 'starting' | 'waiting' | 'done' | 'expired' | 'error';
-  let phase = $state<Phase>('idle');
-  let svg = $state('');
-  let account = $state('');
-  let qrError = $state('');
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let attempt = 0;
-  let stateBeforeDone: typeof app.state = null;
-  onDestroy(() => clearTimeout(timer));
-
-  $effect(() => {
-    if (phase === 'done' && app.state && app.state !== stateBeforeDone) phase = 'idle';
-  });
-
-  async function begin() {
-    clearTimeout(timer);
-    const current = ++attempt;
-    phase = 'starting';
-    qrError = '';
-    try {
-      const q = await api<{ qr_svg: string }>('/api/steam/login/qr', 'POST');
-      if (current !== attempt) return;
-      svg = q.qr_svg;
-      phase = 'waiting';
-      timer = setTimeout(() => check(current), 3000);
-    } catch (e) {
-      if (current !== attempt) return;
-      phase = 'error';
-      qrError = e instanceof Error ? e.message : 'Não consegui gerar o QR. Tente de novo.';
-    }
-  }
-
-  async function check(current: number) {
-    try {
-      const result = await api<{ state: 'waiting' | 'done' | 'expired' | 'error'; account?: string; qr_svg?: string; detail?: string }>('/api/steam/login/status');
-      if (current !== attempt) return;
-      if (result.qr_svg) svg = result.qr_svg;
-      if (result.state === 'waiting') {
-        timer = setTimeout(() => check(current), 3000);
-        return;
-      }
-      stateBeforeDone = app.state;
-      account = result.account ?? '';
-      qrError = result.detail?.includes('salvar')
-        ? 'Não consegui salvar o login. Tente de novo.'
-        : 'A Steam não confirmou o login. Tente de novo.';
-      phase = result.state;
-      if (phase === 'done') void load();
-    } catch {
-      if (current === attempt) timer = setTimeout(() => check(current), 5000);
-    }
-  }
-
   $effect(() => {
     if (app.settingsOpen && !dlg.open) {
       minDraft = centsToInput(app.settings?.notify_min_profit_cents ?? 100);
@@ -113,47 +58,8 @@
       <p class="muted">Carregando as configurações…</p>
     {:else}
       <section>
-        <h3>Conta e chaves</h3>
-        <div class="steam-login">
-          <h4>Login da Steam</h4>
-          <p class="hint">Entre pelo app da Steam para ler seu saldo e comprar. Sua senha não passa por aqui.</p>
-          {#if phase === 'starting'}
-            <p class="muted" role="status">Gerando QR…</p>
-          {:else if phase === 'waiting'}
-            <div class="qr">
-              <div class="code" role="img" aria-label="QR code para entrar com o app da Steam">{@html svg}</div>
-              <ol>
-                <li>Abra o app Steam no celular e toque no escudo (Steam Guard).</li>
-                <li>Escolha escanear um QR code, aponte para a imagem e confirme.</li>
-              </ol>
-            </div>
-          {:else if phase === 'done'}
-            <p class="ok-msg" role="status">Login confirmado{account ? ` para ${account}` : ''}. Verificando acesso ao Mercado…</p>
-          {:else if phase === 'expired'}
-            <p class="down" role="alert">O QR venceu. Gere outro e escaneie de novo.</p>
-          {:else if phase === 'error'}
-            <p class="down" role="alert">{qrError || 'Não consegui entrar. Tente de novo.'}</p>
-          {:else if keys?.steam.ok === true}
-            <p class="ok-msg">{keys.steam.detail && keys.steam.detail !== 'conta conectada' ? `Conectado como ${keys.steam.detail}.` : 'Conta conectada.'}</p>
-          {:else if !keys?.steam}
-            <p class="muted">Verificando…</p>
-          {:else if keys.steam.ok === false}
-            <p class="down">{keys.steam.detail?.toLowerCase().includes('mercado') ? 'O login funcionou, mas a Steam não liberou o Mercado para esta conta. Confira se ela pode comprar e vender no Mercado e se o Steam Guard está ativo.' : keys.steam.detail?.includes('carteira') ? 'O login funcionou, mas a carteira desta conta não está em reais. Use uma conta com carteira em reais.' : keys.steam.detail?.includes('expirado') ? 'Login expirado. Entre de novo pelo QR.' : 'Não consegui validar o acesso à Steam. Confira sua conta.'}</p>
-          {:else if keys.steam.set}
-            <p class="muted">{keys.steam.detail?.startsWith('não consegui') ? 'Não consegui verificar o login. Confira sua conexão.' : 'Verificando login…'}</p>
-          {:else}
-            <p class="muted">Não configurado.</p>
-          {/if}
-          <button class="btn primary qr-button" onclick={begin} disabled={phase === 'starting'}>
-            {phase === 'waiting' ? 'Gerar outro QR' : 'Entrar com o app da Steam'}
-          </button>
-        </div>
-        <details class="adv">
-          <summary>Avançado: colar o cookie do navegador</summary>
-          <SecretField label="Cookie steamLoginSecure" masked={s.steam_login_secure}
-            hint="Só se o QR não servir. Esse cookie vale cerca de um dia e não se renova sozinho."
-            onsave={(v) => save({ steam_login_secure: v })} onclear={() => save({ steam_login_secure: null })} />
-        </details>
+        <h3>Chaves</h3>
+        <p class="hint">Consultas públicas, sem login. O saldo é digitado por você.</p>
         <SecretField label="Chave do CSFloat" masked={s.csfloat_key} status={keys?.csfloat ?? null}
           hint="Ajuda a avaliar skins raras com vendas de verdade."
           onsave={(v) => save({ csfloat_key: v })} onclear={() => save({ csfloat_key: null })} />
@@ -217,15 +123,6 @@
   h2 { font-size: 18px; }
   h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
   section { display: flex; flex-direction: column; gap: 16px; }
-  .steam-login { display: flex; flex-direction: column; gap: 8px; }
-  h4 { font-size: 14px; font-weight: 600; }
-  .qr { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-  .code { width: 200px; height: 200px; background: #fff; padding: 6px; border-radius: var(--radius); }
-  .code :global(svg) { width: 100%; height: 100%; }
-  ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; flex: 1; min-width: 180px; }
-  .ok-msg { color: var(--green); }
-  .qr-button { align-self: flex-start; }
-  .adv summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
   .hint { color: var(--muted); font-size: 13px; }
   .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .inline input:not([type='checkbox']) { flex: 1; min-width: 0; }

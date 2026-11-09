@@ -151,11 +151,11 @@ async fn main() -> Result<()> {
     let db = tokio::task::spawn_blocking(move || db::Db::open(&path)).await??;
     db::spawn_retention(db.clone());
     let settings = settings::SettingsStore::new(db.clone());
+    settings.clear_steam_account().await?;
     let mut app = web::AppState::new(db.clone(), settings.clone());
-    let steam = Arc::new(
-        steam::client::SteamClient::new()?.with_public_alt_proxy(steam::client::ALT_PROXY)?,
-    );
-    app.login.attach(steam.clone());
+    // Uma saída só, como o robô antigo: o proxy extra saiu pelo mesmo IP (PR #88) e às 05h de 08/11 somou
+    // 410 leituras às 345 da principal na hora que abriu o bloqueio longo.
+    let steam = Arc::new(steam::client::SteamClient::new()?);
     let csfloat = Arc::new(csfloat::CsfloatClient::new()?);
     let telegram = Arc::new(notify::Telegram::new()?);
     let hunt = hunt::Hunt::new(hunt::HuntDeps {
@@ -178,8 +178,6 @@ async fn main() -> Result<()> {
         telegram,
     );
     rt.settings_changed().await?;
-    rt.spawn_wallet_refresh();
-    app.login.spawn_renewal(rt.clone());
     tokio::spawn(hunt::scheduler::run(hunt));
     app.rt = Some(rt);
 

@@ -316,14 +316,40 @@ async fn state_saldo_and_settings_follow_contract() {
 #[tokio::test]
 async fn unwired_routes_say_so_and_db_routes_read_db() {
     let s = start().await;
+    s.app.settings.set_saldo(Some(1234)).await.unwrap();
+    s.app
+        .db
+        .call(|c| {
+            c.execute(
+                "INSERT INTO purchases(id,json,created_at) VALUES ('existing','{}',1)",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .unwrap();
     let r = s
         .send("POST".parse().unwrap(), "/api/buy", json!({"id": "1"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.status(), StatusCode::GONE);
     let v: Value = r.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("ainda não ligado"));
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("diretamente na Steam")
+    );
+
+    assert_eq!(s.app.settings.saldo().await.unwrap(), Some(1234));
+    let count: i64 = s
+        .app
+        .db
+        .call(|c| c.query_row("SELECT count(*) FROM purchases", [], |r| r.get(0)))
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
 
     let (o, lost, old) = (
         opp_json("42").to_string(),
@@ -510,22 +536,34 @@ async fn sse_closes_when_client_lags() {
 }
 
 #[tokio::test]
-async fn login_status_without_qr_is_expired_and_start_needs_json() {
+async fn account_routes_are_disabled() {
     let s = start().await;
-    let v: Value = s
-        .get("/api/steam/login/status")
+    assert_eq!(
+        s.get("/api/steam/login/status")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        s.send("POST".parse().unwrap(), "/api/steam/login/qr", json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        s.send(
+            "PUT".parse().unwrap(),
+            "/api/settings",
+            json!({"steam_login_secure":"new"})
+        )
         .send()
         .await
         .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(v, json!({"state": "expired"}));
-    let r = s
-        .http
-        .post(format!("{}/api/steam/login/qr", s.base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
 }

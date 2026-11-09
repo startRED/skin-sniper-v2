@@ -10,7 +10,7 @@
 
 use super::fees::seller_gets;
 use super::sell::{MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, weighted_quantile};
-use crate::steam::buy::brl;
+use crate::pricing::brl;
 use serde::{Deserialize, Serialize};
 
 /// Vendas fictícias de encolhimento em cada nível.
