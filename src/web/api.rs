@@ -404,11 +404,6 @@ pub async fn opportunity_history(
     Ok(Json(rt.history(&id).await?))
 }
 
-#[derive(Deserialize)]
-pub struct BuyInput {
-    pub id: String,
-}
-
 pub async fn watch(AxState(app): AxState<AppState>) -> ApiResult<Vec<WatchRow>> {
     let Some(rt) = &app.rt else {
         return Err(ApiError::not_wired("vigilância"));
@@ -416,14 +411,11 @@ pub async fn watch(AxState(app): AxState<AppState>) -> ApiResult<Vec<WatchRow>> 
     Ok(Json(crate::hunt::watch::list(&rt.hunt).await?))
 }
 
-pub async fn buy(
-    AxState(app): AxState<AppState>,
-    Json(body): Json<BuyInput>,
-) -> ApiResult<Purchase> {
-    let Some(rt) = &app.rt else {
-        return Err(ApiError::not_wired("compra"));
-    };
-    Ok(Json(rt.buy(&body.id).await?))
+pub async fn buy() -> ApiError {
+    ApiError::new(
+        StatusCode::GONE,
+        "Compra pelo aplicativo desativada; compre diretamente na Steam",
+    )
 }
 
 pub async fn list_purchases(AxState(app): AxState<AppState>) -> ApiResult<Vec<Purchase>> {

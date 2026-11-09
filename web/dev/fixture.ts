@@ -73,27 +73,20 @@ let opps: Opportunity[] = [];
 let lost: Opportunity[] = []; // sumiram da Steam: a API real devolve as do último dia com gone_at
 let purchases: Purchase[] = [];
 let saldoCents = 5000;
-let saldoSource: State['saldo_source'] = 'steam';
+let saldoSource: State['saldo_source'] = 'manual';
 let frozen = false;
 let settings: Settings = {
-  steam_login_secure: '••••gLO9', csfloat_key: null, telegram_token: '••••k3Xz', telegram_chat_id: '••••6789',
+  csfloat_key: null, telegram_token: '••••k3Xz', telegram_chat_id: '••••6789',
   panel_url: 'http://192.168.0.10:8788', sound: true, notify_min_profit_cents: 100
 };
 let lastQuery = nowS();
 // Estado da caça de exemplo (ex.: bloqueio da Steam), trocado por /api/__dev/settings-state.
 let huntExample: Partial<State['hunt']> = {};
 let keyExamples: State['keys'] | null = null;
-let qrExample: { state: 'waiting' | 'done' | 'expired' | 'error'; account?: string; detail?: string } = { state: 'waiting' };
-
-// Compras simuladas em andamento: `reset` cancela, senão a compra de uma rodada termina no meio da seguinte.
-let buyTimers: ReturnType<typeof setTimeout>[] = [];
-
 function reset(scenario: string) {
-  buyTimers.forEach(clearTimeout);
-  buyTimers = [];
   seq = 0;
   saldoCents = 5000;
-  saldoSource = 'steam';
+  saldoSource = 'manual';
   opps = scenario === 'empty' ? [] : Array.from({ length: 12 }, (_, i) => genOpp(4 + i * 37 + (i % 3) * 11));
   lost = scenario === 'empty' ? [] : Array.from({ length: 10 }, (_, i) => ({ ...genOpp(900 + i * 1800), gone_at: nowS() - 180 - i * 1500 }));
   const sold = genOpp(0);
@@ -120,7 +113,7 @@ function state(): State {
     hunt: { watching: 42, queries_per_min: 20, last_query_at: lastQuery, paused_until: null, last_ok_at: lastQuery, book_ok_at: lastQuery, message: '20 anúncios conferidos em 1 min; nenhum deu lucro, o mais perto dava R$ 0,78 de prejuízo (exemplo do modo dev)', ...huntExample },
     combo: combo(),
     keys: keyExamples ?? {
-      steam: { set: !!settings.steam_login_secure, ok: !!settings.steam_login_secure, detail: settings.steam_login_secure ? 'Conta exemplo_erick' : null },
+      steam: { set: false, ok: null, detail: null },
       csfloat: { set: !!settings.csfloat_key, ok: null, detail: null },
       telegram: { set: !!settings.telegram_token, ok: settings.telegram_token ? false : null, detail: settings.telegram_token ? 'O Telegram recusou o token (exemplo de erro).' : null }
     }
@@ -210,7 +203,7 @@ function readJson(req: IncomingMessage): Promise<any> {
   });
 }
 
-const SECRET_KEYS = ['steam_login_secure', 'csfloat_key', 'telegram_token', 'telegram_chat_id'] as const;
+const SECRET_KEYS = ['csfloat_key', 'telegram_token', 'telegram_chat_id'] as const;
 
 async function handle(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url!, 'http://x');
@@ -226,12 +219,10 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     return;
   }
   if (p === '/api/state') return send(res, 200, state());
-  if (p === '/api/steam/login/qr' && m === 'POST') return send(res, 200, { qr_svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100"/><text x="10" y="50" fill="white">EXEMPLO</text></svg>' });
-  if (p === '/api/steam/login/status') return send(res, 200, qrExample);
+  if (p.startsWith('/api/steam/login/') || p === '/api/buy') return send(res, 410, { error: 'Recurso indisponível: consultas públicas, sem login.' });
   if (p === '/api/__dev/settings-state' && m === 'POST') {
     const example = await readJson(req);
     if ('keys' in example) keyExamples = example.keys;
-    if ('qr' in example) qrExample = example.qr;
     if ('hunt' in example) huntExample = example.hunt;
     emit('state', state());
     return send(res, 200, { ok: true });
@@ -243,6 +234,8 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (p === '/api/settings' && m === 'GET') return send(res, 200, settings);
   if (p === '/api/settings' && m === 'PUT') {
     const patch = await readJson(req);
+    if ('steam_login_secure' in patch && patch.steam_login_secure != null) return send(res, 400, { error: 'Login da Steam indisponível.' });
+    delete patch.steam_login_secure;
     for (const k of Object.keys(patch)) {
       if ((SECRET_KEYS as readonly string[]).includes(k)) (settings as any)[k] = patch[k] == null ? null : `••••${String(patch[k]).slice(-4)}`;
       else (settings as any)[k] = patch[k];
@@ -251,7 +244,9 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   }
   if (p === '/api/saldo' && m === 'PUT') {
     const { cents } = await readJson(req);
-    if (cents == null) { saldoSource = 'steam'; saldoCents = 5000; } else { saldoSource = 'manual'; saldoCents = cents; }
+    if (cents != null && (!Number.isSafeInteger(cents) || cents < 0)) return send(res, 400, { error: 'Saldo inválido.' });
+    saldoSource = cents == null ? 'none' : 'manual';
+    saldoCents = cents ?? 0;
     emit('state', state());
     return send(res, 200, state());
   }
@@ -259,22 +254,6 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (h) {
     const o = opps.find((x) => x.id === h[1]);
     return o ? send(res, 200, history(o)) : send(res, 404, { error: 'Essa oportunidade já saiu da lista.' });
-  }
-  if (p === '/api/buy' && m === 'POST') {
-    const { id } = await readJson(req);
-    const o = opps.find((x) => x.id === id);
-    if (!o) return send(res, 404, { error: 'Essa skin já foi vendida.' });
-    if (o.price_cents > saldoCents) return send(res, 400, { error: 'Saldo insuficiente para essa compra.' });
-    const pur: Purchase = { id: o.id, name: o.name, icon_url: o.icon_url, price_cents: o.price_cents, status: 'pending', message: null, bought_at: null, tradable_at: null, sell: o.sell };
-    purchases = [pur, ...purchases.filter((x) => x.id !== o.id)];
-    buyTimers.push(setTimeout(() => { Object.assign(pur, { status: 'need_confirmation' }); emit('purchase', pur); }, 1200));
-    buyTimers.push(setTimeout(() => {
-      Object.assign(pur, { status: 'bought', bought_at: nowS(), tradable_at: nowS() + 7 * 86400 });
-      saldoCents -= o.price_cents;
-      opps = opps.filter((x) => x.id !== o.id);
-      emit('purchase', pur); emit('gone', { id: o.id }); emit('state', state());
-    }, 5500));
-    return send(res, 200, pur);
   }
   if (p === '/api/__dev/scenario' && m === 'POST') {
     const b = await readJson(req);

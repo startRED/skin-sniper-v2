@@ -6,8 +6,10 @@ Quando um fato mudar, corrija lá, não aqui.
 
 ## Objetivo
 
-O usuário abre o painel, vê o saldo (lido da Steam ou digitado) e uma lista viva de anúncios que dão lucro
-real depois das taxas, que cabem no saldo. Ele ordena por lucro ou margem e compra com um clique. O Skin
+O usuário abre o painel, vê o saldo que ele digitou e uma lista viva de anúncios que dão lucro
+real depois das taxas, que cabem no saldo. Ele ordena por lucro ou margem e abre o anúncio na Steam para
+comprar lá. **Desde 09/11/2026 o app não usa a conta Steam** (pedido do Erick): sem login, QR, cookie de
+sessão, carteira ou compra pelo servidor; só consultas públicas do mercado. O Skin
 Sniper escolhe sozinho o que caçar. Leve no PC: um binário Rust, um banco SQLite que se limpa sozinho.
 
 Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-compra, facas e luvas. Auto-compra e confirmação sem celular: plano futuro em
@@ -30,13 +32,11 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 |---|---|
 | `db.rs` | abre SQLite, migrações, retenção (job de hora em hora) |
 | `settings.rs` | chaves e preferências no banco; leitura mascarada (só os 4 últimos caracteres) |
-| `steam/client.rs` | HTTP único da Steam: cookie da sessão, limitador adaptativo, breakers por endpoint |
+| `steam/client.rs` | HTTP único da Steam: só GET público (sem cookie de conta), limitador adaptativo, breakers por endpoint |
 | `steam/listings.rs` | código G, `QueryListingsForItem` (com `propertyFilters`), parse de `asset_properties` |
 | `steam/history.rs` | `QueryPriceHistory` → pontos `(ts, mediana_centavos, compras)` |
 | `steam/book.rs` | `/market/orderbook` `Load` → maior pedido de compra, quantos pedidos abertos e os 5 primeiros degraus de venda |
 | `steam/search.rs` | `search/render` para descoberta de catálogo (USD → BRL por razão medida) |
-| `steam/session.rs` | valida o `steamLoginSecure`, obtém `sessionid`, lê saldo da carteira |
-| `steam/buy.rs` | `buylisting` com o fluxo `need_confirmation` |
 | `csfloat.rs` | `/history/<nome>/sales` → múltiplos `price / reference.base_price` por venda |
 | `pricing/fees.rs` | taxa em centavos inteiros e inverso por busca binária |
 | `pricing/sell.rs` | três preços de venda, prazo, confiança |
@@ -64,17 +64,18 @@ Valores de dinheiro sempre em **centavos BRL inteiros**. Datas em segundos Unix.
 
 ```
 GET  /api/state            -> State
-PUT  /api/saldo            {cents: int}            -> State      (saldo manual; null volta a ler da Steam)
+PUT  /api/saldo            {cents: int}            -> State      (saldo manual; null apaga)
 GET  /api/opportunities    -> Opportunity[]         (ativas e todas as perdidas nas últimas 24 h, com gone_at; o frontend ordena)
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
-POST /api/buy              {id: string}            -> Purchase
+POST /api/buy              -> 410 (compra só na Steam; nada sai pela rede)
+GET|POST /api/steam/login/* -> 410 (sem login)
 GET  /api/purchases        -> Purchase[]
 POST /api/purchases/:id/sold {sold_cents: int}      -> Purchase (valor pago pelo comprador, com taxas)
 GET  /api/calibration      -> Calibration
 GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
 GET  /api/learning         -> Learning              (placar do aprendizado, 60 dias de Brasília)
 GET  /api/settings         -> Settings              (chaves mascaradas)
-PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga)
+PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga; steam_login_secure não nulo → 400)
 GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id, at, reason} | "state" State | "purchase" Purchase
 ```
 
@@ -156,7 +157,7 @@ LearningDay = { day: "AAAA-MM-DD", queries, books, new_listings, aged, age_media
                 price_error_pct: number | null, price_bias_pct: number | null } // medianas dos erros dos avisos comuns com preço em 48 h, agrupados pela data da previsão
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
              telegram_chat_id: string|null, panel_url: string|null, sound: boolean,
-             notify_min_profit_cents: number }      // segredos chegam mascarados: "••••gLO9"
+             notify_min_profit_cents: number }      // segredos chegam mascarados: "••••gLO9"; steam_login_secure é sempre null
 ```
 
 ## Acesso ao painel
@@ -228,13 +229,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 3. **Ritmo:** grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
    sessão/login/compra. São divisões operacionais baseadas nas respostas medidas, não cotas oficiais da Valve.
    Sessão e compra não herdam o 429 de uma varredura de anúncios. Entre duas consultas quaisquer há no mínimo 3 s, de
-   qualquer balde ou saída: nunca rajada. As leituras de mercado somadas nas duas saídas têm ainda um piso de 10 s, inclusive
+   qualquer balde ou saída: nunca rajada. As leituras de mercado somadas (todos os endpoints) têm ainda um piso de 12 s (300/h), inclusive
    entre endpoints diferentes e na primeira leitura após reiniciar; sessão, login e compra mantêm a fila própria.
    Cada balde tem o próprio intervalo e a própria pausa por 429, preservados no banco. Com um balde em pausa e a saída extra sem vaga, a consulta falha na hora
    em vez de segurar a caça. Com as actions barradas, alvos comuns usam `/render` da interface antiga e o histórico
-   usa `/pricehistory` com a sessão do app (contratos em `pesquisa-web.md` 10). Histórico com erro HTTP ou JSON
-   inválido espera 10 min antes de repetir o mesmo nome, compartilhado entre descoberta e avaliação; trocar o
-   login libera a tentativa. É hipótese de recuo; falha nunca renova o histórico salvo. Filtros de seed/float
+   não tem rota pública (o `/pricehistory` antigo exige login; contratos em `pesquisa-web.md` 10). Histórico com erro HTTP ou JSON
+   inválido espera 10 min antes de repetir o mesmo nome, compartilhado entre descoberta e avaliação. É hipótese de recuo; falha nunca renova o histórico salvo. Filtros de seed/float
    continuam nas actions: uma página comum não equivale à consulta filtrada. A seleção aprendida continua sendo
    atualizada a cada 15 min, mesmo durante essa pausa; descoberta de nomes novos e raros filtrados aguardam as actions.
    Comuns também usam o render da principal quando sua próxima vaga vem antes da fila nativa ou quando as
@@ -243,7 +243,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    global, o intervalo do livro/render e as pausas de cada fila continuam valendo. Nessa situação, a agenda
    lê a página diretamente, antes das triagens por livro ou busca que gastariam a mesma fila disponível.
    Com o livro barrado, não há pedidos sugeridos. Com as duas leituras barradas, a caça para.
-   O balde de anúncios e histórico: começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. A leitura do mercado vai logada quando há cookie; um 429 numa leitura logada (anúncios, histórico ou livro) aplica a pausa normal antes de as leituras seguirem sem login por 6 h. Trocar entre logado e anônimo não libera outra cota. O prazo `Retry-After`, quando informado, é respeitado também no primeiro 429 logado. Um 429
+   O balde de anúncios e histórico: começa com 1 consulta a cada 6 s (10/min; com 3 s e 4 s houve 429 por horas, e o robô antigo leu a ~6–12/min sem 429), que também é o piso. Toda leitura é anônima. O prazo `Retry-After`, quando informado, é respeitado. Um 429
    pausa 60 s (dobrando até 30 min: com tentativas a cada 10 min a penalidade de 04/11 não esfriava) e alonga o intervalo 50 %; cada 10 min sem 429 encurta 15 % (de 60 s a 6 s em ~2,5 h), até o piso aprendido: o 1º 429 de uma série sobe o piso para 1,25× o intervalo em uso (até 20 s), e cada 6 h sem 429 desce um degrau até 6 s (a 6 s fixos a Steam bloqueava a cada 1–2 h, e cada série custava até 2 h paradas). O degrau da pausa só volta a 60 s após 60 min sem 429.
    Pausa, intervalo, piso aprendido e a última resposta sem 429 ficam salvos em todas as filas (`steam_pace`)
    e valem depois de reiniciar; o tempo quieto desde o último encurtamento salvo continua encurtando. O valor
@@ -256,9 +256,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    e conferido a cada 30 s. Breaker por endpoint.
    Recusa pública espera pelo menos 30 min (ou `Retry-After` maior). Se as duas filas de leitura da
    principal já foram recusadas, ambas aguardam o maior prazo, evitando tentativas desencontradas na
-   mesma saída; uma fila saudável não herda a recusa da outra. Verificações automáticas da carteira
-   aguardam enquanto ambas estão indisponíveis. A verificação explícita usada pela compra continua
-   disponível no seu próprio grupo de controle.
+   mesma saída; uma fila saudável não herda a recusa da outra.
    Os números ficam no `State` para o painel mostrar. Página antiga validada renova a última leitura boa e
    mantém o painel ativo enquanto sua fila estiver disponível; não apaga a pausa das actions. Tentativa que
    termina sem enviar requisição não aumenta as consultas do aprendizado nem o crédito de descoberta.
@@ -267,7 +265,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    páginas processadas, avaliações, aprovações e recusas. Repetições não aumentam os distintos;
    novo no monitoramento não prova criação recente na Steam.
    Filtros de seed/float em pausa continuam sinalizados mesmo quando o render mantém os comuns ativos.
-   **Saída extra:** um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
+   **Saída extra (desligada desde 09/11):** o executável usa uma saída só, como o robô antigo. O proxy abaixo
+   saiu pelo mesmo IP (PR #88) e às 05h UTC de 08/11 somou 410 leituras às 345 da principal, na hora que abriu um
+   bloqueio de mais de 1 dia. O código continua para os testes. Desenho anterior: um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
    rede fixa autorizada por um celular com Tailscale; redes atuais em `pesquisa-web.md` 13) dá outro IP público,
    sem garantia de cota independente. As sondas de
    `pesquisa-web.md` 11 encontraram actions recusadas e livro/render públicos disponíveis nessa rota. Por isso a

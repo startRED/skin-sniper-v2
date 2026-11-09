@@ -22,15 +22,9 @@ export const app = $state({
   highlight: false, // linhas da melhor combinação em destaque
   expanded: null as string | null,
   history: {} as Record<string, History | 'loading' | 'error'>,
-  armed: null as string | null, // "Comprar" já clicado uma vez
-  frozen: null as string[] | null, // ordem congelada enquanto há compra armada
-  buyError: {} as Record<string, string>,
   settingsOpen: false,
   announce: ''
 });
-
-const ARM_MS = 4000;
-let armTimer: ReturnType<typeof setTimeout> | undefined;
 
 const LOST_KEEP_S = 86400;
 
@@ -42,7 +36,6 @@ export function lostRows(): Opportunity[] {
 }
 
 export function rows(): Opportunity[] {
-  if (app.frozen) return app.frozen.map((id) => app.opps[id]).filter((o) => o && !o.gone_at);
   const { key, dir } = app.sort;
   const val = (o: Opportunity) =>
     key === 'profit' ? o.sell.mid.profit_cents
@@ -64,29 +57,6 @@ export function setSort(key: SortKey) {
 export const isUncertain = (p?: Purchase) => p?.status === 'failed' && /invent[aá]rio/i.test(p.message ?? '');
 
 export const purchaseOf = (id: string) => app.purchases.find((p) => p.id === id);
-
-export function arm(id: string) {
-  disarm();
-  delete app.buyError[id];
-  app.armed = id;
-  app.frozen = rows().map((o) => o.id); // a linha não foge do dedo durante os 4 s
-  armTimer = setTimeout(disarm, ARM_MS);
-}
-
-export function disarm() {
-  clearTimeout(armTimer);
-  app.armed = null;
-  app.frozen = null;
-}
-
-export async function buy(id: string) {
-  disarm();
-  try {
-    upsertPurchase(await api<Purchase>('/api/buy', 'POST', { id }));
-  } catch (e) {
-    app.buyError[id] = e instanceof ApiError ? e.message : 'Não consegui comprar.';
-  }
-}
 
 function upsertPurchase(p: Purchase) {
   const i = app.purchases.findIndex((x) => x.id === p.id);
@@ -115,7 +85,7 @@ export function toggleExpanded(id: string) {
   if (app.expanded === id && !app.history[id]) void loadHistory(id);
 }
 
-export async function setSaldo(cents: number | null) {
+export async function setSaldo(cents: number) {
   app.state = await api<State>('/api/saldo', 'PUT', { cents });
 }
 
@@ -174,7 +144,6 @@ export async function load(): Promise<boolean> {
   app.warnings = [opps, settings, purchases].filter((r) => r.status === 'rejected').map(reason);
   app.state = state.value;
   if (opps.status === 'fulfilled') {
-    disarm(); // a linha armada pode ter sumido e voltado enquanto estava desconectado
     app.opps = Object.fromEntries(opps.value.map((o) => [o.id, o]));
   }
   if (settings.status === 'fulfilled') app.settings = settings.value;
@@ -233,7 +202,6 @@ function connect() {
   on('gone', ({ id, at, reason }: { id: string; at: number; reason: GoneReason }) => {
     const o = app.opps[id];
     if (o) app.opps[id] = { ...o, gone_at: at ?? app.now, gone_reason: reason };
-    if (app.armed === id) disarm();
   });
   on('state', (s: State) => {
     app.state = s;
@@ -252,8 +220,6 @@ export function start() {
   connect();
 }
 
-// Logo depois de ligar: a Steam ainda não respondeu (ou está em pausa) e o saldo vem dela.
-// Falha temporária também deixa ok null, mas com outro texto ("não consegui verificar…").
 // Bloqueio longo da Steam (não a pausa curta de um 429 avulso): em pausa e sem resposta boa há 10 min, ou nenhuma
 // desde que o app subiu (o prazo da pausa não serve: é o da saída que tenta antes, às vezes a extra em 60 s).
 export const steamBlocked = () => {
@@ -267,6 +233,3 @@ export const bookLane = () => {
   const h = app.state?.hunt;
   return steamBlocked() && h?.book_ok_at != null && app.now - h.book_ok_at < 180;
 };
-
-export const readingSaldo = () =>
-  app.state?.saldo_source === 'none' && app.state.keys.steam.ok === null && app.state.keys.steam.detail === 'verificando…';

@@ -35,14 +35,12 @@ pub struct AppState {
     pub pc_name: Option<String>,
     /// Caça e compra ligadas; `None` nos testes de rota, que usam só o banco.
     pub rt: Option<std::sync::Arc<crate::runtime::Runtime>>,
-    pub login: std::sync::Arc<crate::steam::auth::Login>,
 }
 
 impl AppState {
     pub fn new(db: Db, settings: SettingsStore) -> Self {
         AppState {
             db,
-            login: crate::steam::auth::Login::new(settings.clone()),
             settings,
             events: broadcast::channel(256).0,
             pc_name: guard::pc_name(),

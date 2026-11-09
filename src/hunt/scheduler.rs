@@ -530,7 +530,7 @@ impl Queue {
         } else if s.gain_cents > 0 {
             format!(
                 "rendeu {} em {} consultas",
-                crate::steam::buy::brl(s.gain_cents),
+                crate::pricing::brl(s.gain_cents),
                 s.queries
             )
         } else if s.near_hits > 0 {
@@ -606,7 +606,7 @@ pub enum Tick {
 }
 
 /// Um passo do laço: descoberta (se há crédito) ou a próxima consulta de vigilância.
-const NO_SALDO: &str = "sem saldo: informe um valor ou configure o cookie da Steam";
+const NO_SALDO: &str = "sem saldo: informe um valor no painel";
 
 pub async fn tick(h: &Arc<Hunt>) -> Tick {
     detect::roll_cycle(h);

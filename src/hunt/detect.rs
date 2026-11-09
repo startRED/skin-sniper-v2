@@ -6,10 +6,10 @@ use super::catalog::{FLOOR_TTL, HISTORY_TTL, min_profit, wear_label, window_stat
 use super::scheduler::{Found, Task};
 use super::{Active, Hunt, learn};
 use crate::notify::{Alert, NotifyError};
+use crate::pricing::brl;
 use crate::pricing::groups::group_of;
 use crate::pricing::premium::{self, Seal};
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
-use crate::steam::buy::brl;
 use crate::steam::client::Error as SteamError;
 use crate::steam::history;
 use crate::steam::listings::{Listing, ListingsPage};

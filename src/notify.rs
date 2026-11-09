@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::pricing::brl;
 use serde_json::{Value, json};
 
 const BASE: &str = "https://api.telegram.org";
@@ -251,17 +252,6 @@ pub fn escape_html(s: &str) -> String {
         }
     }
     o
-}
-
-/// `1234` → `R$ 12,34`; negativo → `-R$ 1,20`.
-fn brl(cents: i64) -> String {
-    let c = cents.unsigned_abs();
-    format!(
-        "{}R$ {},{:02}",
-        if cents < 0 { "-" } else { "" },
-        c / 100,
-        c % 100
-    )
 }
 
 fn eta(h: Option<f64>) -> String {

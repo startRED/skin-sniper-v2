@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, bookLane, readingSaldo, setSaldo, steamBlocked } from './store.svelte';
+  import { app, bookLane, setSaldo, steamBlocked } from './store.svelte';
   import { ago, centsToInput, clock, money, parseBRL } from './format';
 
   let editing = $state(false);
@@ -9,10 +9,7 @@
 
   const st = $derived(app.state);
   const paused = $derived(st?.hunt.paused_until != null && st.hunt.paused_until > app.now);
-  const sourceLabel = $derived(
-    st?.saldo_source === 'steam' ? 'lido da Steam' : st?.saldo_source === 'manual' ? 'digitado por você'
-    : readingSaldo() ? 'lendo da Steam…' : 'sem saldo'
-  );
+  const sourceLabel = $derived(st?.saldo_source === 'manual' ? 'digitado por você' : 'sem saldo');
 
   function edit() {
     draft = st && st.saldo_source !== 'none' ? centsToInput(st.saldo_cents) : '';
@@ -20,7 +17,7 @@
     editing = true;
   }
 
-  async function save(cents: number | null) {
+  async function save(cents: number) {
     busy = true;
     error = '';
     try {
@@ -36,7 +33,7 @@
   function submit(e: SubmitEvent) {
     e.preventDefault();
     const c = parseBRL(draft);
-    if (c == null) error = 'Digite um valor como 36,08.';
+    if (c == null || !Number.isSafeInteger(c)) error = 'Digite um valor válido, como 36,08.';
     else void save(c);
   }
 
@@ -58,9 +55,6 @@
         <input id="saldo-in" bind:value={draft} inputmode="decimal" autocomplete="off" use:focusOnMount
           onkeydown={(e) => e.key === 'Escape' && (editing = false)} />
         <button class="btn primary" disabled={busy}>Salvar</button>
-        {#if st?.saldo_source === 'manual'}
-          <button type="button" class="btn" disabled={busy} onclick={() => save(null)}>Ler da Steam</button>
-        {/if}
         <button type="button" class="btn" onclick={() => (editing = false)}>Cancelar</button>
       </form>
       {#if error}<span class="err" role="alert">{error}</span>{/if}
@@ -69,7 +63,7 @@
         {st ? (st.saldo_source === 'none' ? 'Informar saldo' : money(st.saldo_cents)) : '—'}
         <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 11.5V14h2.5l7-7L9 4.5l-7 7ZM13.7 4.8a.7.7 0 0 0 0-1l-1.5-1.5a.7.7 0 0 0-1 0l-1.2 1.2L12.5 6l1.2-1.2Z" fill="currentColor"/></svg>
       </button>
-      {#if st}<span class="pill {st.saldo_source === 'steam' ? 'ok' : st.saldo_source === 'manual' ? 'warn' : 'mute'}">{sourceLabel}</span>{/if}
+      {#if st}<span class="pill {st.saldo_source === 'manual' ? 'warn' : 'mute'}">{sourceLabel}</span>{/if}
     {/if}
   </div>
 
@@ -94,7 +88,7 @@
         <span>Caçando <b>{st.hunt.watching}</b> skins · {st.hunt.queries_per_min} consultas totais/min ·
           {st.hunt.last_query_at ? ago(st.hunt.last_query_at, app.now) : 'ainda sem consulta'}</span>
       {/if}
-      {#if app.conn !== 'down' && st?.hunt.message && !(paused && st.hunt.message.includes('429')) && !readingSaldo()}<span class="msg">{st.hunt.message}</span>{/if}
+      {#if app.conn !== 'down' && st?.hunt.message && !(paused && st.hunt.message.includes('429'))}<span class="msg">{st.hunt.message}</span>{/if}
     </div>
   </div>
 
