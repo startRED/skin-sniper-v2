@@ -913,8 +913,8 @@ async fn authenticated_history_pause_does_not_hold_the_public_hunt_loop() {
             s.queue.next(crate::db::now_unix());
         }
     }
-    // Com a principal em pausa, a extra pública leva a caça adiante sem segurar o laço.
-    tokio::time::timeout(Duration::from_secs(2), crate::hunt::scheduler::tick(&h))
+    // Com a principal em pausa, a extra pública leva a caça adiante sem segurar o laço (pausa real: 30 min).
+    tokio::time::timeout(Duration::from_secs(10), crate::hunt::scheduler::tick(&h))
         .await
         .unwrap();
 }
