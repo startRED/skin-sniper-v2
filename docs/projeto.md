@@ -250,8 +250,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    conserva o texto nativo antigo antes do primeiro `;`, seguido dos estados público, extra e de controle.
    Na primeira atualização de um valor antigo, recusas públicas registradas há menos de 30 min recuperam um
    descanso de 30 min desde a última recusa, sem zerar a pausa nativa existente. Novas recusas públicas após
-   o descanso aumentam a pausa para 60 min e depois 2 h; uma recusa de outra consulta já em voo não avança
-   esse degrau novamente. A série pública só recomeça após 4 h sem 429, preservada ao reiniciar, e
+   o descanso aumentam a pausa para 60 min, 2 h, 4 h e depois 6 h; uma recusa de outra consulta já em voo não avança
+   esse degrau novamente. A série pública só recomeça após 12 h sem 429, preservada ao reiniciar, e
    `Retry-After` maior continua valendo. O estado é salvo em todo 429
    e conferido a cada 30 s. Breaker por endpoint.
    Recusa pública espera pelo menos 30 min (ou `Retry-After` maior). Se as duas filas de leitura da

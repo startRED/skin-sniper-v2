@@ -51,7 +51,7 @@ fn repeated_public_refusals_increase_rest_without_advancing_twice_in_flight() {
     let g = &mut *c.inner.lock().unwrap();
     for limiter in [&mut g.side, &mut g.alt_limiter] {
         let mut now = Instant::now();
-        for seconds in [1800, 3600, 7200, 7200] {
+        for seconds in [1800, 3600, 7200, 14400, 21600, 21600] {
             limiter.on_429(now, Some(PAUSE_MAX));
             let until = limiter.pause_end(now).unwrap();
             assert_eq!(until.duration_since(now).as_secs(), seconds);
@@ -63,7 +63,7 @@ fn repeated_public_refusals_increase_rest_without_advancing_twice_in_flight() {
             assert_eq!(limiter.pause_len, next, "outra resposta não zera a série");
             now = until + Duration::from_secs(1);
         }
-        now += Duration::from_secs(4 * 3600);
+        now += Duration::from_secs(12 * 3600);
         limiter.on_429(now, None);
         assert_eq!(limiter.pause_end(now).unwrap() - now, PAUSE_MAX);
         limiter.on_429(

@@ -44,8 +44,9 @@ const PAUSE_START: Duration = Duration::from_secs(60);
 // 30 min: em 04/11 a Steam seguiu dando 429 por horas com uma tentativa a cada 10 min; uma consulta depois de
 // minutos quietos passou. Tentar menos deixa a penalidade esfriar.
 const PAUSE_MAX: Duration = Duration::from_secs(30 * 60);
-// Em 08/11 o render ainda recebeu 429 após 30 min quieto; repetir esse mesmo descanso não recuperou a leitura.
-const PUBLIC_PAUSE_MAX: Duration = Duration::from_secs(2 * 60 * 60);
+// Em 08/11 o render ainda recebeu 429 após 30 min quieto. De 08/11 05h a 09/11 12h, uma tentativa a cada 2 h levou
+// 429 em todas (31 h): a escada segue 30 min → 1 h → 2 h → 4 h → 6 h para tentar menos durante o bloqueio.
+const PUBLIC_PAUSE_MAX: Duration = Duration::from_secs(6 * 60 * 60);
 // Leitura logada levou 429: anúncios e histórico vão sem login por este tempo. Em 04/11 o logado tomou 429
 // por horas enquanto a mesma consulta sem login, do mesmo IP, voltava 200 (a Steam segura a conta).
 /// Espaço mínimo entre duas consultas quaisquer, somando baldes e saídas (nunca rajada).
