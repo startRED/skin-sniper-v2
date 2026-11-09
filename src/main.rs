@@ -153,9 +153,13 @@ async fn main() -> Result<()> {
     let settings = settings::SettingsStore::new(db.clone());
     settings.clear_steam_account().await?;
     let mut app = web::AppState::new(db.clone(), settings.clone());
-    // Uma saída só, como o robô antigo: o proxy extra saiu pelo mesmo IP (PR #88) e às 05h de 08/11 somou
-    // 410 leituras às 345 da principal na hora que abriu o bloqueio longo.
-    let steam = Arc::new(steam::client::SteamClient::new()?);
+    // Saída extra (celular na Starlink) só vale com IP diferente do de casa: em 08/11 as duas saíram pelo mesmo
+    // IP e somaram a carga que abriu o bloqueio longo. Começa desligada até a 1ª conferência.
+    let steam = Arc::new(
+        steam::client::SteamClient::new()?.with_public_alt_proxy(steam::client::ALT_PROXY)?,
+    );
+    steam.set_alt_usable(false);
+    tokio::spawn(steam::client::watch_alt_ip(steam.clone()));
     let csfloat = Arc::new(csfloat::CsfloatClient::new()?);
     let telegram = Arc::new(notify::Telegram::new()?);
     let hunt = hunt::Hunt::new(hunt::HuntDeps {
