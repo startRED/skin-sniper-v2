@@ -206,7 +206,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    - **Agenda que aprende:** cada alvo (skin × desgaste × modo: `barato`, `seed` ou `float`) recebe a leitura
      quando o **valor dela agora**, em centavos, é o maior: taxa de anúncio novo do alvo × anúncios acumulados desde
      a última leitura × retorno por anúncio novo (fórmula, ajuste e medidas no item 6 do Aprendizado). Sinal =
-     anúncio **novo** que cabe no saldo; reavaliar o mesmo anúncio não conta de novo. Alvo nunca lido vai na
+     anúncio **novo** que cabe no saldo (na leitura só pelo livro, a queda do menor anúncio); reavaliar o mesmo
+     anúncio não conta de novo. Alvo nunca lido vai na
      frente; empate vai para o lido há mais tempo. Regras que não mudam: 12,5 % das consultas vão sempre ao alvo
      menos testado, com o slot girando entre os modos (cada modo tem piso próprio, qualquer que seja o número de
      alvos). O saldo e a taxa continuam decidindo quem entra (regras acima); a nota-base do catálogo só desempata
@@ -292,8 +293,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Busca em pausa por 429 ou suspensa por falhas é dispensada: o alvo segue pelo livro e pelos anúncios disponíveis,
    mesmo sem a saída do celular. O primeiro 429 da busca também faz essa troca no mesmo passo, respeitando as pausas de cada consulta.
    Alvo comum sem outra versão para a busca cobrir e com teto lê antes o livro de ofertas (menor anúncio em R$, no
-   outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e o menor anúncio novo
-   ensina a agenda como um anúncio que não passou. O teto desses dois filtros não conta o menor anúncio do livro como
+   outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
+   (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
+   de ligar não tem com o que comparar. O teto desses dois filtros não conta o menor anúncio do livro como
    concorrente: ele é o próprio candidato, e derrubaria o teto abaixo de si mesmo. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
 
