@@ -132,6 +132,8 @@ Professor, fantasmas e `teacher::refit`; exploração externa e o ensaio (`trial
 
 ## Decisões minhas (não do Erick)
 
-Sinal = anúncio novo dentro do saldo; forma do valor; padrões e hipóteses acima; teto por seca; zerar `r` e
+Sinal = anúncio novo dentro do saldo (na leitura só pelo livro de ofertas, a queda do menor anúncio: a subida é
+venda ou retirada e o primeiro livro depois de ligar não compara — corrigido depois da 1ª hora em produção, quando
+39 de 44 leituras eram só livro e toda mudança contava); forma do valor; padrões e hipóteses acima; teto por seca; zerar `r` e
 exposição na migração em vez de reconstituir as leituras antigas (a atribuição histórica é por horário,
 imprecisa); descartar o teste binomial.

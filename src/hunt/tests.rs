@@ -1741,6 +1741,34 @@ async fn book_skips_listings_when_the_lowest_ask_is_above_the_ceiling() {
 }
 
 #[tokio::test]
+async fn only_a_lower_lowest_ask_counts_as_a_new_listing_on_the_book() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    let task = lone_moonrise(&h, &mut rx).await;
+    let l0 = bodies.listing_queries.load(Ordering::Relaxed);
+    {
+        let mut s = h.lock();
+        s.books.clear();
+        s.queue.take_reads();
+    }
+    // Acima do teto e dentro do saldo: o 1º livro não compara, a subida é venda, a queda é anúncio novo e o
+    // mesmo preço de novo não conta.
+    let mut fresh = Vec::new();
+    for ask in [3500, 3600, 3400, 3400] {
+        set_lowest_ask(&bodies, ask);
+        scheduler::run_task(&h, &task).await.unwrap();
+        fresh.extend(h.lock().queue.take_reads().into_iter().map(|r| r.2));
+    }
+    assert_eq!(fresh, [0, 0, 1, 0]);
+    assert_eq!(
+        bodies.listing_queries.load(Ordering::Relaxed),
+        l0,
+        "só o livro"
+    );
+}
+
+#[tokio::test]
 async fn blocked_native_listings_prioritize_public_ads_over_book_prefilters() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();

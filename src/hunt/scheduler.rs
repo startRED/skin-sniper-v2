@@ -992,7 +992,7 @@ async fn book_then_listings(
                     // o livro lido também serve aos pedidos sugeridos (`orders`), ao teto (concorrente) e ao registro
                     let before = super::orders::remember_book(h, &task.name, now, Some(b), false)
                         .await
-                        .and_then(|b| b.min_sell_cents);
+                        .map(|b| b.min_sell_cents);
                     let mut s = h.lock();
                     match lowest {
                         None => {
@@ -1001,8 +1001,10 @@ async fn book_then_listings(
                             return Ok(());
                         }
                         Some(p) if !affordable(p, max) => {
-                            // menor anúncio mudou e cabe no saldo: conta como um anúncio novo visto pelo livro
-                            let fresh = u32::from(before != Some(p) && p <= s.saldo);
+                            // Só a queda do menor anúncio é anúncio novo: a subida é venda ou retirada, e o
+                            // primeiro livro depois de ligar não tem com o que comparar.
+                            let lower = before.is_some_and(|b| b.is_none_or(|b| p < b));
+                            let fresh = u32::from(lower && p <= s.saldo);
                             s.cycle.saved_listings += 1;
                             s.queue.reward(
                                 &task.id,
