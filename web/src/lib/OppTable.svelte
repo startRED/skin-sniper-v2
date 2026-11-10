@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, loadHistory, lostRows, marginOf, purchaseOf, rows, setSort, setTier, toggleExpanded, type SortKey } from './store.svelte';
+  import { app, loadHistory, lostRows, marginOf, purchaseOf, rows, setSort, setTier, toggleExpanded, unchecked, type SortKey } from './store.svelte';
   import { ago, eta, floatTxt, money, pct, signed } from './format';
   import Chart from './Chart.svelte';
   import type { GoneReason, Opportunity } from './types';
@@ -94,8 +94,8 @@
   {#each list as o (o.id)}
     {@const open = app.expanded === o.id}
     {@const checked = o.checked_at ?? o.seen_at}
-    {@const stale = app.now - checked >= 180}
-    <div class="item" class:fresh={app.fresh[o.id]} class:combo={inCombo.has(o.id)} class:open class:gone={lost}>
+    {@const stale = !lost && unchecked(o, app.now)}
+    <div class="item" class:fresh={app.fresh[o.id]} class:combo={inCombo.has(o.id)} class:open class:gone={lost || stale}>
       <!-- A linha inteira abre os detalhes; pelo teclado, o botão da skin faz o mesmo. -->
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_interactive_supports_focus -->
       <div class="row grid" role="row" onclick={(e) => { if (!(e.target as Element).closest('a, button')) toggleExpanded(o.id); }}>
@@ -143,9 +143,13 @@
         {:else}
           <div class="c seen" role="cell" data-l="Apareceu">
             <span>{ago(o.seen_at, app.now)}</span>
-            <small class={stale ? 'stale' : 'muted'} title="Quando a Steam devolveu este anúncio pela última vez">{stale ? 'sem conferir' : 'conferido'} {ago(checked, app.now)}</small>
+            {#if stale}
+              <span class="pill warn" title="O app não conseguiu olhar este anúncio na Steam desde então. Ele pode já ter sido vendido ou retirado.">Sem conferir {ago(checked, app.now)}</span>
+            {:else}
+              <small class="muted" title="Quando a Steam devolveu este anúncio pela última vez">conferido {ago(checked, app.now)}</small>
+            {/if}
           </div>
-          <div class="c act" role="cell"><a class="btn primary" href={o.steam_url} target="_blank" rel="noopener noreferrer" aria-label="Abrir {o.name} na Steam">Abrir na Steam</a></div>
+          <div class="c act" role="cell"><a class="btn" class:primary={!stale} href={o.steam_url} target="_blank" rel="noopener noreferrer" aria-label="Abrir {o.name} na Steam">Abrir na Steam</a></div>
         {/if}
       </div>
 
@@ -229,7 +233,6 @@
   .c b { font-weight: 650; }
   .c small { font-size: 12px; white-space: nowrap; }
   .c::before { content: attr(data-l); display: none; }
-  .stale { color: var(--amber); }
 
   .skinbtn { display: flex; align-items: center; gap: 10px; width: 100%; background: none; border: 0; padding: 0; text-align: left; min-width: 0; }
   .skinbtn img { width: 44px; height: 44px; border-radius: 6px; background: var(--panel-2); flex: none; object-fit: contain; }

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { app, bookLane, load, lostRows, start, steamBlocked } from './lib/store.svelte';
+  import { app, bookLane, load, lostRows, start, steamBlocked, unchecked } from './lib/store.svelte';
   import { ago, clock } from './lib/format';
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
@@ -23,7 +23,9 @@
     return () => removeEventListener('hashchange', sync);
   });
 
-  const count = $derived(Object.values(app.opps).filter((o) => !o.gone_at).length);
+  const open = $derived(Object.values(app.opps).filter((o) => !o.gone_at));
+  // O número da aba e do título só conta achado conferido dentro do prazo.
+  const count = $derived(open.filter((o) => !unchecked(o, app.now)).length);
   const lostCount = $derived(lostRows().length);
   const noSaldo = $derived(app.state?.saldo_source === 'none');
   const blocked = $derived(steamBlocked());
@@ -76,7 +78,7 @@
     <section aria-labelledby="h-opp">
       <h2 id="h-opp" class="sr-only">Oportunidades</h2>
       <ComboBar />
-      {#if count === 0}
+      {#if open.length === 0}
         <div class="empty" role="status">
           {#if noSaldo}
             <h3>Informe seu saldo</h3>

@@ -409,6 +409,7 @@ struct Bodies {
     history: Value,
     history_queries: AtomicUsize,
     history_400: AtomicBool,
+    history_429: AtomicBool,
     history_wait: Mutex<Option<Arc<Notify>>>,
     history_started: Notify,
     search: Mutex<Value>,
@@ -432,6 +433,7 @@ async fn serve() -> (String, Arc<Bodies>) {
         history: history_body(),
         history_queries: AtomicUsize::new(0),
         history_400: AtomicBool::new(false),
+        history_429: AtomicBool::new(false),
         history_wait: Mutex::new(None),
         history_started: Notify::new(),
         search: Mutex::new(search_body()),
@@ -499,7 +501,9 @@ async fn serve() -> (String, Arc<Bodies>) {
                     b.history_started.notify_one();
                     wait.notified().await;
                 }
-                if b.history_400.load(Ordering::Relaxed) {
+                if b.history_429.load(Ordering::Relaxed) {
+                    axum::http::StatusCode::TOO_MANY_REQUESTS.into_response()
+                } else if b.history_400.load(Ordering::Relaxed) {
                     axum::http::StatusCode::BAD_REQUEST.into_response()
                 } else {
                     Json(b.history.clone()).into_response()
@@ -822,6 +826,26 @@ async fn watched_history_renews_through_legacy_during_native_pause() {
     assert!(
         !h.lock().queue.may_discover(),
         "histórico enviado com erro também gasta o crédito"
+    );
+}
+
+#[tokio::test]
+async fn steam_blocking_history_keeps_the_stored_one_usable_for_a_day() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    assert!(!points_for(&h, MOON, NOW).await.unwrap().is_empty());
+    bodies.history_429.store(true, Ordering::Relaxed);
+    assert!(
+        !points_for(&h, MOON, NOW + 6 * 3600)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(points_for(&h, MOON, NOW + 86_400).await.is_err());
+    assert!(
+        points_for(&h, ST_MOON, NOW + 6 * 3600).await.is_err(),
+        "sem histórico guardado não há o que avaliar"
     );
 }
 
