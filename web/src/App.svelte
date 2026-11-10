@@ -10,42 +10,57 @@
   import Learning from './lib/Learning.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
 
-  onMount(start);
+  // Uma seção por vez; o endereço (#radar) guarda a escolha e o botão de voltar funciona.
+  const TABS = ['oportunidades', 'radar', 'compras', 'aprendizado'] as const;
+  type Tab = (typeof TABS)[number];
+  const fromHash = (): Tab => TABS.find((t) => t === location.hash.slice(1)) ?? 'oportunidades';
+  let hash = $state<Tab>(fromHash());
+
+  onMount(() => {
+    start();
+    const sync = () => { hash = fromHash(); scrollTo(0, 0); };
+    addEventListener('hashchange', sync);
+    return () => removeEventListener('hashchange', sync);
+  });
 
   const count = $derived(Object.values(app.opps).filter((o) => !o.gone_at).length);
   const lostCount = $derived(lostRows().length);
   const noSaldo = $derived(app.state?.saldo_source === 'none');
   const blocked = $derived(steamBlocked());
   const byBook = $derived(bookLane());
+  // Sem conta Steam não entra compra nova: a aba só existe para quem tem compra antiga.
+  const hasPurchases = $derived(app.purchases.length > 0);
+  const tab = $derived<Tab>(hash === 'compras' && !hasPurchases ? 'oportunidades' : hash);
+  // A contagem aparece na aba do navegador: dá para ver sem voltar ao painel.
+  $effect(() => { document.title = (count ? `(${count}) ` : '') + 'Skin Sniper'; });
+  const tabs = $derived([
+    { id: 'oportunidades', label: 'Oportunidades', count },
+    { id: 'radar', label: 'Radar', count: 0 },
+    ...(hasPurchases ? [{ id: 'compras', label: 'Compras', count: 0 }] : []),
+    { id: 'aprendizado', label: 'Aprendizado', count: 0 }
+  ]);
 </script>
 
-<TopBar />
+<TopBar {tabs} current={tab} />
 
 {#if app.conn === 'down'}
-  <div class="banner" role="status">
-    Sem conexão com o Skin Sniper. Estamos tentando de novo — enquanto isso a lista abaixo pode estar desatualizada.
-  </div>
+  <div class="banner bad" role="status">Sem conexão com o Skin Sniper. Tentando de novo; a lista pode estar desatualizada.</div>
 {/if}
 
-{#if byBook && app.state}
-  <div class="warn block" role="status">
-    <p><b>A leitura de anúncios está em pausa{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}; o app ainda pode consultar preços.</b>
-      Enquanto o livro de ofertas responder, o app acompanha o menor preço de cada skin barata.
-      Abrir o anúncio e avisar você ainda depende da leitura de anúncios.</p>
-    <p>O app tenta de novo sozinho (próxima tentativa às {clock(app.state.hunt.paused_until!)}). As skins raras esperam,
-      porque só os anúncios mostram o padrão.{#if noSaldo} Digite seu saldo lá em cima.{/if}</p>
-  </div>
-{:else if blocked && app.state}
-  <div class="warn block" role="status">
-    <p><b>A caça está em pausa{app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}: a Steam recusou as consultas (429).</b>
-      O app respeita um descanso antes de tentar de novo. Reiniciar não encurta esse prazo.</p>
-    <p>O app tenta de novo sozinho (próxima tentativa às {clock(app.state.hunt.paused_until!)}) e volta a caçar assim que a Steam
-      liberar. Nada se perde.{#if noSaldo} Digite seu saldo lá em cima.{/if}</p>
+{#if blocked && app.state}
+  {@const since = app.state.hunt.last_ok_at ? ' ' + ago(app.state.hunt.last_ok_at, app.now) : ''}
+  <div class="banner" role="status">
+    {#if byBook}
+      <b>Leitura de anúncios em pausa{since}.</b> Os preços seguem atualizando; raras e avisos esperam os anúncios.
+    {:else}
+      <b>A Steam recusou as consultas (429): caça em pausa{since}.</b> Reiniciar não encurta o descanso.
+    {/if}
+    Nova tentativa às {clock(app.state.hunt.paused_until!)}.
   </div>
 {/if}
 
 {#if app.warnings.length}
-  <div class="warn" role="status">{#each app.warnings as w}<p>{w}</p>{/each}</div>
+  <div class="banner" role="status">{#each app.warnings as w}<p>{w}</p>{/each}</div>
 {/if}
 
 <main>
@@ -56,41 +71,37 @@
       <button class="btn primary" onclick={load}>Tentar de novo</button>
     </div>
   {:else if !app.loaded}
-    <div class="empty" role="status"><p>Carregando as oportunidades…</p></div>
-  {:else}
-    <p class="muted">Consultas públicas, sem login. Digite seu saldo e abra a Steam para comprar.</p>
-    <ComboBar />
-
+    <div class="empty" role="status"><p>Carregando…</p></div>
+  {:else if tab === 'oportunidades'}
     <section aria-labelledby="h-opp">
-      <div class="title">
-        <h2 id="h-opp">Oportunidades</h2>
-        <p class="muted">
-          {#if count > 0}{count} {count === 1 ? 'skin dá' : 'skins dão'} lucro depois das taxas e {count === 1 ? 'cabe' : 'cabem'} no seu saldo.
-            <b class="up">Seguro</b> = ainda dá lucro vendendo pelo preço rápido.{/if}
-        </p>
-      </div>
-
+      <h2 id="h-opp" class="sr-only">Oportunidades</h2>
+      <ComboBar />
       {#if count === 0}
-        <div class="empty compact" role="status">
+        <div class="empty" role="status">
           {#if noSaldo}
-            <h3>Falta o seu saldo</h3>
-            <p>Digite quanto você tem para gastar lá em cima, em “Saldo”. Assim eu sei quais skins cabem.</p>
+            <h3>Informe seu saldo</h3>
+            <p>Sem ele não dá para saber quais skins cabem.</p>
+            <button class="btn primary" onclick={() => (app.saldoEdit = true)}>Informar saldo</button>
           {:else}
-            <h3>Nenhuma skin com lucro agora.</h3>
+            <h3>Nenhuma skin com lucro agora</h3>
+            <p>O radar mostra quanto falta para cada uma compensar.</p>
+            <a class="btn" href="#radar">Ver o radar</a>
           {/if}
         </div>
       {:else}
         <OppTable />
       {/if}
+      <Watch bids />
       {#if lostCount > 0}
-        <h3 class="lost">Perdidas nas últimas 24 h <span class="muted">· {lostCount} · ficam por 24 h após sair; o motivo aparece em cada skin</span></h3>
+        <h3 class="lost">Perdidas nas últimas 24 h <span class="muted">{lostCount}</span></h3>
         <OppTable lost />
       {/if}
-      <Watch collapsed={count > 0} />
     </section>
-
+  {:else if tab === 'radar'}
+    <Watch />
+  {:else if tab === 'compras'}
     <Purchases />
-
+  {:else}
     <Learning />
   {/if}
 </main>
@@ -99,24 +110,19 @@
 <div class="sr-only" aria-live="polite" role="status">{app.announce}</div>
 
 <style>
-  main { padding: 16px 24px 80px; max-width: 1760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
-  .banner { background: var(--red-bg); color: var(--red); padding: 8px 24px; border-bottom: 1px solid var(--red); }
-  .warn { background: var(--amber-bg); color: var(--amber); padding: 8px 24px; border-bottom: 1px solid var(--amber); }
-  .block { display: flex; flex-direction: column; gap: 4px; padding-block: 10px; }
-  .block p { max-width: 110ch; }
-  .block b { color: var(--ink); }
-  .title { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
-  h2 { font-size: 15px; }
-  .lost { font-size: 14px; margin: 20px 0 8px; }
-  .lost .muted { font-weight: 400; font-size: 13px; }
-  .empty { background: var(--panel); border-radius: var(--radius); padding: 40px 24px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
-  .empty p, .empty h3, .empty h2 { max-width: 62ch; }
-  .empty h3, .empty h2 { font-size: 17px; }
-  .empty p { color: var(--muted); }
-  .empty.compact { padding: 12px 16px; gap: 6px; }
-  .empty.compact h3 { font-size: 14px; }
+  main { padding: 16px 24px 80px; max-width: 1440px; margin: 0 auto; }
+  section { display: flex; flex-direction: column; gap: 12px; }
+  .banner { background: var(--amber-bg); color: var(--amber); padding: 8px var(--gutter); border-bottom: 1px solid var(--amber); }
+  .banner.bad { background: var(--red-bg); color: var(--red); border-color: var(--red); }
+  .banner b { color: var(--ink); }
+  .lost { font-size: 14px; margin-top: 20px; }
+  .lost .muted { font-weight: 400; margin-left: 4px; }
+  .empty { background: var(--panel); border-radius: var(--radius); padding: 32px 24px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .empty h2, .empty h3 { font-size: 16px; }
+  .empty p { color: var(--muted); max-width: 62ch; }
+  .empty .btn { margin-top: 6px; }
   @media (max-width: 899px) {
     main { padding: 12px 12px 60px; }
-    .banner, .warn { padding: 8px 14px; }
+    .banner { padding: 8px 14px; }
   }
 </style>

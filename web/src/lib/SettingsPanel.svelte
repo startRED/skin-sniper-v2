@@ -59,7 +59,6 @@
     {:else}
       <section>
         <h3>Chaves</h3>
-        <p class="hint">Consultas públicas, sem login. O saldo é digitado por você.</p>
         <SecretField label="Chave do CSFloat" masked={s.csfloat_key} status={keys?.csfloat ?? null}
           hint="Ajuda a avaliar skins raras com vendas de verdade."
           onsave={(v) => save({ csfloat_key: v })} onclear={() => save({ csfloat_key: null })} />
@@ -72,7 +71,7 @@
 
       <section>
         <h3>Endereço do painel</h3>
-        <p class="hint">Use o endereço que abre no celular para receber links do painel no Telegram. Exemplo: http://192.168.0.10:8788.</p>
+        <p class="hint">O endereço que abre no celular, para os links do Telegram. Ex.: http://192.168.0.10:8788.</p>
         <form class="inline" onsubmit={(e) => { e.preventDefault(); void patch({ panel_url: panelDraft.trim() || null }, 'Endereço salvo.'); }}>
           <label class="sr-only" for="panel-url">Endereço do painel</label>
           <input id="panel-url" bind:value={panelDraft} placeholder="http://…" autocomplete="off" />
@@ -86,7 +85,6 @@
           <input type="checkbox" checked={s.sound} onchange={(e) => patch({ sound: e.currentTarget.checked }, e.currentTarget.checked ? 'Som ligado.' : 'Som desligado.')} />
           <span>Tocar som nas oportunidades</span>
         </label>
-        <p class="hint">Avisos só para oportunidades seguras com lucro a partir do valor abaixo.</p>
         <form class="inline" onsubmit={(e) => { e.preventDefault(); saveMin(); }}>
           <label for="min">Lucro mínimo para avisar</label>
           <span class="rs">R$</span>

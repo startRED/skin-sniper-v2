@@ -32,17 +32,17 @@
   }
 
   const STATUS: Record<Purchase['status'], [string, string]> = {
-    pending: ['warn', 'Resultado pendente: confira na Steam'],
-    need_confirmation: ['warn', 'Confirme a situação na Steam'],
+    pending: ['warn', 'Pendente: confira na Steam'],
+    need_confirmation: ['warn', 'Confira na Steam'],
     bought: ['ok', 'Comprada'],
     failed: ['bad', 'Não comprou']
   };
 </script>
 
 <section aria-labelledby="h-compras">
-  <h2 id="h-compras">Compras</h2>
+  <h2 id="h-compras" class="sr-only">Compras</h2>
   {#if app.purchases.length === 0}
-    <p class="empty">Nenhuma compra antiga registrada. Compras feitas diretamente na Steam não aparecem aqui automaticamente.</p>
+    <p class="empty">Nenhuma compra registrada. Compras feitas direto na Steam não aparecem aqui.</p>
   {:else}
     <ul>
       {#each app.purchases as p (p.id)}
@@ -80,7 +80,7 @@
                 <input id={'sold-' + p.id} inputmode="decimal" placeholder="0,00" bind:value={amounts[p.id]} />
                 <button type="submit" disabled={saving[p.id]}>{saving[p.id] ? 'Salvando…' : 'Salvar venda'}</button>
               </form>
-              <span class="small muted">Informe o preço que o comprador pagou, com as taxas.</span>
+              <span class="small muted">O preço que o comprador pagou, com as taxas.</span>
               {#if errors[p.id]}<span class="small" role="alert">{errors[p.id]}</span>{/if}
             </div>
           {/if}
@@ -91,8 +91,6 @@
 </section>
 
 <style>
-  section { margin-top: 36px; }
-  h2 { font-size: 15px; margin-bottom: 10px; }
   ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   li {
     display: grid; grid-template-columns: 40px minmax(180px, 1.4fr) minmax(220px, 1.4fr) auto; gap: 16px; align-items: center;
@@ -108,9 +106,13 @@
   .sold { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 4px; }
   .sold form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .sold input { width: 100px; }
-  dt { color: var(--faint); font-size: 12px; }
+  dt { color: var(--muted); font-size: 12px; }
+  .sold label { color: var(--muted); }
+  .sold input { min-height: 36px; padding: 0 10px; border-radius: var(--radius); background: var(--bg); border: 1px solid var(--line); }
+  .sold button { min-height: 36px; padding: 0 14px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel-2); }
+  .sold [role=alert] { color: var(--red); }
   dd { margin: 0; font-weight: 650; }
-  .empty { color: var(--muted); padding: 18px 16px; background: var(--panel); border-radius: var(--radius); max-width: 70ch; }
+  .empty { color: var(--muted); padding: 24px 0; }
   @media (max-width: 899px) {
     li { grid-template-columns: 40px 1fr; row-gap: 8px; }
     .st, .sell, .sold { grid-column: 1 / -1; }

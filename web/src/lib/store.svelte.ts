@@ -4,6 +4,8 @@ import { beep, unlockAudio } from './sound';
 import type { GoneReason, History, Opportunity, Purchase, Settings, SettingsInput, State, WatchRow } from './types';
 
 export type SortKey = 'profit' | 'margin' | 'safe' | 'eta' | 'new';
+export type TierKey = 'quick' | 'mid' | 'high';
+const savedTier = localStorage.getItem('tier');
 const DEFAULT_DIR: Record<SortKey, 'asc' | 'desc'> = { profit: 'desc', margin: 'desc', safe: 'desc', eta: 'asc', new: 'desc' };
 
 export const app = $state({
@@ -23,6 +25,8 @@ export const app = $state({
   expanded: null as string | null,
   history: {} as Record<string, History | 'loading' | 'error'>,
   settingsOpen: false,
+  tier: (savedTier === 'quick' || savedTier === 'high' ? savedTier : 'mid') as TierKey, // cenário de venda que a tabela mostra
+  saldoEdit: false, // campo do saldo aberto (a tela vazia também abre)
   announce: ''
 });
 
@@ -38,13 +42,22 @@ export function lostRows(): Opportunity[] {
 export function rows(): Opportunity[] {
   const { key, dir } = app.sort;
   const val = (o: Opportunity) =>
-    key === 'profit' ? o.sell.mid.profit_cents
-    : key === 'margin' ? o.margin_pct
+    key === 'profit' ? o.sell[app.tier].profit_cents
+    : key === 'margin' ? marginOf(o)
     : key === 'safe' ? o.sell.quick.profit_cents
-    : key === 'eta' ? (o.sell.mid.eta_hours ?? Infinity)
+    : key === 'eta' ? (o.sell[app.tier].eta_hours ?? Infinity)
     : o.seen_at;
   const sign = dir === 'asc' ? 1 : -1;
   return Object.values(app.opps).filter((o) => !o.gone_at).sort((a, b) => sign * (val(a) - val(b)) || b.seen_at - a.seen_at);
+}
+
+// Margem no cenário escolhido; no médio vale a do servidor.
+export const marginOf = (o: Opportunity) =>
+  app.tier === 'mid' ? o.margin_pct : (o.sell[app.tier].profit_cents / Math.max(1, o.price_cents)) * 100;
+
+export function setTier(t: TierKey) {
+  app.tier = t;
+  localStorage.setItem('tier', t);
 }
 
 export function setSort(key: SortKey) {
