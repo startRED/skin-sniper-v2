@@ -306,7 +306,11 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    histórico vencido (6 h) ficava "adiado" enquanto o bloqueio durasse. Nome sem histórico guardado continua sem
    avaliação. 24 h é hipótese. No painel, achado que passou do prazo de conferência (o de `recheck_secs`, mais
    2 min) aparece apagado, com "Sem conferir há …", e não conta no número da aba: em 10/11 um achado de seed raro
-   ficou 3 h na lista de abertos sem que o app pudesse olhá-lo. O teto desses dois filtros não conta o menor anúncio do livro como
+   ficou 3 h na lista de abertos sem que o app pudesse olhá-lo. **Conferência pelo livro (10/11):**
+   com os anúncios barrados, o achado de alvo raro é conferido pelo livro de ofertas: `rgCompactSellOrders` lista
+   todos os preços à venda (a soma das quantidades fecha com `cSellOrders`; visto em 2 respostas, de 92 e de 1 539
+   anúncios), então preço sem degrau a 1 % é anúncio que saiu. Degrau presente não prova nada. A página do anúncio
+   (`?detail=`) respondeu 429 sem login no mesmo bloqueio. O teto desses dois filtros não conta o menor anúncio do livro como
    concorrente: ele é o próprio candidato, e derrubaria o teto abaixo de si mesmo. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
 

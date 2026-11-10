@@ -45,6 +45,35 @@ pub async fn fetch_book(c: &SteamClient, market_hash_name: &str) -> Result<Book>
     parse_book(&data)
 }
 
+/// Preços de todos os degraus de venda, só quando a escada cobre todos os anúncios: é o que deixa provar, sem
+/// ler anúncios, que um anúncio de certo preço saiu.
+pub async fn fetch_all_asks(c: &SteamClient, market_hash_name: &str) -> Result<Option<Vec<i64>>> {
+    let data = c
+        .action_at(
+            Endpoint::Book,
+            "/market/orderbook",
+            "Load",
+            &json!([730, market_hash_name]),
+        )
+        .await?;
+    parse_book(&data)?; // sucesso e moeda
+    Ok(all_asks(&data))
+}
+
+/// `None` se a soma das quantidades não fecha com `cSellOrders` (escada cortada ou malformada).
+fn all_asks(data: &Value) -> Option<Vec<i64>> {
+    let d = &data["data"];
+    let (pairs, rest) = d.get("rgCompactSellOrders")?.as_array()?.as_chunks::<2>();
+    let mut total = 0;
+    let mut prices = Vec::with_capacity(pairs.len());
+    for [p, q] in pairs {
+        prices.push(p.as_i64()?);
+        total += q.as_i64()?;
+    }
+    (rest.is_empty() && Some(total) == d.get("cSellOrders").and_then(Value::as_i64))
+        .then_some(prices)
+}
+
 /// `data` = `{"success":true,"data":{"amtMaxBuyOrder":158,"eCurrency":7,"cBuyOrders":12556,…}}`, valores em centavos.
 pub fn parse_book(data: &Value) -> Result<Book> {
     if data.get("success").and_then(Value::as_bool) != Some(true) {
@@ -105,6 +134,20 @@ pub fn parse_book(data: &Value) -> Result<Book> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_ladder_gives_every_ask_price_and_a_cut_ladder_proves_nothing() {
+        let s = std::fs::read_to_string(format!(
+            "{}/testdata/steam_orderbook_negev_2026-11.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut v: Value = serde_json::from_str(&s).unwrap();
+        let asks = all_asks(&v["data"]).unwrap();
+        assert_eq!((asks.len(), asks[0]), (59, 167));
+        v["data"]["data"]["cSellOrders"] = json!(93);
+        assert_eq!(all_asks(&v["data"]), None);
+    }
 
     #[test]
     fn live_capture_top_of_book() {

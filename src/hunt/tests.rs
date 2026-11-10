@@ -150,7 +150,7 @@ async fn recheck_targets_the_active_seed_even_after_another_range_was_read() {
                 attempted_at: 0,
             },
         );
-        let overdue = scheduler::overdue_task(&s, NOW, false).unwrap();
+        let overdue = scheduler::overdue_task(&s, NOW).unwrap();
         assert_eq!(overdue.seeds, vec![(706, 706)]);
         assert_eq!(s.queue.focus(overdue).seeds, vec![(706, 706)]);
         assert_eq!(
@@ -158,7 +158,6 @@ async fn recheck_targets_the_active_seed_even_after_another_range_was_read() {
             vec![(58, 59)],
             "acompanhar não pula uma faixa da caça"
         );
-        assert!(scheduler::overdue_task(&s, NOW, true).is_none());
         // Uma tentativa que não reencontrou o anúncio não pode bloquear outra seed atrasada.
         let original = s.active.values().next().unwrap().opp.clone();
         let mut other = original.clone();
@@ -175,23 +174,23 @@ async fn recheck_targets_the_active_seed_even_after_another_range_was_read() {
         );
         s.active.get_mut(&original.id).unwrap().attempted_at = NOW;
         assert_eq!(
-            scheduler::overdue_task(&s, NOW, false).unwrap().seeds,
+            scheduler::overdue_task(&s, NOW).unwrap().seeds,
             vec![(58, 59)]
         );
         s.active.remove("other-seed");
-        assert!(scheduler::overdue_task(&s, NOW, false).is_none());
+        assert!(scheduler::overdue_task(&s, NOW).is_none());
         s.active.values_mut().next().unwrap().opp.checked_at = Some(NOW);
-        assert!(scheduler::overdue_task(&s, NOW, false).is_none());
+        assert!(scheduler::overdue_task(&s, NOW).is_none());
         let a = s.active.values_mut().next().unwrap();
         a.opp.checked_at = Some(NOW - 61);
         a.attempted_at = 0;
-        scheduler::overdue_task(&s, NOW, false).unwrap()
+        scheduler::overdue_task(&s, NOW).unwrap()
     };
     assert!(scheduler::run_task(&h, &retry).await.is_err());
     let s = h.lock();
     assert_eq!(s.active.values().next().unwrap().attempted_at, NOW);
     assert!(
-        scheduler::overdue_task(&s, NOW, false).is_none(),
+        scheduler::overdue_task(&s, NOW).is_none(),
         "falha também espera antes de tentar outra vez"
     );
 }
@@ -846,6 +845,63 @@ async fn steam_blocking_history_keeps_the_stored_one_usable_for_a_day() {
     assert!(
         points_for(&h, ST_MOON, NOW + 6 * 3600).await.is_err(),
         "sem histórico guardado não há o que avaliar"
+    );
+}
+
+#[tokio::test]
+async fn with_listings_blocked_the_book_ladder_proves_a_rare_find_left() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    let mut opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    opp.price_cents = 167; // degrau que existe no livro de teste
+    opp.checked_at = Some(NOW - 61);
+    let task = Task {
+        id: "r:moon".into(),
+        name: MOON.into(),
+        code: "G180420B6053004".into(),
+        wear: None,
+        seeds: crate::pricing::groups::seed_ranges(MOON),
+        float: None,
+        score: 1.0,
+    };
+    {
+        let mut s = h.lock();
+        s.queue.set_tasks(vec![task.clone()]);
+        s.active.insert(
+            opp.id.clone(),
+            Active {
+                opp,
+                task: task.id.clone(),
+                attempted_at: 0,
+            },
+        );
+    }
+    bodies.listings_429.store(true, Ordering::Relaxed);
+    assert!(scheduler::run_task(&h, &task).await.is_err());
+    assert!(h.steam.blocked(crate::steam::client::Endpoint::Listings));
+    let due = {
+        let mut s = h.lock();
+        s.active.values_mut().next().unwrap().attempted_at = 0;
+        scheduler::overdue_task(&s, NOW).expect("barrado também confere, pelo livro")
+    };
+    scheduler::run_task(&h, &due).await.unwrap();
+    {
+        let mut s = h.lock();
+        let a = s.active.values_mut().next().unwrap();
+        assert_eq!(
+            a.attempted_at, NOW,
+            "degrau no preço pode ser outro anúncio: o achado fica"
+        );
+        a.opp.price_cents = 150;
+    }
+    scheduler::run_task(&h, &due).await.unwrap();
+    assert!(
+        h.lock().active.is_empty(),
+        "sem degrau perto do preço, o anúncio saiu"
     );
 }
 
