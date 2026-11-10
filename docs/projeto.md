@@ -295,7 +295,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Alvo comum sem outra versão para a busca cobrir e com teto lê antes o livro de ofertas (menor anúncio em R$, no
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
    (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
-   de ligar não tem com o que comparar. O teto desses dois filtros não conta o menor anúncio do livro como
+   de ligar não tem com o que comparar. **Descanso da leitura de anúncios (10/11):** alvo raro ou de float só é
+   escolhido 24 s depois da última leitura de anúncios (≤ 150/h); a vaga do meio vai a um alvo barato, pelo livro.
+   Em 10/11, ~200 leituras de anúncios/h por 3 h terminaram em 429 desse balde por horas, com o livro respondendo;
+   124–153/h tinham rodado 3–4 h sem 429. O número é hipótese de poucas horas. O achado ativo é conferido a cada
+   60 s enquanto é novo e depois a cada décimo da idade, até 30 min: um achado parado há 5 h gastava 40 leituras
+   de anúncios por hora. Venda do CSFloat com chaveiro não é venda limpa (como a com adesivo): o chaveiro paga
+   acima da base e não prova pattern. O teto desses dois filtros não conta o menor anúncio do livro como
    concorrente: ele é o próprio candidato, e derrubaria o teto abaixo de si mesmo. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
 

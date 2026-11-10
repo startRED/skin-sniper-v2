@@ -42,6 +42,18 @@ const DRY_REASON_SECS: i64 = 3 * 3600;
 const SAVE_EVERY_SECS: i64 = 30;
 /// Um raro pode sumir em poucos minutos: acompanhamento confere a seed achada, sem girar as outras faixas.
 const ACTIVE_RECHECK_SECS: i64 = 60;
+/// Teto da conferência do achado antigo (ver `recheck_secs`).
+const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
+/// Descanso da leitura de anúncios: no máximo uma a cada 24 s (≤ 150/h); a vaga que sobra vai ao livro de ofertas.
+// shortcut: 150/h é hipótese de poucas horas medidas (10/11: ~200 leituras de anúncios/h por 3 h terminaram em
+// 429 por horas, como 220–250/h em 06/11 e 07/11; 124–153/h rodaram 3–4 h sem 429); rever com mais dias.
+const LISTINGS_REST_SECS: i64 = 24;
+
+/// Intervalo de conferência do achado: 60 s enquanto é novo, depois um décimo da idade, até 30 min. Em 10/11 um
+/// achado parado há 5 h gastava 40 leituras de anúncios por hora (20 % do balde) só para dizer que seguia lá.
+fn recheck_secs(age: i64) -> i64 {
+    (age / 10).clamp(ACTIVE_RECHECK_SECS, ACTIVE_RECHECK_MAX_SECS)
+}
 
 /// Modo de busca de um braço.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -193,6 +205,8 @@ pub struct Queue {
     pub external: Option<String>,
     pub external_ready: bool,
     pub last_exploring: bool,
+    /// Hora da última leitura de anúncios (`LISTINGS_REST_SECS`).
+    listed_at: i64,
     cursors: HashMap<String, usize>,
     selection_revision: u64,
     query_revisions: HashMap<String, u64>,
@@ -351,6 +365,11 @@ impl Queue {
             (s.r, s.exposure, s.dry) = (a.r * f, a.exposure * f, a.dry);
             self.dirty.insert(id.clone());
         }
+    }
+
+    /// A leitura de anúncios ainda descansa da última (`LISTINGS_REST_SECS`).
+    pub fn resting(&self, now: i64) -> bool {
+        now - self.listed_at < LISTINGS_REST_SECS
     }
 
     /// Centavos esperados de ler o alvo agora (`value`): nunca visto vale infinito.
@@ -725,9 +744,11 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
+            // No descanso da leitura de anúncios a vaga é do livro de ofertas (alvo barato).
+            let no_listings = listings_blocked || s.queue.resting(now);
             (
                 s.queue.next_matching(now, |t| {
-                    (!listings_blocked || !t.rare()) && (t.rare() || !recent.contains(&t.id))
+                    (!no_listings || !t.rare()) && (t.rare() || !recent.contains(&t.id))
                 }),
                 credit,
             )
@@ -796,7 +817,7 @@ pub(super) fn overdue_task(s: &super::Shared, now: i64, listings_blocked: bool) 
         .filter_map(|a| {
             let checked = a.opp.checked_at.unwrap_or(a.opp.seen_at);
             let entry = s.queue.entries.get(&a.task)?;
-            (now - checked.max(a.attempted_at) >= ACTIVE_RECHECK_SECS
+            (now - checked.max(a.attempted_at) >= recheck_secs(now - a.opp.seen_at)
                 && (!listings_blocked || !entry.task.rare()))
             .then_some((checked, a, &entry.task))
         })
@@ -1039,7 +1060,12 @@ async fn book_then_listings(
 }
 
 async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Result<()> {
-    h.lock().queue.begin_query(task);
+    let now = h.now();
+    {
+        let mut s = h.lock();
+        s.queue.listed_at = now;
+        s.queue.begin_query(task);
+    }
     let mut targets: Vec<Task> = tasks.into_iter().filter(|t| same_query(task, t)).collect();
     {
         let mut s = h.lock();
@@ -1329,6 +1355,18 @@ pub async fn run(h: Arc<Hunt>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listings_rest_between_reads_and_an_old_find_is_rechecked_less_often() {
+        let mut q = Queue::default();
+        assert!(!q.resting(1_000_000));
+        q.listed_at = 1_000_000;
+        assert!(q.resting(1_000_000 + LISTINGS_REST_SECS - 1));
+        assert!(!q.resting(1_000_000 + LISTINGS_REST_SECS));
+        assert_eq!(recheck_secs(0), 60);
+        assert_eq!(recheck_secs(3600), 360);
+        assert_eq!(recheck_secs(5 * 3600), 1800);
+    }
 
     #[test]
     fn external_candidate_cannot_win_normal_slots_or_run_without_credit() {

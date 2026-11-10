@@ -31,7 +31,7 @@ pub struct CsfloatSale {
     pub paint_index: Option<u32>,
     /// Segundos Unix (`sold_at`, ou `created_at` se faltar).
     pub sold_at: i64,
-    /// Itens com adesivo vendem acima da base por causa do adesivo, não do padrão.
+    /// Itens com adesivo ou chaveiro vendem acima da base por causa deles, não do padrão.
     pub has_stickers: bool,
     /// `reference.sticker_overpay.total_price`, em centavos (0 se ausente).
     pub sticker_overpay_cents: i64,
@@ -278,10 +278,11 @@ fn sale(s: &Value) -> Option<CsfloatSale> {
             .filter(|n| *n > 0)
             .map(|n| n as u32),
         sold_at: when,
-        has_stickers: item
-            .get("stickers")
-            .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty()),
+        has_stickers: ["stickers", "keychains"].iter().any(|k| {
+            item.get(k)
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty())
+        }),
         sticker_overpay_cents: s
             .pointer("/reference/sticker_overpay/total_price")
             .and_then(Value::as_i64)
@@ -358,6 +359,10 @@ mod tests {
         let st = &sales[1]; // 83 contra base 73, com 1 adesivo (overpay 33)
         assert!(st.has_stickers && st.sticker_overpay_cents == 33);
         assert!(sales.windows(2).all(|w| w[0].sold_at >= w[1].sold_at));
+        // chaveiro também paga acima da base: não é venda limpa
+        let mut v = fixture();
+        v[0]["item"]["keychains"] = serde_json::json!([{"name": "Charm | Lil' Crass"}]);
+        assert!(parse_sales(&v).unwrap()[0].has_stickers);
     }
 
     #[test]
