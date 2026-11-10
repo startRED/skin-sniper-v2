@@ -617,7 +617,10 @@ fn http_builder() -> reqwest::ClientBuilder {
         "referer",
         HeaderValue::from_static("https://steamcommunity.com/market/"),
     );
+    // Sem `accept-encoding`: em 10/11, do mesmo IP e com segundos de diferença, `/market/actions` deu 429 com
+    // `gzip` (e com o conjunto do navegador) e 200 sem o cabeçalho, alternando três vezes.
     reqwest::Client::builder()
+        .no_gzip()
         .user_agent(USER_AGENT)
         .default_headers(h)
         .redirect(redirect::Policy::none())
@@ -1802,6 +1805,10 @@ mod tests {
                 let hits = hits.clone();
                 async move {
                     assert!(!headers.contains_key("authorization"));
+                    assert!(
+                        !headers.contains_key("accept-encoding"),
+                        "com gzip a Steam dá 429"
+                    );
                     assert!(headers.get("cookie").is_none_or(|v| v == "bMarketOptOut=1"));
                     hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     r#"{"data":{"ok":true}}"#
