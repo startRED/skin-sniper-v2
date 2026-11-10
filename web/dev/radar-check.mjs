@@ -41,7 +41,7 @@ try {
     const state = { saldo_cents: 3606, saldo_source: 'manual', hunt: { watching: 1, queries_per_min: 6, last_query_at: now, paused_until: null, last_ok_at: now, book_ok_at: now, message: null }, combo: { ids: [], cost_cents: 0, profit_cents: 0 }, keys: { steam: key, csfloat: key, telegram: key } };
     state.hunt.message = 'Steam: seed/float em pausa · 10 min · 800 anúncios únicos · 15 novos';
     const week = { queries: 0, finds: 0, near: 0, alerts: 0, alerts_closed: 0, labeled: 0, profit_cents: 0 };
-    const learning = { days: [], since: null, teacher: { ghosts: 0, waiting: 0, fast_alerts: 0, fast_alerts_closed: 0, fast_near: 0, fast_near_closed: 0, fast_ratio: null, final_alerts: 0, final_alerts_won: 0, profit_cents: 0, predicted_cents: 0, unlabeled: 0, rare_labeled: 0, rare_closed: 0 }, harvest: null, refit: 1, weeks: [week, week], adjustments: [] };
+    const learning = { days: [], since: null, teacher: { ghosts: 0, waiting: 0, fast_alerts: 0, fast_alerts_closed: 0, fast_near: 0, fast_near_closed: 0, fast_ratio: null, final_alerts: 0, final_alerts_won: 0, profit_cents: 0, predicted_cents: 0, unlabeled: 0, rare_labeled: 0, rare_closed: 0 }, value: null, refit: 1, weeks: [week, week], adjustments: [] };
     await page.route('**/api/**', async (route) => {
       const path = new URL(route.request().url()).pathname;
       const body = path === '/api/state' ? state : path === '/api/opportunities' ? [opp]

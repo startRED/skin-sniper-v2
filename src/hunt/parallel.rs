@@ -72,7 +72,7 @@ impl Reader {
                 source: "paralela".into(),
                 policy: "paralela".into(),
                 target: task.id.clone(),
-                scale: h.lock().closeness_scale,
+                scale: 0.0,
                 block_id: None,
             };
             let (result, context) = research::scope_tracked(h.db.clone(), decision, async {

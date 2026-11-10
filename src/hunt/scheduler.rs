@@ -1,24 +1,22 @@
-//! Agenda das consultas: um bandido de vários braços (UCB1) que aprende o que rende e o laço que puxa no
-//! ritmo do limitador do `SteamClient`.
+//! Agenda das consultas: decide qual alvo ler agora pelo valor esperado da leitura (`value`) e puxa no ritmo do
+//! limitador do `SteamClient`.
 //!
-//! Braço = alvo (skin × desgaste × modo de busca): `d:` mais barato primeiro, `r:` faixas de seed raras,
-//! sem braço adicional de float. A frequência de consulta de cada um é a própria alocação do
-//! bandido: quem rende por consulta gasta ganha mais consultas. O limitador (≥ 6 s) segue sendo o gargalo:
+//! Braço = alvo (skin × desgaste × modo de busca): `d:` mais barato primeiro, `r:` faixas de seed raras, `f:` faixa
+//! de float. Cada leitura vai para o alvo com mais centavos esperados agora: taxa de anúncio novo × estoque
+//! acumulado desde a última leitura × retorno por anúncio novo. O limitador segue sendo o gargalo.
 //! Uma busca pode conferir vários braços; os preços próximos do teto geram consultas adicionais de anúncios.
 //! A descoberta divide a mesma vaga: cada consulta de vigilância rende 0,25 de crédito e cada passo de
 //! descoberta gasta 1 (≈ 20 % do total); enquanto há poucas tarefas (arranque), a descoberta pode usar tudo.
 //!
-//! Por que UCB1 e não Thompson sampling: é determinístico (teste de convergência reprodutível, relógio
-//! injetável) e dispensa crate de números aleatórios (regra 5). A recompensa é normalizada pela maior média
-//! para caber em [0, 1]; a cauda pesada (um T1 vale dezenas de consultas vazias) é amortecida pelo piso de
-//! exploração e pelo decaimento. Três mecanismos além do UCB:
+//! Determinístico (teste reprodutível, relógio injetável) e sem crate de números aleatórios. Além do valor:
 //! - **Cota de exploração** (`EXPLORE_SHARE`): 1 consulta em 8 vai para o braço menos testado, sempre; o slot
-//!   gira entre os modos (barato, seed), então cada modo tem um piso próprio, não importa quantos braços tem.
-//! - **Decaimento** (meia-vida `HALF_LIFE`): o passado antigo pesa menos, o mercado muda.
-//! - **Seca** (`DRY_HALF_LIFE`): a média vale pela metade a cada 4 h sem recompensa nenhuma.
+//!   gira entre os modos (barato, seed, float), então cada modo tem um piso próprio, não importa quantos braços tem.
+//! - **Decaimento** (meia-vida em `value::Params`): o passado antigo pesa menos, o mercado muda.
+//! - **Toda olhada conta**: escolher um alvo ou vê-lo acima do teto já zera o estoque dele, senão um alvo que
+//!   nunca devolve anúncio ficaria na frente para sempre.
 
-use super::harvest::{self, Policy};
-use super::{Hunt, catalog, detect, learn, watch};
+use super::value;
+use super::{Hunt, catalog, detect, watch};
 use crate::steam::book;
 use crate::steam::client::{Endpoint, Error as SteamError};
 use crate::steam::listings::{self, PropFilter};
@@ -34,20 +32,12 @@ pub const BOOT_TASKS: usize = 10;
 const CREDIT_CAP: f64 = 4.0;
 /// Parcela das consultas reservada ao braço menos testado (12,5 %, dentro dos 10–15 % pedidos).
 pub const EXPLORE_SHARE: f64 = 0.125;
-/// Consultas e recompensa pesam metade a cada 24 h.
-const HALF_LIFE: f64 = 24.0 * 3600.0;
-/// A média vale metade a cada 4 h sem recompensa.
-const DRY_HALF_LIFE: f64 = 4.0 * 3600.0;
 /// Até aqui o alvo ainda é "novo" para o painel.
 const NEW_QUERIES: u64 = 10;
-/// Peso, em consultas, da referência na média encolhida de um alvo: com poucas consultas ele fica perto dela.
-const BOOST_PRIOR_QUERIES: f64 = 20.0;
 /// Limites do fator de seleção: quem rende pouco ainda pode voltar, quem rende muito não engole a vaga dos outros.
 const BOOST_RANGE: (f64, f64) = (0.25, 4.0);
-/// Acima disto sem recompensa o painel diz "sem achar nada há N h".
+/// Acima disto sem anúncio novo o painel diz "sem anúncio novo há N h".
 const DRY_REASON_SECS: i64 = 3 * 3600;
-/// Piso (centavos/consulta) da escala do bônus, para a escala não zerar quando nada rendeu ainda.
-const MIN_SCALE: f64 = 1.0;
 /// Grava as notas alteradas a cada tanto.
 const SAVE_EVERY_SECS: i64 = 30;
 /// Um raro pode sumir em poucos minutos: acompanhamento confere a seed achada, sem girar as outras faixas.
@@ -121,12 +111,12 @@ impl Task {
     }
 }
 
-/// O que se sabe do rendimento de um braço. `n` e `r` decaem com o tempo; o resto é vitalício (para o painel).
+/// O que se sabe do rendimento de um braço. `n`, `r` e `exposure` decaem com o tempo; o resto é vitalício.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Stat {
-    /// Consultas gastas, com decaimento.
+    /// Consultas gastas, com decaimento (só a cota de exploração usa).
     pub n: f64,
-    /// Recompensa (centavos: lucro esperado achado + quase lucro com peso), com decaimento.
+    /// Anúncios novos dentro do saldo, com decaimento.
     pub r: f64,
     pub queries: u64,
     /// Oportunidades novas achadas e o lucro esperado somado (centavos).
@@ -134,20 +124,26 @@ pub struct Stat {
     pub gain_cents: i64,
     /// Anúncios que ficaram a pouco de passar.
     pub near_hits: u32,
+    /// Anúncios novos dentro do saldo, na vida inteira (base do retorno por anúncio).
+    pub fresh: u64,
     pub first_at: i64,
-    /// Última recompensa (achado ou quase), em segundos; 0 = nunca.
+    /// Último anúncio novo ou achado, em segundos; 0 = nunca.
     pub reward_at: i64,
     pub updated_at: i64,
-    /// Colheita: exposição somada das consultas (s, com o mesmo decaimento de `r`) e a última consulta.
+    /// Exposição somada das leituras (s, com o mesmo decaimento de `r`) e a última leitura.
     pub exposure: f64,
     pub last_at: i64,
+    /// Última vez que a agenda escolheu o alvo (só memória): a consulta que falha também zera o estoque.
+    pub picked_at: i64,
+    /// Exposição somada desde o último anúncio novo (só memória; `value::capped`).
+    pub dry: f64,
 }
 
 impl Stat {
-    fn decay(&mut self, now: i64) {
+    fn decay(&mut self, now: i64, half_life: f64) {
         let dt = (now - self.updated_at).max(0) as f64;
         if dt > 0.0 {
-            let f = 0.5_f64.powf(dt / HALF_LIFE);
+            let f = 0.5_f64.powf(dt / half_life);
             self.n *= f;
             self.r *= f;
             self.exposure *= f;
@@ -155,17 +151,14 @@ impl Stat {
         self.updated_at = self.updated_at.max(now);
     }
 
-    /// Segundos sem recompensa (desde o primeiro teste, se nunca teve).
+    /// Segundos sem anúncio novo (desde o primeiro teste, se nunca teve).
     fn dry_secs(&self, now: i64) -> i64 {
         (now - self.reward_at.max(self.first_at)).max(0)
     }
 
-    /// Lucro esperado por consulta (centavos), com a seca já descontada.
-    pub fn mean(&self, now: i64) -> f64 {
-        if self.n <= 0.0 {
-            return 0.0;
-        }
-        self.r / self.n * 0.5_f64.powf(self.dry_secs(now) as f64 / DRY_HALF_LIFE)
+    /// Última vez que o alvo foi olhado ou escolhido; 0 = nunca.
+    fn seen(&self) -> i64 {
+        self.last_at.max(self.picked_at)
     }
 }
 
@@ -193,10 +186,10 @@ pub struct Queue {
     explore: f64,
     /// Rodízio de modos no slot de exploração.
     explore_turn: usize,
-    /// Colheita: vida do achado (s; 0 = padrão), política do dia e, fora da exploração, (escolhas, iguais ao UCB1).
-    pub life: f64,
-    pub policy: Policy,
-    pub shadow: (u64, u64),
+    /// Parâmetros do valor de uma leitura; o ajuste de hora em hora troca (`value::maybe_step`).
+    pub params: value::Params,
+    /// Leituras ainda não gravadas (hora, alvo, anúncios novos): o histórico que o ajuste repete.
+    reads: Vec<(i64, String, u32)>,
     pub external: Option<String>,
     pub external_ready: bool,
     pub last_exploring: bool,
@@ -272,24 +265,49 @@ impl Queue {
         self.stats.extend(rows);
     }
 
-    /// Fator aprendido de cada alvo `d:` para a seleção do catálogo: quanto a recompensa por consulta dele (com
-    /// decaimento até `now`, encolhida para a referência quando há poucas consultas) passa da mediana dos alvos
-    /// já testados. Sem referência (ninguém rendeu ainda) devolve vazio, e a seleção segue só a nota-base.
+    /// Somas por classe de todos os alvos conhecidos, decaídas até `now` sem mexer nas notas.
+    fn pool(&self, now: i64) -> value::Pool {
+        let mut pool = value::Pool::default();
+        for (id, s) in &self.stats {
+            let f = 0.5_f64.powf((now - s.updated_at).max(0) as f64 / self.params.half_life);
+            pool.add(
+                id,
+                s.r * f,
+                s.exposure * f,
+                s.gain_cents as f64,
+                s.fresh as f64,
+            );
+        }
+        pool
+    }
+
+    /// Anúncios novos por segundo de espera do alvo, já com o teto por seca; `z` = 0 dá a média.
+    fn rate(&self, pool: &value::Pool, id: &str, s: &Stat, now: i64, z: f64) -> f64 {
+        let f = 0.5_f64.powf((now - s.updated_at).max(0) as f64 / self.params.half_life);
+        let rate = pool.rate(&self.params, id, s.r * f, s.exposure * f, z);
+        value::capped(rate, s.dry)
+    }
+
+    /// Centavos esperados por segundo de espera do alvo (taxa × retorno).
+    fn yield_rate(&self, pool: &value::Pool, id: &str, s: &Stat, now: i64, z: f64) -> f64 {
+        self.rate(pool, id, s, now, z) * pool.payoff(id, s.gain_cents as f64, s.fresh as f64)
+    }
+
+    /// Fator aprendido de cada alvo `d:` para a seleção do catálogo: quanto o rendimento dele (taxa de anúncio
+    /// novo × retorno, já encolhido para a classe quando há pouca medida) passa da mediana dos alvos já testados.
+    /// Sem referência (ninguém mediu ainda) devolve vazio, e a seleção segue só a nota-base.
     pub fn boosts(&self, now: i64) -> HashMap<String, f64> {
-        // (id, consultas, n, r) já decaídos, sem mexer nas notas
-        let arms: Vec<(&str, u64, f64, f64)> = self
+        let pool = self.pool(now);
+        let arms: Vec<(&str, &Stat, f64)> = self
             .stats
             .iter()
             .filter(|(id, s)| id.starts_with("d:") && s.queries > 0)
-            .map(|(id, s)| {
-                let f = 0.5_f64.powf((now - s.updated_at).max(0) as f64 / HALF_LIFE);
-                (id.as_str(), s.queries, s.n * f, s.r * f)
-            })
+            .map(|(id, s)| (id.as_str(), s, self.yield_rate(&pool, id, s, now, 0.0)))
             .collect();
         let mut rates: Vec<f64> = arms
             .iter()
-            .filter(|a| a.1 >= NEW_QUERIES && a.2 > 0.0)
-            .map(|a| a.3 / a.2)
+            .filter(|a| a.1.queries >= NEW_QUERIES && a.1.exposure > 0.0)
+            .map(|a| a.2)
             .collect();
         rates.sort_by(f64::total_cmp);
         let mid = rates.len() / 2;
@@ -302,9 +320,8 @@ impl Queue {
             return HashMap::new();
         }
         arms.into_iter()
-            .map(|(id, _, n, r)| {
-                let shrunk = (r + BOOST_PRIOR_QUERIES * reference) / (n + BOOST_PRIOR_QUERIES);
-                let factor = (shrunk / reference).clamp(BOOST_RANGE.0, BOOST_RANGE.1);
+            .map(|(id, _, rate)| {
+                let factor = (rate / reference).clamp(BOOST_RANGE.0, BOOST_RANGE.1);
                 (id.to_string(), factor)
             })
             .collect()
@@ -318,34 +335,31 @@ impl Queue {
             .collect()
     }
 
-    fn life(&self) -> f64 {
-        if self.life > 0.0 {
-            self.life
-        } else {
-            harvest::DEFAULT_LIFE
+    /// Leituras feitas desde a última vez (hora, alvo, anúncios novos), para gravar.
+    pub fn take_reads(&mut self) -> Vec<(i64, String, u32)> {
+        std::mem::take(&mut self.reads)
+    }
+
+    /// O ajuste trocou os parâmetros: `r` e exposição de cada alvo passam a ser os da repetição (zero para quem
+    /// não teve leitura nela), trazidos até a hora da nota.
+    pub(super) fn rebuild(&mut self, ids: &[String], arms: &[value::ArmState]) {
+        let state: HashMap<&str, &value::ArmState> =
+            ids.iter().map(String::as_str).zip(arms).collect();
+        for (id, s) in &mut self.stats {
+            let a = state.get(id.as_str()).map(|a| **a).unwrap_or_default();
+            let f = 0.5_f64.powf((s.updated_at - a.at).max(0) as f64 / self.params.half_life);
+            (s.r, s.exposure, s.dry) = (a.r * f, a.exposure * f, a.dry);
+            self.dirty.insert(id.clone());
         }
     }
 
-    /// Recompensa esperada de consultar o braço agora (`harvest::value`).
-    fn harvest_value(&self, id: &str, now: i64) -> f64 {
-        let Some(s) = self.stats.get(id).filter(|s| s.queries > 0) else {
+    /// Centavos esperados de ler o alvo agora (`value`): nunca visto vale infinito.
+    fn value(&self, pool: &value::Pool, id: &str, now: i64) -> f64 {
+        let Some(s) = self.stats.get(id).filter(|s| s.seen() > 0) else {
             return f64::INFINITY;
         };
-        // escolhido sem nenhum resultado medido (consulta falhou, ou nota de antes da colheita): fica para o
-        // desempate pelo UCB1 em vez de prender a agenda nele
-        if s.exposure <= 0.0 {
-            return 0.0;
-        }
-        harvest::value(s.r, s.exposure, now - s.last_at, self.life())
-    }
-
-    /// Índice UCB1 de um braço: lucro esperado por consulta + bônus de incerteza na escala da maior média.
-    fn index(&self, id: &str, now: i64, total_n: f64, scale: f64) -> f64 {
-        let Some(s) = self.stats.get(id).filter(|s| s.queries > 0) else {
-            return f64::INFINITY; // nunca consultado
-        };
-        let n = s.n.max(0.5);
-        s.mean(now) + scale * (2.0 * total_n.max(2.0).ln() / n).sqrt()
+        self.yield_rate(pool, id, s, now, value::Z)
+            * value::exposure(Some(now - s.seen()), self.params.life)
     }
 
     /// Decide o próximo alvo e já conta a consulta (como antes: reagenda antes de consultar, uma falha não
@@ -362,19 +376,13 @@ impl Queue {
         if !self.entries.values().any(|e| eligible(&e.task)) {
             return None;
         }
+        let half_life = self.params.half_life;
         for id in self.entries.keys() {
             if let Some(s) = self.stats.get_mut(id) {
-                s.decay(now);
+                s.decay(now, half_life);
             }
         }
         let n_of = |q: &Queue, id: &str| q.stats.get(id).map_or(0.0, |s| s.n);
-        let total_n: f64 = self.entries.keys().map(|k| n_of(self, k)).sum();
-        let scale = self
-            .entries
-            .keys()
-            .filter_map(|k| self.stats.get(k))
-            .map(|s| s.mean(now))
-            .fold(MIN_SCALE, f64::max);
         // desempate estável: maior nota-base, depois id
         let tie = |a: &Entry, b: &Entry| {
             b.task
@@ -385,7 +393,6 @@ impl Queue {
         self.explore += EXPLORE_SHARE;
         let exploring = self.explore >= 1.0;
         self.last_exploring = exploring;
-        let mut shadow = None;
         let pick = if exploring {
             // O slot de exploração gira entre os modos presentes (piso por modo, qualquer que seja o número de
             // braços de cada um) e, dentro do modo, vai para o menos testado (consultas decaídas).
@@ -420,41 +427,21 @@ impl Queue {
                     })
             })
         } else {
-            let ucb = |e: &Entry| self.index(&e.task.id, now, total_n, scale);
-            let by_ucb = self
-                .entries
+            // maior valor agora; no empate (ex.: nada medido ainda) o olhado há mais tempo, depois a nota-base
+            let pool = self.pool(now);
+            let seen = |e: &Entry| self.stats.get(&e.task.id).map_or(0, Stat::seen);
+            self.entries
                 .values()
                 .filter(|e| eligible(&e.task))
-                .min_by(|a, b| ucb(b).total_cmp(&ucb(a)).then_with(|| tie(a, b)));
-            if self.policy == Policy::Ucb {
-                by_ucb
-            } else {
-                // colheita: maior estoque acumulado; empate (ex.: ninguém rendeu) segue o UCB1
-                let hv = |e: &Entry| self.harvest_value(&e.task.id, now);
-                let by_harvest =
-                    self.entries
-                        .values()
-                        .filter(|e| eligible(&e.task))
-                        .min_by(|a, b| {
-                            hv(b)
-                                .total_cmp(&hv(a))
-                                .then_with(|| ucb(b).total_cmp(&ucb(a)))
-                                .then_with(|| tie(a, b))
-                        });
-                let same = by_ucb.map(|e| &e.task.id) == by_harvest.map(|e| &e.task.id);
-                shadow = Some(same);
-                if self.policy == Policy::Harvest {
-                    by_harvest
-                } else {
-                    by_ucb
-                }
-            }
+                .map(|e| (self.value(&pool, &e.task.id, now), e))
+                .min_by(|(va, a), (vb, b)| {
+                    vb.total_cmp(va)
+                        .then_with(|| seen(a).cmp(&seen(b)))
+                        .then_with(|| tie(a, b))
+                })
+                .map(|(_, e)| e)
         };
         let id = pick?.task.id.clone();
-        if let Some(same) = shadow {
-            self.shadow.0 += 1;
-            self.shadow.1 += u64::from(same);
-        }
         if exploring {
             self.explore -= 1.0;
         }
@@ -465,6 +452,7 @@ impl Queue {
         });
         s.n += 1.0;
         s.queries += 1;
+        s.picked_at = now;
         self.dirty.insert(id.clone());
         self.credit = (self.credit + DISCOVERY_SHARE).min(CREDIT_CAP);
         self.entries.get(&id).map(|e| e.task.clone())
@@ -490,55 +478,60 @@ impl Queue {
         }
     }
 
-    /// Resultado da consulta: lucro esperado das oportunidades novas (centavos) e o crédito de proximidade
-    /// dos anúncios novos que não passaram (`learn::closeness_credit`).
+    /// Resultado de uma olhada no alvo: anúncios novos dentro do saldo e o lucro esperado das oportunidades novas
+    /// (centavos). Olhada sem nada novo também conta: soma exposição e zera o estoque.
     pub fn reward(&mut self, id: &str, now: i64, found: Found) {
         let Some(s) = self.stats.get_mut(id) else {
             return;
         };
-        s.decay(now);
+        s.decay(now, self.params.half_life);
         let gap = (s.last_at > 0).then(|| now - s.last_at);
-        s.exposure += harvest::exposure(
-            gap,
-            if self.life > 0.0 {
-                self.life
-            } else {
-                harvest::DEFAULT_LIFE
-            },
-        );
+        let exposure = value::exposure(gap, self.params.window);
+        s.exposure += exposure;
+        s.dry = if found.fresh > 0 {
+            0.0
+        } else {
+            s.dry + exposure
+        };
         s.last_at = now;
-        let r = found.gain_cents.max(0) as f64 + found.near_credit;
-        s.r += r;
+        s.r += f64::from(found.fresh);
+        s.fresh += u64::from(found.fresh);
         s.finds += found.finds;
         s.gain_cents += found.gain_cents.max(0);
         s.near_hits += found.near_hits;
-        if r > 0.0 {
+        if found.fresh > 0 || found.gain_cents > 0 {
             s.reward_at = now;
         }
+        self.reads.push((now, id.to_string(), found.fresh));
         self.dirty.insert(id.to_string());
     }
 
-    /// Lucro esperado por consulta (centavos) e o motivo em palavras do dia a dia.
+    /// Centavos esperados de uma leitura com o estoque cheio e o motivo em palavras do dia a dia.
     pub fn describe(&self, id: &str, now: i64) -> (f64, String) {
         let Some(s) = self.stats.get(id).filter(|s| s.queries > 0) else {
             return (0.0, "testando alvo novo".into());
         };
+        let pool = self.pool(now);
+        let per_hour = self.rate(&pool, id, s, now, 0.0) * 3600.0;
         let reason = if s.queries < NEW_QUERIES {
             "testando alvo novo".to_string()
         } else if s.dry_secs(now) >= DRY_REASON_SECS {
-            format!("sem achar nada há {} h", s.dry_secs(now) / 3600)
+            format!("sem anúncio novo há {} h", s.dry_secs(now) / 3600)
         } else if s.gain_cents > 0 {
             format!(
                 "rendeu {} em {} consultas",
                 crate::pricing::brl(s.gain_cents),
                 s.queries
             )
-        } else if s.near_hits > 0 {
-            format!("quase deu lucro {} vezes", s.near_hits)
+        } else if s.fresh > 0 {
+            format!("{per_hour:.1} anúncios novos por hora").replace('.', ",")
         } else {
-            format!("sem achar nada em {} consultas", s.queries)
+            format!("sem anúncio novo em {} consultas", s.queries)
         };
-        (s.mean(now), reason)
+        (
+            self.yield_rate(&pool, id, s, now, 0.0) * self.params.life,
+            reason,
+        )
     }
 
     /// A tarefa estreitada à próxima faixa de seed (rodízio); desconto volta igual.
@@ -568,7 +561,7 @@ impl Queue {
             updated_at: now,
             ..Stat::default()
         });
-        stat.decay(now);
+        stat.decay(now, self.params.half_life);
         stat.n += 1.0;
         stat.queries += 1;
         self.dirty.insert(id.to_string());
@@ -584,15 +577,15 @@ impl Queue {
 }
 
 /// O que uma consulta rendeu.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Found {
     pub finds: u32,
     /// Lucro esperado (preço médio) das oportunidades novas, em centavos.
     pub gain_cents: i64,
-    /// Anúncios que ficaram na janela de quase-lucro (R$ 0,30 ou 10 % do preço); só o texto do painel.
+    /// Anúncios que ficaram na janela de quase-lucro (R$ 0,30 ou 10 % do preço); só o placar.
     pub near_hits: u32,
-    /// Soma do crédito de proximidade dos anúncios novos que não passaram, em centavos (`learn::closeness_credit`).
-    pub near_credit: f64,
+    /// Anúncios novos dentro do saldo: o sinal que a agenda aprende (`value`).
+    pub fresh: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -614,7 +607,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     super::patterns::maybe_step(h).await;
     // professor: só o banco; roda também sem saldo e com a Steam em pausa
     super::teacher::maybe_step(h).await;
-    super::harvest::maybe_step(h).await;
+    super::value::maybe_step(h).await;
     if let Err(e) = super::explore::refresh(h).await {
         tracing::warn!("exploração aguardando registro confiável: {e:#}");
         h.lock().queue.external_ready = false;
@@ -831,7 +824,7 @@ fn decision(h: &Hunt, source: &str, target: &str) -> crate::research::Decision {
         source: source.to_owned(),
         policy,
         target: target.to_owned(),
-        scale: s.closeness_scale,
+        scale: 0.0,
         block_id,
     }
 }
@@ -949,7 +942,10 @@ pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
                 eligible.push(t.clone());
             }
         } else {
-            h.lock().cycle.saved_listings += 1;
+            // visto acima do teto: a olhada conta, senão o alvo voltaria à frente da agenda na hora
+            let mut s = h.lock();
+            s.cycle.saved_listings += 1;
+            s.queue.reward(&t.id, h.now(), Found::default());
         }
     }
     while let Some(t) = eligible.pop() {
@@ -1001,25 +997,18 @@ async fn book_then_listings(
                     match lowest {
                         None => {
                             s.cycle.saved_listings += 1;
+                            s.queue.reward(&task.id, now, Found::default());
                             return Ok(());
                         }
                         Some(p) if !affordable(p, max) => {
-                            // menor anúncio novo ensina a agenda como um anúncio que não passou: g ≈ (teto − preço) ÷ preço
-                            let near_credit = if before == Some(p) {
-                                0.0
-                            } else {
-                                learn::closeness_credit(
-                                    p,
-                                    catalog::min_profit(p) + max - p,
-                                    s.closeness_scale,
-                                )
-                            };
+                            // menor anúncio mudou e cabe no saldo: conta como um anúncio novo visto pelo livro
+                            let fresh = u32::from(before != Some(p) && p <= s.saldo);
                             s.cycle.saved_listings += 1;
                             s.queue.reward(
                                 &task.id,
                                 now,
                                 Found {
-                                    near_credit,
+                                    fresh,
                                     ..Found::default()
                                 },
                             );
@@ -1213,10 +1202,10 @@ async fn backoff(h: &Hunt, e: &anyhow::Error) {
     tokio::time::sleep(pause).await;
 }
 
-/// Grava no banco as notas alteradas.
+/// Grava no banco as notas alteradas e as leituras feitas.
 pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
     h.steam.checkpoint_pace();
-    let (rows, progress) = {
+    let (rows, reads, progress) = {
         let mut s = h.lock();
         let q = &mut s.queue;
         let progress = serde_json::to_string(&Progress {
@@ -1225,15 +1214,21 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
             turn: q.explore_turn,
             cursors: q.cursors.clone(),
         })?;
-        (q.take_dirty(), progress)
+        (q.take_dirty(), q.take_reads(), progress)
     };
     h.db.call(move |c| {
         let tx = c.transaction()?;
+        for (at, arm, fresh) in reads {
+            tx.execute(
+                "INSERT INTO reads(at, arm, fresh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![at, arm, fresh],
+            )?;
+        }
         for (id, s) in rows {
             tx.execute(
                 "INSERT OR REPLACE INTO arm_stats(id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at,
-                    exposure, last_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    exposure, last_at, fresh)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 rusqlite::params![
                     id,
                     s.n,
@@ -1246,7 +1241,8 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
                     s.reward_at,
                     s.updated_at,
                     s.exposure,
-                    s.last_at
+                    s.last_at,
+                    s.fresh as i64
                 ],
             )?;
         }
@@ -1262,7 +1258,8 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
         .db
         .call(|c| {
             c.prepare(
-                "SELECT id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at, exposure, last_at
+                "SELECT id, n, r, queries, finds, gain_cents, near_hits, first_at, reward_at, updated_at, exposure, last_at,
+                    fresh
                  FROM arm_stats",
             )?
             .query_map([], |r| {
@@ -1280,6 +1277,9 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
                         updated_at: r.get(9)?,
                         exposure: r.get(10)?,
                         last_at: r.get(11)?,
+                        fresh: r.get::<_, i64>(12)? as u64,
+                        picked_at: 0,
+                        dry: 0.0,
                     },
                 ))
             })?
@@ -1296,7 +1296,7 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
         s.queue.explore_turn = progress.turn;
         s.queue.cursors = progress.cursors;
     }
-    Ok(())
+    value::load(h).await
 }
 
 /// Laço da caça. Termina quando o processo termina.
@@ -1424,49 +1424,40 @@ mod tests {
         }
     }
 
-    /// Gerador congruencial: o teste é reproduzível sem crate de aleatórios.
-    struct Lcg(u64);
-    impl Lcg {
-        fn unit(&mut self) -> f64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (self.0 >> 11) as f64 / (1u64 << 53) as f64
-        }
-    }
-
-    /// Braços de rendimento conhecido: (id, chance de achar por consulta, lucro por achado em centavos).
-    const ARMS: [(&str, f64, i64); 6] = [
-        ("best", 0.20, 100), // 20 centavos por consulta
-        ("good", 0.10, 60),  // 6
-        ("meh", 0.05, 40),   // 2
-        ("dud1", 0.0, 0),
-        ("dud2", 0.0, 0),
-        ("dud3", 0.0, 0),
+    /// Alvos de fluxo conhecido: (id, anúncios novos por hora).
+    const ARMS: [(&str, i64); 6] = [
+        ("hot", 60),
+        ("warm", 6),
+        ("cool", 1),
+        ("dud1", 0),
+        ("dud2", 0),
+        ("dud3", 0),
     ];
+    /// Ritmo real da leitura de anúncios (piso do limitador).
+    const STEP: i64 = 12;
 
-    /// Roda `n` consultas a 3 s cada; `payout` decide o rendimento do braço no instante `t`.
+    /// Roda `n` consultas a 12 s cada. Cada alvo acumula anúncio novo no ritmo `per_hour(id, t)` e a leitura leva
+    /// tudo o que chegou desde a anterior (frações ficam para a próxima). Devolve as consultas por alvo.
     fn simulate(
         q: &mut Queue,
-        rng: &mut Lcg,
         t0: i64,
         n: usize,
-        payout: impl Fn(&str, i64) -> (f64, i64),
+        per_hour: impl Fn(&str, i64) -> i64,
     ) -> HashMap<String, u32> {
         let mut count: HashMap<String, u32> = HashMap::new();
+        // por alvo: (última leitura, anúncios novos acumulados × 3600)
+        let mut stock: HashMap<String, (i64, i64)> = HashMap::new();
         for i in 0..n {
-            let t = t0 + 3 * i as i64;
+            let t = t0 + STEP * i as i64;
             let id = q.next(t).unwrap().id;
-            let (p, gain) = payout(&id, t);
-            if rng.unit() < p {
-                let found = Found {
-                    finds: 1,
-                    gain_cents: gain,
-                    ..Found::default()
-                };
-                q.reward(&id, t, found);
-            }
+            let (last, acc) = stock.entry(id.clone()).or_insert((t0, 0));
+            *acc += (t - *last) * per_hour(&id, t);
+            let found = Found {
+                fresh: (*acc / 3600) as u32,
+                ..Found::default()
+            };
+            (*last, *acc) = (t, *acc % 3600);
+            q.reward(&id, t, found);
             *count.entry(id).or_default() += 1;
         }
         count
@@ -1478,208 +1469,243 @@ mod tests {
         q
     }
 
-    fn fixed(id: &str, _t: i64) -> (f64, i64) {
-        let a = ARMS.iter().find(|a| a.0 == id).unwrap();
-        (a.1, a.2)
+    fn fixed(id: &str, _t: i64) -> i64 {
+        ARMS.iter().find(|a| a.0 == id).unwrap().1
     }
 
     #[test]
-    fn converges_to_the_best_arm_without_killing_exploration() {
-        let (mut q, mut rng) = (arms_queue(), Lcg(7));
-        let n = 6_000;
-        let c = simulate(&mut q, &mut rng, 0, n, fixed);
+    fn reads_follow_new_listings_without_killing_exploration() {
+        let mut q = arms_queue();
+        let n = 6_000; // 20 h
+        let c = simulate(&mut q, 1_000, n, fixed);
         let share = |id: &str| f64::from(c[id]) / n as f64;
-        assert!(share("best") > 0.5, "o melhor leva a maior parte: {c:?}");
-        assert!(share("best") > 5.0 * share("good"), "{c:?}");
+        assert!(
+            share("hot") > 0.4,
+            "quem recebe mais anúncio leva mais leitura: {c:?}"
+        );
+        assert!(
+            share("hot") > 2.0 * share("warm") && share("warm") > share("cool"),
+            "{c:?}"
+        );
         // o aprendizado enxerga a ordem real mesmo com poucas consultas nos de baixo
-        let m = |id: &str| q.describe(id, n as i64 * 3).0;
-        assert!(m("best") > m("good") && m("good") > m("meh") && m("meh") > m("dud1"));
-        // exploração: nenhum braço morre, e o que não é o melhor recebe ≥ 10 % no total
-        for (id, ..) in ARMS {
+        let m = |id: &str| q.describe(id, 1_000 + n as i64 * STEP).0;
+        assert!(m("hot") > m("warm") && m("warm") > m("cool") && m("cool") > m("dud1"));
+        // exploração: nenhum alvo morre
+        for (id, _) in ARMS {
             assert!(share(id) >= 0.01, "{id} ficou sem consultas: {c:?}");
         }
-        assert!(1.0 - share("best") >= 0.10, "{c:?}");
     }
 
     #[test]
-    fn exploration_slot_goes_to_the_least_tested_arm() {
-        let (mut q, mut rng) = (arms_queue(), Lcg(1));
-        simulate(&mut q, &mut rng, 0, 600, fixed);
-        // novo braço entra: nas próximas consultas ele é testado já
+    fn a_new_arm_is_tested_right_away() {
+        let mut q = arms_queue();
+        simulate(&mut q, 1_000, 600, fixed);
         let mut tasks = q.tasks();
-        tasks.push(task("fresh", 1.0));
+        tasks.push(task("novo", 1.0));
         q.set_tasks(tasks);
-        assert_eq!(q.next(2_000).unwrap().id, "fresh");
-        assert_eq!(q.describe("fresh", 2_000).1, "testando alvo novo");
+        assert_eq!(q.next(9_000).unwrap().id, "novo");
+        assert_eq!(q.describe("novo", 9_000).1, "testando alvo novo");
     }
 
     #[test]
     fn an_arm_that_dries_up_loses_space() {
-        let (mut q, mut rng) = (arms_queue(), Lcg(3));
+        let mut q = arms_queue();
         let h = 3600;
-        // 4 h com "best" rendendo; depois ele seca e "good" segue igual
-        let early = simulate(&mut q, &mut rng, 0, 1_200, |id, t| {
-            if id == "best" && t >= 4 * h {
-                (0.0, 0)
-            } else {
-                fixed(id, t)
-            }
-        });
-        let late = simulate(&mut q, &mut rng, 4 * h, 6_000, |id, t| {
-            if id == "best" { (0.0, 0) } else { fixed(id, t) }
-        });
-        let (e, l) = (
-            f64::from(early["best"]) / 1_200.0,
-            f64::from(late["best"]) / 6_000.0,
+        let dry = |id: &str, t: i64| if id == "hot" { 0 } else { fixed(id, t) };
+        // 4 h com "hot" rendendo; depois ele seca e os outros seguem iguais
+        let early = simulate(&mut q, 1_000, 1_200, fixed);
+        // o teto por seca age na hora: nas 4 h seguintes ele já perde a frente
+        let late = simulate(&mut q, 1_000 + 4 * h, 1_200, dry);
+        assert!(
+            late["hot"] < early["hot"] / 2,
+            "antes {early:?}, depois {late:?}"
         );
-        assert!(l < e / 2.0, "antes {e:.2}, depois {l:.2}");
-        assert!(late["good"] > late["best"], "{late:?}");
-        let why = q.describe("best", 4 * h + 18_000).1;
-        assert!(why.starts_with("sem achar nada há"), "{why}");
+        assert!(late["warm"] > late["hot"], "{late:?}");
+        let why = q.describe("hot", 1_000 + 8 * h).1;
+        assert!(why.starts_with("sem anúncio novo há"), "{why}");
+        // voltou a render: a taxa medida antes vale de novo no primeiro anúncio novo
+        let back = simulate(&mut q, 1_000 + 8 * h, 1_200, fixed);
+        assert!(back["hot"] > 2 * late["hot"], "{late:?} {back:?}");
+    }
+
+    /// Dois alvos medidos: "a" recebe 10× mais anúncio novo que "b"; os dois lidos pela última vez há 30 min.
+    fn two_arms(now: i64) -> Queue {
+        let stat = |r: f64| Stat {
+            n: 10.0,
+            r,
+            queries: 10,
+            fresh: r as u64,
+            first_at: 1,
+            updated_at: now,
+            exposure: 20_000.0,
+            last_at: now - 1800,
+            ..Stat::default()
+        };
+        let mut q = Queue::default();
+        q.set_tasks(vec![task("a", 1.0), task("b", 1.0)]);
+        q.load_stats(vec![("a".into(), stat(100.0)), ("b".into(), stat(10.0))]);
+        q
     }
 
     #[test]
-    fn near_misses_give_a_new_arm_a_head_start() {
+    fn a_failed_or_empty_read_does_not_hold_the_front() {
+        let now = 100_000;
+        let mut q = two_arms(now);
+        assert_eq!(q.next(now).unwrap().id, "a");
+        // a consulta de "a" falhou (nenhum resultado medido): a escolha já zerou o estoque dele
+        assert_eq!(q.next(now + STEP).unwrap().id, "b");
+        // a olhada sem nada novo soma exposição, marca a hora e entra no histórico do ajuste
+        let before = q.stats["a"].exposure;
+        q.reward("a", now + 20, Found::default());
+        let s = &q.stats["a"];
+        assert_eq!((s.last_at, s.reward_at), (now + 20, 0));
+        assert!((s.r - 100.0).abs() < 0.01);
+        assert!(s.exposure > before + 1000.0 && s.exposure < before + 1820.0);
+        assert_eq!(q.take_reads(), vec![(now + 20, "a".to_string(), 0)]);
+        assert!(q.take_reads().is_empty());
+    }
+
+    #[test]
+    fn value_pick_prefers_the_stale_target_and_the_never_seen_one() {
+        let now = 100_000;
+        // mesma taxa medida: "a" lido há 30 s, "b" há 30 min
+        let mut q = two_arms(now);
+        let mut a = q.stats["a"].clone();
+        a.last_at = now - 30;
+        q.load_stats(vec![("a".into(), a.clone()), ("b".into(), a.clone())]);
+        q.stats.get_mut("b").unwrap().last_at = now - 1800;
+        assert_eq!(q.next(now).unwrap().id, "b");
+        // alvo sem leitura nenhuma passa na frente de qualquer taxa
+        let mut tasks = q.tasks();
+        tasks.push(task("c", 0.0));
+        q.set_tasks(tasks);
+        assert_eq!(q.next(now + 1).unwrap().id, "c");
+    }
+
+    #[test]
+    fn rebuild_swaps_the_counts_for_the_replayed_ones() {
+        let stat = |r: f64| Stat {
+            r,
+            exposure: 99.0,
+            queries: 5,
+            updated_at: 1_000_000,
+            ..Stat::default()
+        };
         let mut q = Queue::default();
-        q.set_tasks(vec![task("a", 1.0), task("b", 1.0)]);
-        for t in 0..40 {
-            let id = q.next(t).unwrap().id;
-            if id == "a" {
-                let near = Found {
-                    near_hits: 1,
-                    near_credit: 3.0, // crédito de 3 centavos, escrito à mão
-                    ..Found::default()
-                };
-                q.reward("a", t, near);
-            }
-        }
-        let (a, why) = q.describe("a", 40);
-        assert!(a > 0.0 && why.starts_with("quase deu lucro"), "{a} {why}");
-        assert!(q.describe("b", 40).0 == 0.0);
+        q.load_stats(vec![
+            ("d:a".into(), stat(9.0)),
+            ("d:b".into(), stat(1.0)),
+            ("d:c".into(), stat(7.0)),
+        ]);
+        let half_life = q.params.half_life as i64;
+        q.rebuild(
+            &["d:a".to_string(), "d:b".to_string()],
+            &[
+                value::ArmState {
+                    r: 4.0,
+                    exposure: 800.0,
+                    at: 1_000_000,
+                    dry: 300.0,
+                },
+                // última leitura uma meia-vida antes da nota: chega pela metade
+                value::ArmState {
+                    r: 4.0,
+                    exposure: 800.0,
+                    at: 1_000_000 - half_life,
+                    dry: 0.0,
+                },
+            ],
+        );
+        let of = |id: &str| (q.stats[id].r, q.stats[id].exposure, q.stats[id].queries);
+        assert_eq!(of("d:a"), (4.0, 800.0, 5));
+        assert_eq!(of("d:b"), (2.0, 400.0, 5));
+        assert_eq!(of("d:c"), (0.0, 0.0, 5)); // sem leitura na repetição
+        assert_eq!(q.stats["d:a"].dry, 300.0);
+        assert_eq!(q.take_dirty().len(), 3);
     }
 
     #[test]
     fn boosts_reward_yield_and_fade_back_to_one() {
-        let stat = |n: f64, r: f64, queries: u64| Stat {
-            n,
+        let stat = |r: f64, exposure: f64, queries: u64| Stat {
+            n: queries as f64,
             r,
+            exposure,
             queries,
             ..Stat::default()
         };
         let mut q = Queue::default();
         q.load_stats(vec![
-            ("d:good".into(), stat(100.0, 1000.0, 100)),
-            ("d:mid1".into(), stat(100.0, 100.0, 100)),
-            ("d:mid2".into(), stat(100.0, 100.0, 100)),
-            ("d:bad".into(), stat(100.0, 50.0, 100)),
-            ("d:new".into(), stat(5.0, 0.0, 5)), // menos de 10 consultas: fora da referência
-            ("r:rare".into(), stat(100.0, 5000.0, 100)), // só `d:` entra
+            ("d:good".into(), stat(200.0, 20_000.0, 100)),
+            ("d:mid1".into(), stat(20.0, 20_000.0, 100)),
+            ("d:mid2".into(), stat(20.0, 20_000.0, 100)),
+            ("d:bad".into(), stat(2.0, 20_000.0, 100)),
+            ("d:new".into(), stat(0.0, 7200.0, 5)), // menos de 10 consultas: fora da referência
+            ("r:rare".into(), stat(500.0, 20_000.0, 100)), // só `d:` entra
         ]);
-        // referência = mediana de r/n de good, mid1, mid2 e bad = (1 + 1) / 2 = 1
+        // referência = mediana da taxa de good, mid1, mid2 e bad = a dos dois do meio
         let b = q.boosts(0);
         assert_eq!(b["d:good"], 4.0); // teto
-        assert!(b["d:bad"] > 0.25 && b["d:bad"] < 1.0, "{b:?}"); // 70 / 120 ≈ 0,58
+        assert!(b["d:bad"] > 0.25 && b["d:bad"] < 0.8, "{b:?}");
         assert!((b["d:mid1"] - 1.0).abs() < 1e-9, "{b:?}");
+        assert!(b["d:new"] < 1.0, "{b:?}"); // parte da média da classe e já leu uma janela sem nada
         assert!(!b.contains_key("r:rare"));
         // 10 meias-vidas sem consulta: tudo volta para perto de 1
-        let late = q.boosts(10 * 86_400);
+        let late = q.boosts(10 * q.params.half_life as i64);
         assert!((late["d:good"] - 1.0).abs() < 0.2, "{late:?}");
         assert!((late["d:bad"] - 1.0).abs() < 0.2, "{late:?}");
-        // notas antigas sem recompensa (instalação sobre `arm_stats` velho): nenhuma referência
+        // notas antigas sem exposição (instalação sobre `arm_stats` velho): nenhuma referência
         let mut empty = Queue::default();
         empty.load_stats(vec![
-            ("d:a".into(), stat(100.0, 0.0, 100)),
-            ("d:b".into(), stat(50.0, 0.0, 50)),
+            ("d:a".into(), stat(0.0, 0.0, 100)),
+            ("d:b".into(), stat(0.0, 0.0, 50)),
         ]);
         assert!(empty.boosts(0).is_empty());
     }
 
     #[test]
     fn reasons_read_like_plain_portuguese() {
-        let mut q = Queue::default();
-        q.set_tasks(vec![task("a", 1.0)]);
-        for t in 0..30 {
-            q.next(t);
-        }
+        let after = |found: Found, at: i64| {
+            let mut q = Queue::default();
+            q.set_tasks(vec![task("a", 1.0)]);
+            for t in 0..30 {
+                q.next(t);
+            }
+            q.reward("a", 30, found);
+            q.describe("a", at).1
+        };
         let found = Found {
             finds: 1,
             gain_cents: 120,
+            fresh: 1,
             ..Found::default()
         };
-        q.reward("a", 30, found);
-        assert_eq!(q.describe("a", 31).1, "rendeu R$ 1,20 em 30 consultas");
+        assert_eq!(after(found, 31), "rendeu R$ 1,20 em 30 consultas");
+        let fresh = Found {
+            fresh: 3,
+            ..Found::default()
+        };
+        // 3 em uma janela de 2 h, mais o ponto de partida da classe (o mesmo): 1,5 por hora
+        assert_eq!(after(fresh, 31), "1,5 anúncios novos por hora");
+        assert_eq!(
+            after(Found::default(), 31),
+            "sem anúncio novo em 30 consultas"
+        );
+        assert_eq!(after(fresh, 30 + 4 * 3600), "sem anúncio novo há 4 h");
     }
 
     #[test]
     fn stats_survive_a_restart_and_unselected_arms_keep_theirs() {
         let mut q = arms_queue();
-        let mut rng = Lcg(5);
-        simulate(&mut q, &mut rng, 0, 300, fixed);
+        simulate(&mut q, 1_000, 300, fixed);
         let saved = q.take_dirty();
         assert_eq!(saved.len(), ARMS.len());
         let mut q2 = arms_queue();
         q2.load_stats(saved);
-        assert_eq!(q2.describe("best", 900).1, q.describe("best", 900).1);
+        assert_eq!(q2.describe("hot", 9_000), q.describe("hot", 9_000));
         // saiu da seleção e voltou: o aprendizado continua
         q2.set_tasks(vec![task("dud1", 1.0)]);
         q2.set_tasks(arms_queue().tasks());
-        assert!(q2.stats["best"].queries > 0);
-    }
-
-    #[test]
-    fn harvest_pick_prefers_stale_productive_target() {
-        // dois alvos com a mesma taxa medida: "fresh" consultado há 30 s, "stale" há 30 min
-        let now = 100_000;
-        let stat = |last_at| Stat {
-            n: 10.0,
-            r: 600.0,
-            queries: 10,
-            first_at: 1,
-            reward_at: now - 60,
-            updated_at: now,
-            exposure: 6000.0,
-            last_at,
-            ..Stat::default()
-        };
-        let queue = |policy| {
-            let mut q = Queue {
-                policy,
-                ..Queue::default()
-            };
-            q.set_tasks(vec![task("fresh", 1.0), task("stale", 1.0)]);
-            q.load_stats(vec![
-                ("fresh".into(), stat(now - 30)),
-                ("stale".into(), stat(now - 1800)),
-            ]);
-            q
-        };
-        // UCB1 empata e desempata pelo id; a colheita vai para o estoque maior
-        let mut q = queue(Policy::Ucb);
-        assert_eq!(q.next(now).unwrap().id, "fresh");
-        assert_eq!(q.shadow, (0, 0));
-        let mut q = queue(Policy::Harvest);
-        assert_eq!(q.next(now).unwrap().id, "stale");
-        assert_eq!(q.shadow, (1, 0));
-        // em sombra o UCB1 escolhe e a discordância fica contada
-        let mut q = queue(Policy::default());
-        assert_eq!(q.next(now).unwrap().id, "fresh");
-        assert_eq!(q.shadow, (1, 0));
-        // o resultado da consulta soma exposição e marca a hora
-        q.reward("fresh", now + 10, Found::default());
-        let s = &q.stats["fresh"];
-        assert_eq!(s.last_at, now + 10);
-        assert!(s.exposure > 6000.0 * 0.99 && s.exposure < 6000.0 + 40.0);
-        // alvo escolhido sem resultado medido não prende a colheita: perde para o que tem estoque
-        let mut q = queue(Policy::Harvest);
-        q.load_stats(vec![(
-            "stale".into(),
-            Stat {
-                exposure: 0.0,
-                last_at: 0,
-                ..stat(0)
-            },
-        )]);
-        assert_eq!(q.next(now).unwrap().id, "fresh");
+        assert!(q2.stats["hot"].queries > 0 && q2.stats["hot"].fresh > 0);
     }
 
     #[test]

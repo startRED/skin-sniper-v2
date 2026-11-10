@@ -1,6 +1,6 @@
 //! Registro de observações (mina de ouro, Fase 0): todo anúncio que uma consulta mostra, com o item (`asset_id`),
 //! quando foi visto pela primeira e pela última vez, a idade máxima ao ser visto e quando sumiu. É a matéria-prima
-//! do professor (`teacher`) e da agenda de colheita (`harvest`). Docs/projeto.md, "Aprendizado".
+//! do professor (`teacher`) e da agenda (`value`). Docs/projeto.md, "Aprendizado".
 //!
 //! Sumiço só com página não vazia e preço coberto por ela; o mesmo `asset_id` em outro anúncio em até 24 h é
 //! relistagem, não venda.

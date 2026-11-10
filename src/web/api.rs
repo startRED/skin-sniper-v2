@@ -208,7 +208,7 @@ pub struct WatchRow {
     /// Lucro esperado por consulta gasta, em centavos, aprendido sozinho (0 enquanto não houver o que medir).
     pub score: f64,
     /// Por que a agenda dá (ou não) consultas a este alvo, em palavras curtas: "rendeu R$ 1,20 em 30
-    /// consultas", "testando alvo novo", "quase deu lucro 3 vezes", "sem achar nada há 5 h".
+    /// consultas", "testando alvo novo", "1,5 anúncios novos por hora", "sem anúncio novo há 5 h".
     pub reason: String,
     /// Pedido de compra sugerido: 1 centavo acima do maior pedido aberto, só quando cabe no saldo, fica abaixo
     /// do menor anúncio e ainda dá lucro (preço médio) com o risco dos 7 dias positivo. Nunca em item raro.

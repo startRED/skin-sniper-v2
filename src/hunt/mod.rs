@@ -8,8 +8,6 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod detect;
 pub mod explore;
-pub mod harvest;
-mod learn;
 pub mod ledger;
 pub mod orders;
 mod parallel;
@@ -17,6 +15,7 @@ pub mod patterns;
 pub mod scheduler;
 pub mod teacher;
 pub mod trial;
+pub mod value;
 pub mod watch;
 
 #[cfg(test)]
@@ -100,14 +99,12 @@ pub(crate) struct Shared {
     /// Última leitura do coletor de patterns (0 = ainda não ligou) e quando cada skin foi lida.
     pub learn_at: i64,
     pub learn_seen: HashMap<String, i64>,
-    /// Escala τ da proximidade (fração do preço): medida nas avaliações (`learn`), padrão enquanto faltam dados.
-    pub closeness_scale: f64,
     /// Registro (`ledger`): por chave de consulta, quando foi a última e até que preço ela cobria (`None` = tudo).
     pub ledger_prev: HashMap<String, (i64, Option<i64>)>,
     /// Professor (`teacher`): última volta e as skins cujo livro ele precisa ler para rotular (dias 7–9).
     pub teach_at: i64,
-    /// Última volta da colheita (`harvest::maybe_step`).
-    pub harvest_at: i64,
+    /// Último ajuste da agenda (`value::maybe_step`).
+    pub value_at: i64,
     /// Fator do professor para o comum (`teacher::refit`); entra como `min` com o das vendas reais.
     pub refit: f64,
     pub label_books: Vec<String>,
@@ -192,10 +189,9 @@ impl Hunt {
                 learned: patterns::Learned::new(),
                 learn_at: 0,
                 learn_seen: HashMap::new(),
-                closeness_scale: learn::DEFAULT_SCALE,
                 ledger_prev: HashMap::new(),
                 teach_at: 0,
-                harvest_at: 0,
+                value_at: 0,
                 refit: 1.0,
                 label_books: vec![],
                 book_logged: HashMap::new(),

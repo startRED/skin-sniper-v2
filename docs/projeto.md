@@ -49,7 +49,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-com
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
 | `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado; recalibração do comum |
-| `hunt/harvest.rs` | colheita: valor de consultar um alvo agora (estoque acumulado) e a política da agenda por dia |
+| `hunt/value.rs` | valor de uma leitura (taxa de anúncio novo × estoque acumulado × retorno) e o ajuste horário dos parâmetros |
 | `research.rs` | atribuição de decisões e tentativas, cota persistente de pesquisa |
 | `hunt/explore.rs`, `hunt/trial.rs` | candidatas fora do ranking, continuidade de ativos e comparação por blocos |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
@@ -143,7 +143,7 @@ Calibration = { families: [{ family: string, kind: "desconto" | "raro", n: numbe
                 hours: [{ hour: 0..23, listings: number, opportunities: number }] }
 Learning = { days: LearningDay[], since: number | null,     // do dia mais recente; since = 1º anúncio do registro
              teacher: TeacherSummary,                     // resumo das compras virtuais (Aprendizado, item 4)
-             harvest: HarvestInfo | null,                 // política da agenda e medidas (item 6)
+             value: ValueInfo | null,                     // parâmetros da agenda e medidas (item 6); null até o 1º ajuste
              refit: number,                               // fator do professor no comum, 1 = sem desconto (item 7)
              weeks: [LearningWeek, LearningWeek],         // boletim: últimos 7 dias e os 7 anteriores
              research?: ResearchSummary | null,          // tentativas e cota na última hora
@@ -203,26 +203,20 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
      enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
      A seleção é refeita a cada 15 min e no próximo passo após observar um piso novo acima do saldo.
-   - **Agenda que aprende (bandido de vários braços):** cada alvo (skin × desgaste × modo: `barato` ou `seed`) é um braço com uma nota que se atualiza sozinha = lucro esperado (preço médio) achado por consulta
-     gasta; além do achado, cada anúncio **novo** avaliado que não passou rende `lucro mínimo × e^(g/τ)`, com
-     g = (lucro no médio − lucro mínimo) ÷ preço, limitado a 0: todo anúncio visto ensina, e a nota não começa do
-     zero. Só o anúncio novo rende; reavaliar o mesmo (o histórico mudou) não rende de novo. τ = excesso médio de g
-     acima do percentil 90 das últimas 5 000 avaliações com estimativa (`evaluations`), recalculado a cada seleção
-     (mínimo 200 avaliações, entre 1 e 10 pontos; sem dados, 3 pontos, medidos em 4 850 anúncios de 04–06/11). O
-     contador "quase deu lucro" do painel continua com a janela de R$ 0,30 ou 10 % do preço. A agenda é **UCB1** (determinístico, sem crate de aleatórios):
-     quem rende por consulta ganha mais consultas, e a frequência de cada alvo é essa alocação. Regras que não
-     mudam: 12,5 % das consultas vão sempre ao braço menos testado, com o slot girando entre os dois modos (cada
-     modo tem piso próprio, qualquer que seja o número de braços); consultas e recompensa pesam metade a cada
-     24 h; a nota vale metade a cada 4 h sem nenhuma recompensa. O saldo e a taxa continuam decidindo quem
-     entra (regras acima); a nota-base do catálogo só desempata braços ainda não testados. A busca e as consultas de anúncios dividem o mesmo limitador global. As notas ficam no banco (`arm_stats`, retenção 14 dias
-     e no máximo 2000 linhas) e sobrevivem a reinício. Os parâmetros (12,5 %, meias-vidas, 5 000, 200, 1–10 pontos, 3 pontos) são hipóteses de calibração, não medidas.
-   - **Fator aprendido na seleção (desconto):** no lugar de `(1 + acertos recentes)`. Referência = mediana de `r/n`
-     (recompensa por consulta, com decaimento) dos alvos `d:` com ≥ 10 consultas; média encolhida do alvo =
-     `(r + 20 × referência) / (n + 20)`; fator = média encolhida ÷ referência, entre 0,25 e 4. Sem consulta ou sem
-     referência (ninguém rendeu ainda), o fator é 1. Quem rende pouco perde a vaga (`WATCH_MAX`) para uma skin do
-     catálogo ainda não testada, que entra com fator 1 e é testada logo. O alvo que saiu guarda a nota, que decai
-     (24 h), então o fator volta para perto de 1 em poucos dias e ele pode voltar a disputar a vaga. Raro e float
-     seguem por vendas/dia. Os números (10 consultas, 20, 0,25–4) são hipóteses de calibração, não medidas.
+   - **Agenda que aprende:** cada alvo (skin × desgaste × modo: `barato`, `seed` ou `float`) recebe a leitura
+     quando o **valor dela agora**, em centavos, é o maior: taxa de anúncio novo do alvo × anúncios acumulados desde
+     a última leitura × retorno por anúncio novo (fórmula, ajuste e medidas no item 6 do Aprendizado). Sinal =
+     anúncio **novo** que cabe no saldo; reavaliar o mesmo anúncio não conta de novo. Alvo nunca lido vai na
+     frente; empate vai para o lido há mais tempo. Regras que não mudam: 12,5 % das consultas vão sempre ao alvo
+     menos testado, com o slot girando entre os modos (cada modo tem piso próprio, qualquer que seja o número de
+     alvos). O saldo e a taxa continuam decidindo quem entra (regras acima); a nota-base do catálogo só desempata
+     alvos ainda não testados. A busca e as consultas de anúncios dividem o mesmo limitador global. As notas ficam
+     no banco (`arm_stats`, retenção 14 dias e no máximo 2000 linhas) e sobrevivem a reinício.
+   - **Fator aprendido na seleção (desconto):** rendimento do alvo `d:` (taxa × retorno, já encolhido para a média
+     da classe quando há pouca medida) ÷ a mediana dos alvos `d:` já testados, entre 0,25 e 4. Sem referência
+     (ninguém mediu ainda), o fator é 1. Quem rende pouco perde a vaga (`WATCH_MAX`) para uma skin do catálogo
+     ainda não testada, que entra com fator 1 e é testada logo. Raro e float seguem por vendas/dia. Os limites
+     (0,25–4) são hipótese de calibração, não medida.
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 1,00 e 10 % depois da taxa
      (hoje ≈ R$ 7,57). Abaixo disso a taxa come o lucro: até 06/11, 9 000 consultas em skins de R$ 1,60–8,50 deram
      um achado de R$ 0,32. Os 30 % são hipótese, não medida.
@@ -354,14 +348,31 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    - Preço sugerido: anunciar a `base × p75` e descer até `base × prêmio`. Anúncios do grupo à venda há mais de
      48 h (vistos nas últimas 6 h) aparecem como "parados".
    - Sai no painel (etiqueta ao lado do grupo e linha nos detalhes), no aviso do Windows e no Telegram.
-6. **Colheita (`hunt/harvest.rs`).** Achado chega a uma taxa λ por alvo e some com vida média `L`; o que sobra `Δ`
-   segundos depois da última consulta é `λ·L·(1 − e^(−Δ/L))`. λ = recompensa ÷ exposição do braço (`arm_stats.exposure`,
-   mesma recompensa e decaimento de 24 h do UCB1); cada resultado de consulta soma `L·(1 − e^(−Δ/L))` de exposição.
-   `L` = vida mediana (7 dias) dos anúncios que eram o mais barato e sumiram sem relistagem, com ≥ 20 medidas;
-   senão 600 s. Política por dia de Brasília contado da 1ª volta (`settings.harvest_start`): 7 dias em sombra (o UCB1
-   escolhe; conta quantas vezes a colheita escolheria igual), 7 dias alternando (par = UCB1, ímpar = colheita) e
-   depois a que rendeu mais (achados + quase) por consulta nesses dias; empate ou falta de dado fica com o UCB1. A
-   exploração não muda. Resumo de hora em hora em `settings.harvest_info`, mostrado no placar.
+6. **Valor de uma leitura (`hunt/value.rs`).** Projeto e medidas:
+   `docs/superpowers/specs/2026-11-10-aprendizado-unificado-design.md`. Substitui o crédito por proximidade do
+   lucro (≈ 0 em 99,9 % dos anúncios) e a colheita em sombra.
+   - `V = taxa × L·(1 − e^(−Δ/L)) × retorno`. `Δ` = segundos desde a última vez que a agenda olhou o alvo (leitura
+     vazia ou com falha também conta); `L` = percentil 25 da vida (7 dias) dos anúncios que eram o mais barato e
+     sumiram sem relistagem, com ≥ 20 medidas (piso 60 s); senão 900 s.
+   - **Taxa** (anúncios novos por segundo): `a = r + m·W·λ`, `taxa = (a + √a) ÷ (exposição + m·W)`. `r` = anúncios
+     novos do alvo; exposição = Σ `W·(1 − e^(−intervalo/W))` das leituras (a primeira conta `W`); as duas pesam
+     metade a cada `H`. `λ` = Σr ÷ Σexposição da classe (`d`/`r`/`f`): o alvo novo começa na média dos irmãos. `√a`
+     é o otimismo de contagem, que some com medida.
+   - **Teto por seca:** sem nenhum anúncio novo em `s` segundos de exposição seguidos, a taxa não passa de `3 ÷ s`
+     (regra de três). O alvo que secou perde espaço em horas, não em dias; o primeiro anúncio novo zera a seca.
+   - **Retorno** (centavos por anúncio novo, vida inteira): `(N0·w_c + ganho) ÷ (N0 + novos)`, com `w_c` da classe
+     encolhido para o total. Sem nenhum ganho medido, retorno = 1 para todos (só a taxa decide).
+   - **Ajuste de hora em hora, só banco:** repete as leituras dos últimos 7 dias (`reads`; páginas do mesmo alvo
+     em até 90 s contam como uma) para `W` {0,5; 1; 2; 4; 8 h} × `m` {0,5; 1; 2; 4} × `H` {24; 72; 168 h} e mede o
+     erro de previsão (perda de Poisson, cada leitura prevista só com o passado). Troca os parâmetros só com
+     ≥ 1 000 leituras pontuadas e melhora > 1 %; a troca vai para `refit_log` (`fluxo:janela`, `fluxo:prior`,
+     `fluxo:meia_vida`) e refaz `r`/exposição dos alvos. Resumo em `settings.value_info`, mostrado no placar:
+     erro do modelo × erro de uma taxa fixa por classe, previsto × real, anúncios novos por leitura.
+   - Padrões `W` = 2 h, `m` = 1, `H` = 72 h: medidos no histórico de 10/11 (erro 0,32 contra 0,55 da taxa por
+     classe). `N0` = 500, o otimismo, o p25 da vida, a margem de 1 % e o teto de 3 são hipóteses de calibração.
+   - **Prova contra no prêmio aprendido (`patterns::load`):** o seed já provado (≥ 3 vendas caras) leva também as
+     vendas dele abaixo de 2× a mediana da skin (`csfloat_sales`) nos quantis do prêmio. Venda comum não completa
+     prova.
 7. **Recalibração (`teacher::refit`).** Uma vez por dia de Brasília, com ≥ 7 dias de rótulos rápidos e ≥ 30 rótulos de
    comum com mediana na última semana: alvo = fator aplicado × mediana de (real das 48 h ÷ previsto), em
    [0,80; 1,00] (só desconta), andando no máximo 2 % por dia. Entra como `min` com o fator das vendas do Erick no
@@ -404,7 +415,7 @@ Plano e condições: `docs/superpowers/plans/2026-11-06-ml-exploracao-final.md`.
   ficam fora da recalibração/placar padrão. Painel separa previsto, virtual, pendente, sem rótulo e maduro;
   vendas reais continuam no registro de compras, sem serem inferidas do virtual.
 - 429 exploratório ou limite violado interrompe persistentemente o ensaio e restaura a política base.
-  A eleição antiga de colheita não troca a política durante a comparação. O relatório por blocos mostra
+  O ajuste horário da agenda (item 6 do Aprendizado) segue rodando durante a comparação. O relatório por blocos mostra
   diferença/incerteza, mas não elege vencedor enquanto maturação, cobertura e memória não forem comprovadas.
 - Pesquisa dura até 60 dias, teto nominal de 500 mil linhas por tabela; últimos 14 dias e vínculos de
   compras virtuais são preservados mesmo acima do teto. Medir espaço antes de aumentar tráfego; retenção
