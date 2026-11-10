@@ -325,9 +325,10 @@ impl Hunt {
                     .breaker_open_until(crate::steam::client::Endpoint::Book)
                     .is_none()
         });
-        let filters_paused = self
+        let filters_paused_until = self
             .steam
-            .main_blocked(crate::steam::client::Endpoint::Listings);
+            .main_blocked_until(crate::steam::client::Endpoint::Listings);
+        let filters_paused = filters_paused_until.is_some();
         let csfloat_status = self.csfloat.status();
         let s = self.lock();
         let mut keys = s.keys.clone();
@@ -348,6 +349,7 @@ impl Hunt {
                 paused_until: paused,
                 last_ok_at: stats.last_ok_at,
                 book_ok_at,
+                filters_paused_until,
                 message: if paused.is_some() && by_book {
                     Some("a Steam barrou a leitura de anúncios (429); a caça segue pelo livro de ofertas".into())
                 } else if paused.is_some() {

@@ -246,6 +246,9 @@ export const steamBlocked = () => {
   return h.last_ok_at == null || app.now - h.last_ok_at >= 600;
 };
 
+// A caça segue pelas skins baratas, mas a Steam barrou a leitura de anúncios: seed e float estão parados.
+export const filtersPaused = () => (app.state?.hunt.filters_paused_until ?? 0) > app.now;
+
 // A fila pública só fornece este timestamp enquanto disponível, com o mesmo prazo de 3 min do servidor.
 export const bookLane = () => {
   const h = app.state?.hunt;
