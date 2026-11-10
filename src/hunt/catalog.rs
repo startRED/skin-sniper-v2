@@ -14,7 +14,7 @@
 
 use super::patterns::{self, Learned};
 use super::scheduler::Task;
-use super::{Hunt, detect, learn};
+use super::{Hunt, detect};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
 use crate::pricing::groups::{
@@ -979,9 +979,6 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         return Ok(());
     };
     let items = load_items(&h.db).await?;
-    if let Err(error) = learn::refresh_scale(h).await {
-        tracing::warn!(%error, "escala de proximidade não atualizada; segue a anterior");
-    }
     let boost = h.lock().queue.boosts(now);
     let ctx = Ctx {
         ratio,

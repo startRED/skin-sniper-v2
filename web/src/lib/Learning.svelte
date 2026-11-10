@@ -26,7 +26,7 @@
   const min = (m: number | null) => (m == null ? '—' : m < 1 ? '< 1 min' : m < 120 ? `${Math.round(m)} min` : `${(m / 60).toFixed(1).replace('.', ',')} h`);
   const label = (d: string) => d.split('-').reverse().slice(0, 2).join('/');
   const t = $derived(data?.teacher ?? null);
-  const hv = $derived(data?.harvest ?? null);
+  const hv = $derived(data?.value ?? null);
   const wk = $derived(data?.weeks ?? null);
   const research = $derived(data?.research ?? null);
   const trial = $derived(data?.trial ?? null);
@@ -49,12 +49,8 @@
     }
     return [...groups.values()];
   });
-  const POLICY = {
-    shadow: 'em teste silencioso: o modo atual escolhe, o modo colheita só mede',
-    ucb: 'hoje no modo atual (dia de comparação)',
-    harvest: 'hoje no modo colheita: consulta onde mais achado se acumulou'
-  } as const;
-  const share = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : '—');
+  const CLASS = { d: 'baratos', r: 'seed raro', f: 'float baixo' } as Record<string, string>;
+  const dec = (x: number, n = 2) => x.toFixed(n).replace('.', ',');
   const life = (s: number) => (s < 120 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
   const of = (a: number, b: number) => (b ? `${a} de ${b}` : '—');
   const ratio = (r: number | null) => (r == null ? '—' : `${r.toFixed(2).replace('.', ',')}×`);
@@ -62,7 +58,7 @@
     baseline: 'Linha de base', control: 'Controle', pilot: 'Piloto', paused: 'Pausado', complete: 'Concluído'
   } as Record<string, string>)[phase.toLowerCase()] ?? phase;
   const policyName = (policy: string | null) => ({
-    ucb: 'Atual', harvest: 'Colheita', shadow: 'Sombra', baseline: 'Linha de base', control: 'Controle', pilot: 'Piloto'
+    valor: 'Valor por leitura', ucb: 'Atual', harvest: 'Colheita', shadow: 'Sombra', baseline: 'Linha de base', control: 'Controle', pilot: 'Piloto'
   } as Record<string, string>)[policy?.toLowerCase() ?? ''] ?? policy ?? 'Sem política';
   const kindName = (kind: string) => ({ comum: 'Comuns', common: 'Comuns', raro: 'Raros', rare: 'Raros' } as Record<string, string>)[kind.toLowerCase()] ?? kind;
   const conclusionName = (conclusion: string) => ({
@@ -126,10 +122,11 @@
       <ul class="notes muted">
         {#if hv}
           <li>
-            <b>Agenda</b> {POLICY[hv.policy]}.
+            <b>Agenda</b> consulta onde mais anúncio novo que cabe no saldo deve ter aparecido desde a última leitura, pesado pelo lucro que o alvo já deu.
             Um achado dura ~{life(hv.life_s)} {hv.lives ? `(medido em ${hv.lives} sumiços)` : '(padrão, ainda sem medida)'}.
-            {#if hv.picks}As duas escolheriam o mesmo alvo em {share(hv.agree, hv.picks)} das vezes.{/if}
-            {#if hv.ucb_rate != null && hv.harvest_rate != null}Comparação: atual {(hv.ucb_rate * 100).toFixed(1).replace('.', ',')} · colheita {(hv.harvest_rate * 100).toFixed(1).replace('.', ',')} achados e quase por 100 consultas.{/if}
+            {#if hv.reads}Últimos 7 dias: {hv.fresh} anúncios novos em {hv.reads} leituras ({dec(hv.fresh / hv.reads)} por leitura{#each hv.classes.filter((c) => c.reads) as c (c.class)}; {CLASS[c.class] ?? c.class} {dec(c.fresh / c.reads)}{/each}).{/if}
+            {#if hv.loss != null && hv.base_loss != null}Erro de previsão {dec(hv.loss, 3)}, contra {dec(hv.base_loss, 3)} de uma taxa fixa por tipo de busca (menor é melhor): previu {Math.round(hv.predicted)} anúncios novos e vieram {Math.round(hv.actual)}.{/if}
+            Ajuste de hora em hora; hoje com janela de {dec(hv.window_s / 3600, 1)} h e memória de {Math.round(hv.half_life_h)} h.
           </li>
         {/if}
         {#if data && data.refit < 1}

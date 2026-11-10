@@ -133,7 +133,7 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE refit_log (at INTEGER NOT NULL, key TEXT NOT NULL, old REAL, new REAL, why TEXT NOT NULL);
     CREATE INDEX book_snapshots_name ON book_snapshots(name, at);
     "#,
-    // Mina de ouro, Fase 3: exposição da colheita por braço (`hunt::harvest`).
+    // Mina de ouro, Fase 3: exposição por braço (hoje `hunt::value`).
     r#"
     ALTER TABLE arm_stats ADD COLUMN exposure REAL NOT NULL DEFAULT 0;
     ALTER TABLE arm_stats ADD COLUMN last_at INTEGER NOT NULL DEFAULT 0;
@@ -146,6 +146,20 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE opportunities ADD COLUMN notified_at INTEGER;
      ALTER TABLE opportunities ADD COLUMN notify_pending_at INTEGER;",
     crate::hunt::bootstrap::SCHEMA,
+    // Aprendizado unificado (`hunt::value`): `r`/`exposure` mudam de unidade (crédito de proximidade e vida de
+    // 600 s → anúncios novos e janela) e recomeçam; `fresh` vem do crédito por anúncio já gravado; `reads` é o
+    // histórico que o ajuste repete.
+    r#"
+    ALTER TABLE arm_stats ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0;
+    UPDATE arm_stats SET r = 0, exposure = 0;
+    UPDATE arm_stats SET fresh = (
+        SELECT COUNT(*) FROM research_credits c JOIN observations o USING (listing_id)
+        WHERE (CASE WHEN o.query LIKE '%|[]%' THEN 'd:' || o.name
+                    WHEN o.query LIKE '%Float%' THEN 'f:' || o.name
+                    ELSE 'r:' || substr(o.query, 1, instr(o.query, '|') - 1) END) = arm_stats.id);
+    CREATE TABLE reads (at INTEGER NOT NULL, arm TEXT NOT NULL, fresh INTEGER NOT NULL);
+    CREATE INDEX reads_at ON reads(at);
+    "#,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -237,6 +251,8 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
     conn.execute("DELETE FROM observations WHERE last_seen < ?1", [learn])?;
     conn.execute("DELETE FROM book_snapshots WHERE at < ?1", [learn])?;
     conn.execute("DELETE FROM evaluations WHERE at < ?1", [learn])?;
+    // o ajuste da agenda repete 7 dias; o dobro fica para conferir
+    conn.execute("DELETE FROM reads WHERE at < ?1", [now - 14 * DAY])?;
     conn.execute("DELETE FROM ghosts WHERE bought_at < ?1", [learn])?;
     conn.execute(
         "DELETE FROM ghost_decisions WHERE listing_id NOT IN (SELECT listing_id FROM ghosts)",

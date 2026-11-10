@@ -158,15 +158,16 @@ function learning(): Learning {
     ghosts: 212, waiting: 160, fast_alerts: 6, fast_alerts_closed: 4, fast_near: 58, fast_near_closed: 21, fast_ratio: 0.96,
     final_alerts: 0, final_alerts_won: 0, profit_cents: 0, predicted_cents: 0, unlabeled: 0, rare_labeled: 0, rare_closed: 0
   };
-  const harvest = {
-    policy: 'shadow' as const, start: nowS() - 2.4 * 86400, life_s: 540, lives: 312, picks: 4810, agree: 3127,
-    ucb_rate: null, harvest_rate: null
+  const value = {
+    window_s: 7200, prior: 1, half_life_h: 72, life_s: 928, lives: 607, reads: 7100, fresh: 2694,
+    classes: [{ class: 'd', reads: 6100, fresh: 2500 }, { class: 'r', reads: 800, fresh: 150 }, { class: 'f', reads: 200, fresh: 44 }],
+    scored: 6800, loss: 0.324, base_loss: 0.552, predicted: 2610, actual: 2694, tuned_at: nowS() - 1800
   };
   const weeks: Learning['weeks'] = [
     { queries: 11900, finds: 2, near: 93, alerts: 6, alerts_closed: 4, labeled: 0, profit_cents: 0 },
     { queries: 0, finds: 0, near: 0, alerts: 0, alerts_closed: 0, labeled: 0, profit_cents: 0 }
   ];
-  return { days, since: nowS() - 2.4 * 86400, teacher, harvest, refit: 1, weeks,
+  return { days, since: nowS() - 2.4 * 86400, teacher, value, refit: 1, weeks,
     adjustments: [{ at: nowS() - 86400, old: 1, new: 0.98, why: 'Preços observados abaixo dos previstos' }] };
 }
 

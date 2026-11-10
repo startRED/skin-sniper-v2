@@ -4,7 +4,7 @@
 
 use super::catalog::{FLOOR_TTL, HISTORY_TTL, min_profit, wear_label, window_stats};
 use super::scheduler::{Found, Task};
-use super::{Active, Hunt, learn};
+use super::{Active, Hunt};
 use crate::notify::{Alert, NotifyError};
 use crate::pricing::brl;
 use crate::pricing::groups::group_of;
@@ -779,7 +779,6 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         .copied()
         .filter(|l| known.contains(&l.listing_id))
         .collect();
-    let scale = h.lock().closeness_scale;
     let mut audit: Vec<EvalRow> = Vec::new();
     for l in relevant.iter().copied() {
         let was_known = known.contains(&l.listing_id);
@@ -839,13 +838,10 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         audit.push(row);
         let hist_now = history_at(h, &l.name).await?.unwrap_or(0);
         {
+            // Só anúncio novo ensina: reavaliar o mesmo (histórico mudou) não rende de novo.
+            out.rewarded.fresh += u32::from(new_credit);
             if let Some(n) = judged.near.as_ref().filter(|_| judged.found.is_none()) {
                 out.rewarded.near_hits += u32::from(new_credit && is_near(n));
-                // Só anúncio novo ensina: reavaliar o mesmo (histórico mudou) não rende de novo.
-                if new_credit {
-                    out.rewarded.near_credit +=
-                        learn::closeness_credit(n.price_cents, n.mid_cents, scale);
-                }
             }
             let mut s = h.lock();
             if s.evaluated.len() >= EVALUATED_MAX {

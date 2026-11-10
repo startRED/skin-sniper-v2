@@ -106,12 +106,48 @@ pub fn group(l: &Learned, name: &str, seed: Option<u16>) -> Option<(Group, Vec<f
     })
 }
 
+/// Venda limpa guardada: `(nome, seed, múltiplo, grupo)`, em ordem de nome e múltiplo.
+type Sale = (String, Option<u16>, f64, Option<String>);
+
+/// Prova contra: o seed já provado que também vendeu perto do preço comum (menos de `MIN_RATIO` × a mediana da
+/// skin) leva essas vendas no prêmio; sem elas o prêmio só enxerga as vendas caras. Venda comum não completa prova:
+/// só entra em seed que já tem `RARE_MIN_SALES` vendas caras.
+fn counter(l: &mut Learned, sales: &[Sale]) {
+    for of_name in sales.chunk_by(|a, b| a.0 == b.0) {
+        let Some(seeds) = l.get_mut(skin_base(&of_name[0].0)) else {
+            continue;
+        };
+        if of_name.len() < MIN_CLEAN_SALES {
+            continue;
+        }
+        let median = of_name[of_name.len() / 2].2;
+        for (_, seed, multiple, grp) in of_name {
+            // tabela e float de elite têm grupo próprio
+            if multiple / median < MIN_RATIO
+                && grp.as_deref().is_none_or(|g| g.starts_with("learned:"))
+                && let Some(v) = seed.and_then(|s| seeds.get_mut(&s))
+                && v.len() >= RARE_MIN_SALES
+            {
+                v.push(multiple / median);
+            }
+        }
+    }
+}
+
 pub async fn load(h: &Hunt) -> Result<()> {
-    let rows: Vec<(String, u16, f64)> =
+    let (rows, sales): (Vec<(String, u16, f64)>, Vec<Sale>) =
         h.db.call(|c| {
-            c.prepare("SELECT name, seed, ratio FROM learned_sales")?
+            let rows = c
+                .prepare("SELECT name, seed, ratio FROM learned_sales")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect()
+                .collect::<rusqlite::Result<_>>()?;
+            let sales = c
+                .prepare(
+                    "SELECT name, seed, multiple, grp FROM csfloat_sales ORDER BY name, multiple",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((rows, sales))
         })
         .await?;
     let mut l = Learned::new();
@@ -122,6 +158,7 @@ pub async fn load(h: &Hunt) -> Result<()> {
             .or_default()
             .push(ratio);
     }
+    counter(&mut l, &sales);
     h.lock().learned = l;
     Ok(())
 }
@@ -366,5 +403,32 @@ mod tests {
             group_of(name, Some(583), None, Some(0.3)).unwrap().key
         );
         assert_eq!(evidence.len(), 3);
+    }
+
+    #[test]
+    fn a_proven_seed_also_carries_its_ordinary_sales() {
+        const NAME: &str = "MP7 | Amberline (Minimal Wear)";
+        let mut l = Learned::new();
+        let seeds = l.entry("MP7 | Amberline".into()).or_default();
+        seeds.insert(7, vec![2.0, 2.5, 3.0]);
+        seeds.insert(8, vec![2.0, 2.5]);
+        let row = |seed, multiple, grp: Option<&str>| -> Sale {
+            (NAME.into(), Some(seed), multiple, grp.map(String::from))
+        };
+        let mut sales: Vec<Sale> = (0..8).map(|_| row(100, 1.0, None)).collect();
+        sales.extend([
+            row(7, 1.0, None),
+            row(7, 1.2, Some("learned:MP7 | Amberline:7")),
+            row(7, 1.1, Some("float:elite")), // outro grupo
+            row(7, 3.0, None),                // cara: já está em `learned_sales`
+            row(8, 1.0, None),                // seed sem prova: fica como está
+        ]);
+        sales.sort_by(|a, b| a.2.total_cmp(&b.2));
+        counter(&mut l, &sales);
+        assert_eq!(l["MP7 | Amberline"][&7], vec![2.0, 2.5, 3.0, 1.0, 1.2]);
+        assert_eq!(l["MP7 | Amberline"][&8], vec![2.0, 2.5]);
+        // menos de `MIN_CLEAN_SALES` vendas não dão mediana: nada muda
+        counter(&mut l, &sales[..5]);
+        assert_eq!(l["MP7 | Amberline"][&7].len(), 5);
     }
 }

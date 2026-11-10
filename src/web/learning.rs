@@ -60,9 +60,9 @@ pub struct Learning {
     /// Compras virtuais e o que o mercado disse delas.
     #[serde(default)]
     pub teacher: crate::hunt::teacher::Summary,
-    /// Colheita: política do dia e medidas (`None` até a primeira volta).
+    /// Agenda: parâmetros do valor de uma leitura e medidas (`None` até o primeiro ajuste).
     #[serde(default)]
-    pub harvest: Option<crate::hunt::harvest::Info>,
+    pub value: Option<crate::hunt::value::Info>,
     /// Fator do professor no preço do comum (1 = sem desconto).
     #[serde(default = "one")]
     pub refit: f64,
@@ -234,10 +234,10 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
             let adjustments = c.prepare("SELECT at, old, new, why FROM refit_log WHERE key = 'comum' AND at >= ?1 ORDER BY at DESC")?
                 .query_map([from], |r| Ok(Adjustment { at: r.get(0)?, old: r.get(1)?, new: r.get(2)?, why: r.get(3)? }))?
                 .collect::<rusqlite::Result<_>>()?;
-            let harvest: Option<String> = c
+            let value: Option<String> = c
                 .query_row(
                     "SELECT value FROM settings WHERE key = ?1",
-                    [crate::hunt::harvest::INFO_KEY],
+                    [crate::hunt::value::INFO_KEY],
                     |r| r.get(0),
                 )
                 .optional()?;
@@ -245,7 +245,7 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                 days,
                 since,
                 teacher: crate::hunt::teacher::summary(c)?,
-                harvest: harvest.and_then(|v| serde_json::from_str(&v).ok()),
+                value: value.and_then(|v| serde_json::from_str(&v).ok()),
                 refit: crate::hunt::teacher::refit_factor(c)?,
                 weeks: [
                     crate::hunt::teacher::week(c, now - 7 * DAY, now)?,

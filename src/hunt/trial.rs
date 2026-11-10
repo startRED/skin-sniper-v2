@@ -117,11 +117,8 @@ fn advance(c: &Connection, now: i64) -> rusqlite::Result<()> {
 
 pub async fn step(h: &Hunt) -> anyhow::Result<()> {
     let now = h.now();
-    let policy = h.lock().queue.policy;
-    let base = serde_json::to_value(policy)?
-        .as_str()
-        .unwrap_or("shadow")
-        .to_owned();
+    // a agenda tem uma política só (`value`); a coluna fica para os ensaios antigos
+    let base = "valor".to_owned();
     let (status, restore) = h.db.call(move |c| {
         start(c, now, now ^ 0x51a7_09d3, &base)?;
         advance(c, now)?;
@@ -132,13 +129,6 @@ pub async fn step(h: &Hunt) -> anyhow::Result<()> {
         let restored: bool=c.query_row("SELECT restored FROM exploration_trial WHERE id=1",[],|r|r.get(0))?;
         Ok((status, !restored))
     }).await?;
-    if (status.enabled || restore)
-        && let Ok(base) = serde_json::from_value::<super::harvest::Policy>(
-            serde_json::Value::String(status.base_policy.clone()),
-        )
-    {
-        h.lock().queue.policy = base;
-    }
     if !status.enabled && restore {
         h.db.call(|c| {
             c.execute("UPDATE exploration_trial SET restored=1 WHERE id=1", [])?;

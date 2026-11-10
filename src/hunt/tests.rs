@@ -2120,41 +2120,11 @@ async fn new_listings_teach_the_agenda_once() {
     };
     let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
     let first = detect::process(&h, &task, &page).await.unwrap();
-    assert!(first.rewarded.near_credit > 0.0, "{:?}", first.rewarded);
-    // a mesma página de novo: nenhum anúncio é novo, então não rende crédito de novo
+    assert!(first.rewarded.fresh > 0, "{:?}", first.rewarded);
+    // a mesma página de novo: nenhum anúncio é novo, então não conta de novo
     let again = detect::process(&h, &task, &page).await.unwrap();
-    assert_eq!(again.rewarded.near_credit, 0.0);
+    assert_eq!(again.rewarded.fresh, 0);
     assert_eq!(again.rewarded.finds, 0);
-}
-
-#[tokio::test]
-async fn closeness_scale_defaults_then_learns_from_evaluations() {
-    let (base, _bodies) = serve().await;
-    let (db, _dir) = temp_db();
-    let (h, _rx) = hunt_against(&base, db.clone());
-    learn::refresh_scale(&h).await.unwrap();
-    assert_eq!(h.lock().closeness_scale, learn::DEFAULT_SCALE);
-    // 300 avaliações a R$ 10,00 com lucro no médio de 0, −1, −2 … centavos
-    db.call(|c| {
-        for k in 0..300_i64 {
-            c.execute(
-                "INSERT INTO evaluations(at, listing_id, name, price_cents, steam_url, mid_profit_cents, reason)
-                 VALUES (0, ?1, 'x', 1000, 'u', ?2, 'r')",
-                rusqlite::params![k.to_string(), -k],
-            )?;
-        }
-        Ok(())
-    })
-    .await
-    .unwrap();
-    learn::refresh_scale(&h).await.unwrap();
-    let mut gaps: Vec<f64> = (0..300_i64)
-        .map(|k| (-k - catalog::min_profit(1000)) as f64 / 1000.0)
-        .collect();
-    let expected = learn::tail_scale(&mut gaps).unwrap();
-    let scale = h.lock().closeness_scale;
-    assert!((scale - expected).abs() < 1e-12, "{scale} {expected}");
-    assert_ne!(scale, learn::DEFAULT_SCALE);
 }
 
 #[tokio::test]
@@ -2404,6 +2374,11 @@ async fn learned_scores_survive_a_restart_and_show_in_the_watch_row() {
     assert!(row.reason.starts_with("rendeu R$ "), "{}", row.reason);
     assert!(row.score > 0.0 && row.mode == "barato");
     scheduler::save_stats(&h).await.unwrap();
+    let reads: i64 =
+        h.db.call(|c| c.query_row("SELECT count(*) FROM reads", [], |r| r.get(0)))
+            .await
+            .unwrap();
+    assert!(reads > 0, "as leituras ficam gravadas para o ajuste");
 
     // reinício: outra caça sobre o mesmo banco recupera a nota
     let (h2, _rx2) = hunt_against(&base, db);
@@ -2411,6 +2386,88 @@ async fn learned_scores_survive_a_restart_and_show_in_the_watch_row() {
     let (score, why) = h2.lock().queue.describe(&id, NOW);
     assert_eq!(why, row.reason);
     assert!(score > 0.0);
+}
+
+#[tokio::test]
+async fn value_step_tunes_from_the_reads_and_logs_the_switch() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    let bad = value::Params {
+        window: 1800.0,
+        prior: 4.0,
+        ..value::Params::default()
+    };
+    {
+        let mut s = h.lock();
+        s.queue.params = bad;
+        let stale = scheduler::Stat {
+            queries: 5,
+            r: 99.0,
+            updated_at: NOW,
+            ..scheduler::Stat::default()
+        };
+        s.queue.load_stats(vec![("d:rico".into(), stale)]);
+    }
+    // 5 dias de leituras: "rico" recebe 1 anúncio novo a cada 10 min, "seco" nenhum
+    db.call(|c| {
+        let (mut t, mut last, mut acc) = (NOW - 6 * 86_400, 0_i64, 0_i64);
+        for i in 0..3000 {
+            t += [60, 150, 240][i % 3];
+            let fresh = if i % 2 == 0 {
+                acc += if last > 0 { t - last } else { 0 };
+                last = t;
+                let fresh = acc / 600;
+                acc %= 600;
+                fresh
+            } else {
+                0
+            };
+            c.execute(
+                "INSERT INTO reads(at, arm, fresh) VALUES (?1, ?2, ?3)",
+                rusqlite::params![t, ["d:rico", "d:seco"][i % 2], fresh],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    value::maybe_step(&h).await;
+    let p = h.lock().queue.params;
+    assert_ne!((p.window, p.prior), (bad.window, bad.prior));
+    assert_eq!(p.life, bad.life, "sem sumiço medido a vida fica no padrão");
+    let logged: i64 = db
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM refit_log WHERE key LIKE 'fluxo:%'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert!(logged >= 1);
+    let info: value::Info = serde_json::from_str(
+        &catalog::get_setting(&db, value::INFO_KEY)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!((info.reads, info.window_s, info.lives), (3000, p.window, 0));
+    assert!(info.loss < info.base_loss, "{info:?}");
+    assert_eq!(info.classes[0].reads, 3000);
+    // a nota do alvo passa a ser a da repetição
+    let rebuilt = h.lock().queue.take_dirty();
+    let rico = &rebuilt.iter().find(|(id, _)| id == "d:rico").unwrap().1;
+    assert!(rico.r > 0.0 && rico.r != 99.0 && rico.exposure > 0.0);
+    // dentro da hora não roda de novo; o reinício recupera os parâmetros
+    h.lock().queue.params = bad;
+    value::maybe_step(&h).await;
+    assert_eq!(h.lock().queue.params, bad);
+    let (h2, _rx2) = hunt_against(&base, db);
+    h2.load().await.unwrap();
+    assert_eq!(h2.lock().queue.params, p);
 }
 
 #[tokio::test]

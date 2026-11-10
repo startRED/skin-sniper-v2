@@ -126,15 +126,21 @@ export type TeacherSummary = {
   rare_labeled: number;
   rare_closed: number;
 };
-export type HarvestInfo = {
-  policy: 'shadow' | 'ucb' | 'harvest';
-  start: number;
+export type ValueInfo = {
+  window_s: number;
+  prior: number;
+  half_life_h: number;
   life_s: number;
   lives: number;
-  picks: number;
-  agree: number;
-  ucb_rate: number | null;
-  harvest_rate: number | null;
+  reads: number;
+  fresh: number;
+  classes: { class: string; reads: number; fresh: number }[];
+  scored: number;
+  loss: number | null;
+  base_loss: number | null;
+  predicted: number;
+  actual: number;
+  tuned_at: number;
 };
 export type LearningWeek = {
   queries: number;
@@ -196,7 +202,7 @@ export type Learning = {
   days: LearningDay[];
   since: number | null;
   teacher: TeacherSummary;
-  harvest: HarvestInfo | null;
+  value: ValueInfo | null;
   refit: number;
   weeks: [LearningWeek, LearningWeek];
   research?: LearningResearch | null;
