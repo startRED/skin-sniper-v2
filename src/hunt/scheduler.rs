@@ -660,7 +660,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     }
     let (may_discover, empty, urgent) = {
         let s = h.lock();
-        let urgent = overdue_task(&s, h.now(), listings_blocked).is_some();
+        let urgent = overdue_task(&s, h.now()).is_some();
         (s.queue.may_discover(), s.queue.len() == 0, urgent)
     };
     // a descoberta lê busca e histórico (os dois baldes)
@@ -729,7 +729,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             s.queue.cursors.clone(),
         );
         // Conferir ativo atrasado tem preferência sobre qualquer teste; usa a mesma vaga do laço.
-        let overdue = overdue_task(&s, now, listings_blocked);
+        let overdue = overdue_task(&s, now);
         if let Some(task) = overdue {
             s.queue.record_scan(&task.id, now);
             s.queue.last_exploring = false;
@@ -811,15 +811,17 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     Tick::Watched(task.id)
 }
 
-pub(super) fn overdue_task(s: &super::Shared, now: i64, listings_blocked: bool) -> Option<Task> {
+pub(super) fn overdue_task(s: &super::Shared, now: i64) -> Option<Task> {
     s.active
         .values()
         .filter_map(|a| {
             let checked = a.opp.checked_at.unwrap_or(a.opp.seen_at);
             let entry = s.queue.entries.get(&a.task)?;
-            (now - checked.max(a.attempted_at) >= recheck_secs(now - a.opp.seen_at)
-                && (!listings_blocked || !entry.task.rare()))
-            .then_some((checked, a, &entry.task))
+            (now - checked.max(a.attempted_at) >= recheck_secs(now - a.opp.seen_at)).then_some((
+                checked,
+                a,
+                &entry.task,
+            ))
         })
         .min_by_key(|(checked, a, _)| (*checked, &a.opp.id))
         .map(|(_, a, t)| {
@@ -877,9 +879,63 @@ fn affordable(price: i64, max: i64) -> bool {
     i128::from(price) * 100 <= i128::from(max) * (100 + i128::from(SCAN_TOLERANCE_PERCENT))
 }
 
+/// Com a leitura de anúncios barrada, confere os achados do alvo pelo livro de ofertas: a escada de venda lista
+/// todos os preços, então preço sem degrau é anúncio que saiu. Degrau presente não prova nada (pode ser outro
+/// anúncio no mesmo preço): o achado segue "sem conferir".
+async fn gone_by_book(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
+    let now = h.now();
+    let (name, due) = {
+        let mut s = h.lock();
+        let Some(name) = s
+            .active
+            .values()
+            .filter(|a| a.task == task.id)
+            .min_by_key(|a| {
+                a.opp
+                    .checked_at
+                    .unwrap_or(a.opp.seen_at)
+                    .max(a.attempted_at)
+            })
+            .map(|a| a.opp.name.clone())
+        else {
+            return Ok(());
+        };
+        let due: Vec<(String, i64)> = s
+            .active
+            .values_mut()
+            .filter(|a| a.task == task.id && a.opp.name == name)
+            .map(|a| {
+                a.attempted_at = now;
+                (a.opp.id.clone(), a.opp.price_cents)
+            })
+            .collect();
+        (name, due)
+    };
+    let Some(asks) = book::fetch_all_asks(&h.steam, &name).await? else {
+        return Ok(());
+    };
+    // shortcut: 1 % de folga é hipótese para a conversão de moeda mexer o preço do mesmo anúncio; rever se um
+    // achado vivo for encerrado por engano.
+    let gone = due
+        .into_iter()
+        .filter(|(_, price)| !asks.iter().any(|p| (p - price).abs() * 100 <= *price))
+        .map(|(id, _)| id)
+        .collect();
+    if !detect::mark_gone(h, gone, crate::web::api::GoneReason::Unavailable)
+        .await?
+        .is_empty()
+    {
+        h.publish_state();
+    }
+    Ok(())
+}
+
 pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
     let task = h.lock().queue.focus(task.clone());
     if task.rare() {
+        if h.steam.blocked(Endpoint::Listings) {
+            return gone_by_book(h, &task).await;
+        }
         return query_group(h, &task, vec![task.clone()]).await;
     }
     let (tasks, ratio, active) = {
