@@ -71,6 +71,11 @@ export const isUncertain = (p?: Purchase) => p?.status === 'failed' && /invent[a
 
 export const purchaseOf = (id: string) => app.purchases.find((p) => p.id === id);
 
+// Passou do prazo de conferência do servidor (`recheck_secs`: 60 s, depois um décimo da idade, até 30 min)
+// mais 2 min de folga: o app não conseguiu olhar o anúncio e ele pode já ter saído.
+export const unchecked = (o: Opportunity, now: number) =>
+  now - (o.checked_at ?? o.seen_at) > Math.min(1800, Math.max(60, (now - o.seen_at) / 10)) + 120;
+
 function upsertPurchase(p: Purchase) {
   const i = app.purchases.findIndex((x) => x.id === p.id);
   const before = i >= 0 ? app.purchases[i].status : null;

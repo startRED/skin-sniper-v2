@@ -301,7 +301,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    124–153/h tinham rodado 3–4 h sem 429. O número é hipótese de poucas horas. O achado ativo é conferido a cada
    60 s enquanto é novo e depois a cada décimo da idade, até 30 min: um achado parado há 5 h gastava 40 leituras
    de anúncios por hora. Venda do CSFloat com chaveiro não é venda limpa (como a com adesivo): o chaveiro paga
-   acima da base e não prova pattern. O teto desses dois filtros não conta o menor anúncio do livro como
+   acima da base e não prova pattern. **Bloqueio sem cegueira (10/11):** com a Steam barrando o histórico de
+   preços, a avaliação usa o guardado de até 24 h e escreve a idade na evidência; antes, todo candidato de nome com
+   histórico vencido (6 h) ficava "adiado" enquanto o bloqueio durasse. Nome sem histórico guardado continua sem
+   avaliação. 24 h é hipótese. No painel, achado que passou do prazo de conferência (o de `recheck_secs`, mais
+   2 min) aparece apagado, com "Sem conferir há …", e não conta no número da aba: em 10/11 um achado de seed raro
+   ficou 3 h na lista de abertos sem que o app pudesse olhá-lo. O teto desses dois filtros não conta o menor anúncio do livro como
    concorrente: ele é o próprio candidato, e derrubaria o teto abaixo de si mesmo. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
    avaliação; anúncio que sumiu vira evento `gone`.
 

@@ -19,6 +19,9 @@ use rusqlite::{OptionalExtension, params};
 use std::collections::{BTreeMap, HashSet};
 
 const DAY: i64 = 86_400;
+/// Com a Steam barrando o histórico, o guardado ainda serve à avaliação por este prazo.
+// shortcut: 24 h é hipótese (um dia a menos na janela de 7); rever se aviso com histórico velho errar o preço.
+const STALE_HISTORY_MAX: i64 = DAY;
 /// Uma página vazia pode ser transitória (conhecimento 1.3): só vale como "sumiram" na segunda seguida.
 const EMPTY_PAGES_TO_TRUST: u8 = 2;
 /// Balanço do que foi conferido a cada 10 min, para o painel e o log.
@@ -269,8 +272,17 @@ pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<Pri
         if crate::research::current().is_some_and(|c| c.source == "paralela") {
             anyhow::bail!("histórico vencido para leitura paralela");
         }
-        fetch_and_store_history(h, name).await?;
-        h.lock().queue.spend_discovery();
+        match fetch_and_store_history(h, name).await {
+            Ok(()) => h.lock().queue.spend_discovery(),
+            // Steam barrando: sem isso todo candidato fica sem avaliação enquanto o bloqueio durar.
+            Err(e)
+                if last.is_some_and(|t| now - t < STALE_HISTORY_MAX)
+                    && matches!(
+                        e.downcast_ref::<SteamError>(),
+                        Some(SteamError::RateLimited { .. } | SteamError::BreakerOpen { .. })
+                    ) => {}
+            Err(e) => return Err(e),
+        }
     }
     let n = name.to_string();
     h.db.call(move |c| {
@@ -522,6 +534,7 @@ async fn evaluate_one(
 ) -> Result<Judged> {
     let now = h.now();
     let mut points = points_for(h, &l.name, now).await?;
+    let hist_age = history_at(h, &l.name).await?.map_or(0, |t| now - t);
     let learned = super::patterns::group(&h.lock().learned, &l.name, l.seed);
     let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index, l.float)
         .or_else(|| learned.as_ref().map(|(g, _)| g.clone()));
@@ -545,6 +558,12 @@ async fn evaluate_one(
             });
         }
     };
+    if hist_age >= HISTORY_TTL {
+        est.evidence += &format!(
+            " · histórico de preços de {} h atrás, a Steam não deixou atualizar",
+            hist_age / 3600
+        );
+    }
     if correction < 1.0 {
         let teacher = group.is_none() && {
             let s = h.lock();
