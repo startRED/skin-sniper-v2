@@ -61,6 +61,9 @@ qp = [{"appid":730,"strItemName":"G180420B6053004",
 - Headers que o cliente antigo enviava: um `User-Agent` de Chrome 126 (`S/internal/httpx/httpx.go:35`),
   `Accept: application/json, text/javascript, */*` e `Accept-Language: en-US,en;q=0.9,pt-BR;q=0.8`. O
   `Cookie` era opcional (`S/internal/steam/steam.go:99-105,471-480`).
+- O v2 **não manda `Accept-Language` nem `Accept-Encoding`**. Em 10/11/2026, do mesmo IP e com segundos de
+  diferença, a mesma consulta deu 429 com `Accept-Encoding: gzip` (ou com o conjunto do navegador) e 200 sem o
+  cabeçalho, três vezes seguidas. O 429 longo de 08–10/11 era dos pedidos com compressão; sem ela, o mesmo IP passava (`src/steam/client.rs`, `http_builder`).
 - `strItemName` **não aceita market_hash_name**: nesse caso a resposta é `total_count: 0` em silêncio.
   (`S/docs/ref/steam-market-api.md:56-57`)
 - Resposta: `data.{more,start,total_count,listings[],facets[]}`. Em cada listagem: `listingid` (string), `unPrice`
