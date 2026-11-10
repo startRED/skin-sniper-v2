@@ -527,18 +527,26 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   "confirme no app Steam" e o servidor reenvia com o id a cada 2 s por até 60 s.
 - Uma compra por vez. Recusa se o total passar do saldo. Saldo atualiza pelo `wallet_info` da resposta.
 
-## Painel (uma tela, pensado para PC 1920×1080, funciona no celular)
+## Painel (uma seção por vez, pensado para PC 1920×1080, funciona no celular)
 
-- Barra de cima: saldo (editável, mostra se veio da Steam), estado da caça ("Caçando 42 skins ·
-  20 consultas/min · há 3 s"), botão de configurações.
-- Faixa "Melhor combinação com R$ 36,08": as skins, custo e lucro provável; clicar destaca na tabela.
-- Tabela única, densa, atualizada ao vivo: skin (imagem, nome, desgaste, float, seed, grupo), preço,
-  três preços de venda, lucro, margem, prazo, confiança, há quanto tempo apareceu, botão comprar.
-  Ordem padrão por lucro esperado por dia; ordenar clicando no cabeçalho (por dia, lucro, margem, lucro seguro, prazo, mais novo). Linha nova entra com
-  destaque breve; linha vendida sai.
-- Linha expandida: gráfico de 30 dias com as três linhas de preço, frase de evidência, links "abrir na
-  Steam" e "inspecionar no jogo".
-- Compras: seção abaixo da tabela com o que foi comprado, quando destrava e os três preços para vender.
+- Barra de cima: abas (Oportunidades com a contagem, Radar, Compras só quando há compra, Aprendizado),
+  estado da caça ("Caçando 42 skins · 20 consultas totais/min · há 3 s"), saldo editável e botão de
+  configurações. A aba fica no endereço (`#radar`), então voltar e recarregar mantêm a seção. A contagem
+  de oportunidades também aparece no título da aba do navegador.
+- Oportunidades: faixa de uma linha "Melhor combinação" (destaca as skins na lista); seletor "Se eu vender
+  pelo preço Rápido / Médio / Alto", que recalcula lucro, margem, preço de venda e prazo e fica salvo no
+  navegador; tabela ao vivo com skin, compra, lucro + margem, por dia, vende por (com a faixa do rápido ao
+  alto), prazo, risco (selo + confiança), apareceu (+ última conferência) e "Abrir na Steam". "Por dia" é o
+  lucro esperado com risco ÷ prazo total e não muda com o seletor. Ordem padrão por lucro por dia; ordenar
+  pelo cabeçalho. Linha nova entra com destaque breve; linha vendida vai para "Perdidas nas últimas 24 h".
+- Linha expandida (clique em qualquer ponto da linha): gráfico de 30 dias com as três linhas de preço, frase
+  de evidência, tabela dos três cenários e "inspecionar no jogo". Explicações longas ficam na dica do
+  cabeçalho (passar o mouse), não em parágrafos na tela.
+- Radar: skins vigiadas da mais perto de dar lucro para a mais longe, com busca por nome, barra de
+  proximidade em "Falta cair", 25 linhas por vez e nome com link para o mercado.
+- Compras: o que foi comprado, quando destrava e os três preços para vender.
+- Aprendizado: resumo do dia, quatro números do período (7/30/60 dias), gráfico com leitura ao passar o
+  mouse e, recolhido, "Diagnóstico da busca" com as tabelas de detalhe.
 - Configurações (painel lateral): cada chave com colar/salvar/apagar, estado ok/recusada, endereço do
   painel para os links do Telegram, som liga/desliga, lucro mínimo para avisar.
 - Notificação do navegador + som quando chega oportunidade que passa no critério de aviso.

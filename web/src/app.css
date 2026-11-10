@@ -5,7 +5,7 @@
   --line: #262e37;
   --ink: #e9edf1;
   --muted: #98a4b0;
-  --faint: #6c7884;
+  --faint: #818d99;
   --green: #3ecf8e;
   --green-ink: #06281a;
   --green-bg: rgba(62, 207, 142, 0.1);
@@ -14,12 +14,15 @@
   --red: #f26d6d;
   --red-bg: rgba(242, 109, 109, 0.12);
   --radius: 8px;
+  --gutter: max(24px, calc(50% - 696px)); /* barra e avisos alinham com o conteúdo (1440px) */
+  --top: 56px; /* altura da barra de cima no PC: o cabeçalho da tabela gruda logo abaixo */
   --font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
-html { background: var(--bg); }
+html { background: var(--bg); scrollbar-color: #323c47 var(--bg); }
+::selection { background: rgba(62, 207, 142, 0.3); }
 body {
   margin: 0;
   background: var(--bg);
@@ -52,6 +55,12 @@ a { color: inherit; }
 .up { color: var(--green); }
 .down { color: var(--red); }
 .muted { color: var(--muted); }
+
+/* Rótulo + valor: resumos do aprendizado. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 24px; margin: 0; }
+.stats > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.stats dt, .stats small { color: var(--muted); font-size: 12px; }
+.stats dd { margin: 0; font-size: 18px; font-weight: 650; line-height: 1.2; }
 
 .pill {
   display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 99px;
