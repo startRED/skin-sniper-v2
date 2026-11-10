@@ -1878,6 +1878,10 @@ async fn blocked_native_listings_prioritize_public_ads_over_book_prefilters() {
         "render validado conta como resposta boa"
     );
     assert!(
+        recovered.filters_paused_until.is_some(),
+        "o painel precisa do prazo para avisar que seed/float está parado"
+    );
+    assert!(
         recovered
             .message
             .unwrap()

@@ -27,6 +27,8 @@ pub struct Hunt {
     pub last_ok_at: Option<i64>,
     /// Última resposta boa da fila pública, enquanto ela está disponível; `None` durante sua pausa.
     pub book_ok_at: Option<i64>,
+    /// Leitura de anúncios (seed/float) barrada até aqui, mesmo com a caça seguindo por outro caminho.
+    pub filters_paused_until: Option<i64>,
     pub message: Option<String>,
 }
 

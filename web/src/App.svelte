@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { app, bookLane, load, lostRows, start, steamBlocked, unchecked } from './lib/store.svelte';
+  import { app, bookLane, filtersPaused, load, lostRows, start, steamBlocked, unchecked } from './lib/store.svelte';
   import { ago, clock } from './lib/format';
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
@@ -58,6 +58,11 @@
       <b>A Steam recusou as consultas (429): caça em pausa{since}.</b> Reiniciar não encurta o descanso.
     {/if}
     Nova tentativa às {clock(app.state.hunt.paused_until!)}.
+  </div>
+{:else if filtersPaused() && app.state}
+  <div class="banner" role="status">
+    <b>A Steam bloqueou a leitura das skins de seed e float.</b> As skins "Barato" seguem sendo lidas normalmente.
+    Nova tentativa às {clock(app.state.hunt.filters_paused_until!)}.
   </div>
 {/if}
 

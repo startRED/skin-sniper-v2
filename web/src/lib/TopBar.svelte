@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, bookLane, setSaldo, steamBlocked } from './store.svelte';
+  import { app, bookLane, filtersPaused, setSaldo, steamBlocked } from './store.svelte';
   import { ago, centsToInput, clock, money, parseBRL } from './format';
 
   let { tabs, current }: { tabs: { id: string; label: string; count: number }[]; current: string } = $props();
@@ -55,7 +55,7 @@
   </nav>
 
   <div class="hunt" class:paused>
-    <span class="dot" class:live={app.conn === 'live' && !paused} class:warn={paused} class:off={app.conn === 'down'}></span>
+    <span class="dot" class:live={app.conn === 'live' && !paused && !filtersPaused()} class:warn={paused || filtersPaused()} class:off={app.conn === 'down'}></span>
     <div>
       {#if app.conn === 'down'}
         <span>Desconectado</span>
