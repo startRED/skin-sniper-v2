@@ -577,8 +577,9 @@ fn charm_net(usd_cents: i64, ratio: f64) -> i64 {
 /// Soma do que os chaveiros do anúncio rendem (só os que venderam na última semana e rendem mais que a
 /// remoção) e o texto que explica a conta. Sem razão US$→R$ medida, nada.
 // shortcut: o preço é a média pública em US$ × razão, não o livro do chaveiro em R$; se um aviso de chaveiro
-// não fechar na venda, ler o livro dele antes de avisar. A espera de 7 dias para tirar o chaveiro de arma
-// recém-comprada não está confirmada: o texto manda conferir.
+// não fechar na venda, ler o livro dele antes de avisar. A remoção sai na hora e devolve o chaveiro ao
+// inventário (ajuda da Steam, "CS2 - Charms"); o chaveiro tirado guarda a trava de 7 dias da arma (informado
+// pelo Erick em 11/11, fontes de terceiros), a mesma espera que `days_locked` já conta para a arma.
 async fn charm_gain(h: &Hunt, l: &Listing, now: i64) -> Result<Option<(i64, String)>> {
     let Some((ratio, _)) = h.lock().ratio.filter(|_| !l.keychains.is_empty()) else {
         return Ok(None);
@@ -606,7 +607,7 @@ async fn charm_gain(h: &Hunt, l: &Listing, now: i64) -> Result<Option<(i64, Stri
         if net > 0 {
             total += net;
             text += &format!(
-                " · {name} vende a {} (média pública, vendeu na semana) e rende {} tirado da arma, já com a taxa e a remoção; confira se a Steam deixa tirar logo após a compra",
+                " · {name} vende a {} (média pública, vendeu na semana) e rende {} tirado da arma, já com a taxa e a remoção; ele sai na hora, mas só vende depois dos 7 dias de trava, como a arma",
                 brl(usd_to_brl(usd, ratio)),
                 brl(net)
             );
