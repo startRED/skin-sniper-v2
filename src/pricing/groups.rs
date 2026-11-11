@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 const CSPATTERNS: &str = include_str!("../../assets/patterns/cspatterns.json");
 const BLUEGEM: &str = include_str!("../../assets/patterns/bluegem.json");
@@ -21,6 +21,19 @@ const RESEARCHED: &str = include_str!("../../assets/patterns/researched.json");
 /// a mediana em várias delas (XM1014 Zombie Offensive FN, USP-S Tropical Breeze FN, M4A1-S Solitude MW).
 /// Hipótese de recorte, não calibração: o prêmio de cada skin vem das vendas da mesma faixa (n ≥ 3).
 const FLOAT_ELITE_SHARE: f64 = 0.10;
+/// Faixa aprendida: vendas mínimas do nome, vendas vizinhas por janela, prêmio mínimo da janela (1,3× paga a
+/// taxa de 15 % e os 10 % de margem) e teto da faixa em parte do desgaste.
+const FLOAT_LEARN_MIN_SALES: usize = 20;
+const FLOAT_WINDOW: usize = 5;
+const FLOAT_MIN_PREMIUM: f64 = 1.3;
+const FLOAT_MAX_SHARE: f64 = 0.5;
+/// Teto do prêmio de float no preço de venda na Steam. As vendas do CSFloat pagam 3–8× em float baixo, mas na
+/// Steam (anúncios de float bom vistos de 05 a 11/11/2026) some sem voltar 36 % do que pede 1,15–1,5× o preço
+/// comum, 16 % do que pede 1,5–2× e 5 % do que pede 3× ou mais.
+/// Anúncio comum some 6 %, 3 % e 3 % nas mesmas faixas: o prêmio de float fecha na Steam, mas não no tamanho do CSFloat.
+// shortcut: 2× é hipótese (último degrau em que some bem mais que o comum); acertar com venda de float fechada
+// na Steam. O lucro esperado da avaliação ainda pesa a venda rápida, que não leva prêmio nenhum.
+pub const FLOAT_STEAM_MAX_MULTIPLE: f64 = 2.0;
 
 /// Fade: só entra quem tem ao menos este % E está nas primeiras posições do rank da tabela.
 const FADE_MIN_PCT: f64 = 99.0;
@@ -160,13 +173,96 @@ fn wear_range(market_hash_name: &str) -> Option<(&'static str, f64, f64)> {
     .find(|(w, _, _)| market_hash_name.ends_with(&format!("({w})")))
 }
 
-/// Faixa de float de elite `(de, até)` do item: os `FLOAT_ELITE_SHARE` melhores do desgaste, começando no menor
-/// float que a skin tem. `None` sem desgaste no nome, sem tabela de float ou se a skin não chega no desgaste.
-pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
+/// Faixa de float aprendida por nome (`set_float_bands`): `Some((até, prêmio))`, ou `None` quando as vendas
+/// mostram que float baixo não paga prêmio nesse nome. Nome ausente = sem medida, vale a faixa fixa.
+/// `(até, prêmio, parte das vendas do nome que caiu na faixa)`.
+pub type Band = Option<(f64, f64, f64)>;
+static LEARNED_BANDS: RwLock<Option<HashMap<String, Band>>> = RwLock::new(None);
+
+pub fn set_float_bands(bands: HashMap<String, Band>) {
+    if let Ok(mut b) = LEARNED_BANDS.write() {
+        *b = Some(bands);
+    }
+}
+
+fn learned_band(market_hash_name: &str) -> Option<Band> {
+    LEARNED_BANDS
+        .read()
+        .ok()?
+        .as_ref()?
+        .get(market_hash_name)
+        .copied()
+}
+
+/// Limites de float do nome: o desgaste cortado pelo float que a skin tem.
+fn wear_span(market_hash_name: &str) -> Option<(f64, f64)> {
     let (_, lo, hi) = wear_range(market_hash_name)?;
     let (min, max) = *tables().floats.skins.get(split_name(market_hash_name).0)?;
     let (lo, hi) = (lo.max(min), hi.min(max));
-    (lo < hi).then_some((lo, lo + (hi - lo) * FLOAT_ELITE_SHARE))
+    (lo < hi).then_some((lo, hi))
+}
+
+/// Faixa de float de elite `(de, até)` do item, começando no menor float que a skin tem: até onde as vendas do
+/// CSFloat pagaram prêmio (`learn_float_band`) ou, sem medida, os `FLOAT_ELITE_SHARE` melhores do desgaste.
+/// `None` sem desgaste no nome, sem tabela de float, se a skin não chega no desgaste ou se o prêmio medido é nulo.
+pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
+    let (lo, hi) = wear_span(market_hash_name)?;
+    match learned_band(market_hash_name) {
+        Some(band) => band.map(|(edge, _, _)| (lo, edge)),
+        None => Some((lo, lo + (hi - lo) * FLOAT_ELITE_SHARE)),
+    }
+}
+
+/// `(múltiplo mediano das vendas dentro da faixa aprendida, parte das vendas do nome que caiu nela)`;
+/// `None` sem medida ou sem prêmio.
+pub fn float_premium(market_hash_name: &str) -> Option<(f64, f64)> {
+    learned_band(market_hash_name)?.map(|(_, premium, share)| (premium, share))
+}
+
+/// Aprende a faixa de float de um nome pelas vendas limpas `(float, múltiplo)` do CSFloat: anda do melhor float
+/// para o pior em janelas de `FLOAT_WINDOW` vendas vizinhas e para na primeira janela em que duas delas saíram
+/// abaixo de `FLOAT_MIN_PREMIUM` × o múltiplo mediano do nome. Devolve a faixa (`Band`),
+/// `Some(None)` se nem a primeira janela paga e `None` com vendas de menos para medir.
+// shortcut: janela, 1,3× e teto de metade do desgaste são hipótese sobre 6 dias de vendas (05–11/11/2026);
+// rever quando houver achado de float vendido de verdade.
+pub fn learn_float_band(market_hash_name: &str, sales: &[(f64, f64)]) -> Option<Band> {
+    let (lo, hi) = wear_span(market_hash_name)?;
+    let mut by_float: Vec<(f64, f64)> = sales
+        .iter()
+        .copied()
+        .filter(|(f, m)| f.is_finite() && m.is_finite() && *m > 0.0)
+        .collect();
+    if by_float.len() < FLOAT_LEARN_MIN_SALES {
+        return None;
+    }
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let ordinary = median(&mut by_float.iter().map(|s| s.1).collect());
+    by_float.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let pays = |w: &[(f64, f64)]| {
+        let mut m: Vec<f64> = w.iter().map(|s| s.1).collect();
+        m.sort_by(f64::total_cmp);
+        m[1] >= FLOAT_MIN_PREMIUM * ordinary
+    };
+    let paid = by_float
+        .windows(FLOAT_WINDOW)
+        .take_while(|w| pays(w))
+        .count();
+    if paid == 0 {
+        return Some(None);
+    }
+    let edge = by_float[paid + FLOAT_WINDOW - 2]
+        .0
+        .min(lo + (hi - lo) * FLOAT_MAX_SHARE);
+    let mut inside: Vec<f64> = by_float
+        .iter()
+        .filter(|s| s.0 <= edge)
+        .map(|s| s.1)
+        .collect();
+    let share = inside.len() as f64 / by_float.len() as f64;
+    Some((edge > lo && !inside.is_empty()).then(|| (edge, median(&mut inside), share)))
 }
 
 /// Faixa de desgaste alto de interesse; a aparência real ainda depende da inspeção.
@@ -364,6 +460,36 @@ mod tests {
 
     fn count(r: &[(u16, u16)]) -> usize {
         r.iter().map(|&(a, b)| (b - a + 1) as usize).sum()
+    }
+
+    #[test]
+    fn float_band_is_learned_from_sales_and_stops_where_the_premium_ends() {
+        // FN vai de 0 a 0,07: 8 vendas de float baixo a 3×, 22 comuns a 1×
+        let name = "Desert Eagle | Serpent Strike (Factory New)";
+        let mut sales: Vec<(f64, f64)> = (0..8).map(|i| (0.002 * f64::from(i), 3.0)).collect();
+        sales.extend((0..22).map(|i| (0.02 + 0.002 * f64::from(i), 1.0)));
+        let (edge, premium, share) = learn_float_band(name, &sales).unwrap().unwrap();
+        // a última janela que paga tem 4 vendas caras e 1 comum: a faixa termina nessa comum
+        assert!(
+            (edge - 0.02).abs() < 1e-9 && (premium - 3.0).abs() < 1e-9,
+            "{edge} {premium}"
+        );
+        assert!((share - 0.3).abs() < 1e-9, "9 das 30 vendas: {share}");
+        // sem prêmio no float baixo: nome medido, sem faixa
+        let flat: Vec<(f64, f64)> = (0..30).map(|i| (0.002 * f64::from(i), 1.0)).collect();
+        assert_eq!(learn_float_band(name, &flat), Some(None));
+        // poucas vendas: sem medida, vale a faixa fixa
+        assert_eq!(learn_float_band(name, &sales[..10]), None);
+        // nome de teste só deste caso: a tabela aprendida é global
+        let other = "Desert Eagle | Serpent Strike (Minimal Wear)";
+        set_float_bands(HashMap::from([(other.to_string(), Some((0.11, 2.5, 0.2)))]));
+        assert_eq!(float_band(other), Some((0.07, 0.11)));
+        assert_eq!(float_premium(other), Some((2.5, 0.2)));
+        assert_eq!(
+            group_of(other, None, None, Some(0.10)).unwrap().label,
+            "Float ≤ 0.110"
+        );
+        assert!(float_premium(name).is_none() && float_band(name).is_some());
     }
 
     #[test]

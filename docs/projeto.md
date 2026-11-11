@@ -296,7 +296,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
    (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
    de ligar não tem com o que comparar. **Descanso da leitura de anúncios (10/11):** alvo raro ou de float só é
-   escolhido 24 s depois da última leitura de anúncios (≤ 150/h); a vaga do meio vai a um alvo barato, pelo livro.
+   escolhido 36 s depois da última leitura de anúncios (≤ 100/h; era 24 s até 11/11); a vaga do meio vai a um alvo
+   barato, pelo livro. **Foco em seed e float (11/11):** passado o descanso, a vaga é sempre de um alvo de seed ou
+   de float, alternando entre os dois modos (o que foi escolhido há mais tempo); dentro do modo vale a agenda. Antes
+   a vaga livre disputava com os alvos baratos pelo valor da leitura e, em 12 h, foram 1 869 leituras de barato,
+   531 de seed e 87 de float, sem achado. A alternância meio a meio é hipótese, não medida. O crédito de descoberta
+   caiu de 0,25 para 0,125 por consulta (≈ 11 % das vagas): eram 42 históricos de catálogo por hora no mesmo balde
+   dos anúncios.
    Em 10/11, ~200 leituras de anúncios/h por 3 h terminaram em 429 desse balde por horas, com o livro respondendo;
    124–153/h tinham rodado 3–4 h sem 429. O número é hipótese de poucas horas. O achado ativo é conferido a cada
    60 s enquanto é novo e depois a cada décimo da idade, até 30 min: um achado parado há 5 h gastava 40 leituras
@@ -454,12 +460,24 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   (quem compra leva o mais barato: vender acima do concorrente já à venda não é o mais provável).
   Concorrente = mesmo nome e mesmo grupo raro (ou ambos comuns); no raro conta também o menor anúncio do grupo
   visto nas outras faixas de seed da mesma skin nas últimas 6 h, porque a página de uma faixa não mostra as outras.
-- Float de elite: anúncio comum cujo float está nos 10 % melhores do desgaste (a partir do menor float da skin) é
-  raro do grupo `float:<skin>:<desgaste>` (pattern vence float). O prêmio vem das vendas do CSFloat da mesma faixa,
-  pela mesma regra do raro abaixo; sem 3 vendas, não há prêmio. Medido em 06/11 (157 skins, ~6 000 vendas do
-  CSFloat): os 10 % melhores saíram de 1,3× a 2,8× a mediana em várias skins (XM1014 Zombie Offensive FN 2,8×, USP-S
-  Tropical Breeze FN 2,3×, M4A1-S Solitude MW 1,7×); no Moonrise FT as duas vendas da faixa saíram a ~1,0×. Os 10 %
-  são recorte de hipótese, não calibração.
+  No grupo de float só concorre o anúncio de float igual ou melhor: float pior mais barato não segura a venda.
+- Float de elite: anúncio comum cujo float está na faixa de elite do nome (a partir do menor float da skin) é
+  raro do grupo `float:<skin>:<desgaste>` (pattern vence float).
+  - **Faixa aprendida (11/11, `groups::learn_float_band`):** com ≥ 20 vendas limpas guardadas do nome, a faixa vai
+    do menor float até onde as vendas pagaram prêmio: janelas de 5 vendas vizinhas em ordem de float, parando na
+    primeira em que duas saíram abaixo de 1,3× o múltiplo mediano do nome; teto de metade do desgaste. Se nem a
+    primeira janela paga, o nome não tem faixa. Sem 20 vendas vale a faixa fixa dos 10 % melhores. Refeita a cada
+    seleção (15 min). Medido em 11/11 (642 nomes, 34 787 vendas): 214 nomes com faixa (mediana de 16 % do
+    desgaste), 391 sem prêmio, 37 sem medida. Janela, 1,3× e teto são hipótese.
+  - **Prêmio por anúncio:** as 8 vendas do mesmo nome com float igual ou pior que o do anúncio, as mais próximas
+    primeiro, cada múltiplo limitado a 2× (`FLOAT_STEAM_MAX_MULTIPLE`); sem 3 vendas, não há prêmio. Float melhor
+    não é pago por menos, então o preço não passa do que float pior já pagou. O limite de 2× é hipótese: nas
+    vendas do CSFloat o float baixo paga 3–8×, mas na Steam (anúncios de float bom vistos de 05 a 11/11) sumiu
+    sem voltar 36 % do que pedia 1,15–1,5× o preço comum, 16 % a 1,5–2×, 14 % a 2–3× e 5 % a 3× ou mais (anúncio
+    comum: 6 %, 3 %, 0 %, 3 %).
+  - Medido em 06/11 (157 skins, ~6 000 vendas do CSFloat): os 10 % melhores saíram de 1,3× a 2,8× a mediana em
+    várias skins (XM1014 Zombie Offensive FN 2,8×, USP-S Tropical Breeze FN 2,3×, M4A1-S Solitude MW 1,7×); no
+    Moonrise FT as duas vendas da faixa saíram a ~1,0×. Os 10 % são recorte de hipótese, não calibração.
 - Pattern aprendido (`src/hunt/patterns.rs`): as tabelas só cobrem 4 skins de pattern, e nas vendas do CSFloat de
   06/11 apareceram seeds caros fora delas (MP7 Amberline 890 a 5–10×, M4A4 Etch Lord 158 a 18×). Um coletor lê as
   vendas do CSFloat de uma skin do catálogo a cada 2 min (a de mais vendas/dia com piso ≤ saldo, ≥ 5 vendas/dia, cada
@@ -469,14 +487,18 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   falhas por nome esperam 10 min. O cache completo persiste no banco com a hora real da busca e só volta após
   reinício enquanto tiver menos de 6 h; dados corrompidos ou com data futura são ignorados. Esses prazos são
   hipóteses e a candidata externa continua fora dessa prioridade. Com ≥ 10 vendas limpas, guarda em
-  `learned_sales` cada venda sem adesivo, fora de tabela e float de elite, que saiu entre 2× e o teto do múltiplo
+  `learned_sales` cada venda sem adesivo, fora de tabela e float de elite (a faixa aprendida; ao subir, a venda
+  já guardada cujo float cai nela deixa de contar), que saiu entre 2× e o teto do múltiplo
   raro sobre a mediana da skin.
   Com 3 vendas assim do mesmo seed (somando desgastes e StatTrak, últimos 60 dias) o seed vira grupo
   `learned:<skin>:<seed>` ("Pattern #seed"), o prêmio são as razões guardadas, e entra nas faixas de seed da busca
   rara da skin junto com as da tabela. Os limites (2×, 3 vendas, 60 dias) são hipóteses, não calibração; demora
   dias para juntar prova.
 - Raro: o grupo do anúncio (tier, fase, faixa de fade, float de elite) busca vendas do CSFloat do mesmo grupo
-  (`price / reference.base_price`). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
+  (`price / reference.base_price`) entre todas as guardadas (`csfloat_sales`), não só as da última leitura do
+  nome: as do grupo no mesmo nome ou, com menos de 8, as do grupo em todos os desgastes. Em 10/11 um Moonrise FT
+  Center Star a R$ 7,20 (1,2× o comum) foi recusado com "5 vendas, 1,4x a 1,6x" quando o banco guardava 39 vendas
+  do grupo (mediana 1,78×). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
   prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
   usa a base comum e escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço.
 - Prazo `eta_hours` = 24 / (vendas/dia × fração do peso com mediana ≥ preço), depois da trava.
@@ -567,10 +589,13 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
 
 ## Desvios registrados (caça, implementação)
 
-- Braço de float (`f:<nome>` e `h:<nome>`, modo `float`): até 16 skins comuns × desgaste com faixa de float conhecida, ≥ 20 vendas/dia
-  e piso que cabe no saldo, as que mais vendem primeiro; consulta com o desgaste e o filtro de float da faixa de elite
-  (propriedade 2). Faixa vista acima do saldo sai até a consulta envelhecer (6 h). Não usa o piso mínimo de desconto:
-  o prêmio de float paga a taxa mesmo em skin barata. Um braço de float anterior (removido no #32) consultava a faixa
+- Braço de float (`f:<nome>` e `h:<nome>`, modo `float`): até 24 skins comuns × desgaste com faixa de float conhecida
+  e piso que cabe no saldo; consulta com o desgaste e o filtro de float da faixa de elite (propriedade 2). Faixa
+  vista acima do saldo sai até a consulta envelhecer (6 h). Desde 11/11, nome com faixa aprendida entra se tem
+  ≥ 5 vendas/dia e se comprar no piso e vender pelo prêmio medido (limitado a 2×) paga o lucro mínimo, em ordem de
+  lucro × vendas/dia × parte das vendas que cai na faixa; nome sem medida entra depois, com ≥ 20 vendas/dia e
+  piso ≥ o mínimo do desconto. Antes a ordem era só vendas/dia e 6 dos 16 alvos custavam R$ 0,34 a R$ 1,12, onde
+  o prêmio não paga a taxa. Um braço de float anterior (removido no #32) consultava a faixa
   mas avaliava como comum, sem prêmio, então nunca podia achar lucro de float.
   `h:` pesquisa separadamente a AWP Asiimov Battle-Scarred com float ≥ 0,96, faixa visual aproximada da
   Blackiimov; tem preferência dentro das mesmas 16 vagas e exige a mesma prova de vendas para prêmio.

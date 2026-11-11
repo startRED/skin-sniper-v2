@@ -763,7 +763,7 @@ async fn watched_history_renews_through_legacy_during_native_pause() {
             float: None,
             score: 1.0,
         }));
-        for _ in 0..4 {
+        for _ in 0..(1.0 / scheduler::DISCOVERY_SHARE) as usize {
             s.queue.next(NOW);
         }
     }
@@ -816,7 +816,7 @@ async fn watched_history_renews_through_legacy_during_native_pause() {
     {
         let mut s = h.lock();
         s.queue.set_tasks(boot_tasks(task));
-        for _ in 0..4 {
+        for _ in 0..(1.0 / scheduler::DISCOVERY_SHARE) as usize {
             s.queue.next(NOW);
         }
     }
@@ -1268,14 +1268,15 @@ async fn elite_float_listing_is_priced_by_the_premium_of_its_band() {
             break;
         }
     }
-    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; com float 0,152 a faixa vendeu a ~2× (3 vendas: a de seed 95 é tier do Moonrise, pattern vence float)
+    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; com float 0,152 as 8 vendas de float igual ou pior mais
+    // próximas saíram a 1,5–2× (o prêmio de float é o das vendas vizinhas, não só o das 3 da faixa)
     let o = hit.expect("float de elite vira oportunidade");
     assert_eq!(
         (o.kind, o.group.as_deref()),
         (Kind::Raro, Some("Float ≤ 0.173"))
     );
     assert!(
-        o.evidence.contains("grupo raro: 3 vendas"),
+        o.evidence.contains("grupo raro: 8 vendas"),
         "{}",
         o.evidence
     );
@@ -1450,8 +1451,10 @@ async fn grouped_search_credit_requires_a_page_transport_even_if_that_page_fails
             for _ in 0..4 {
                 s.queue.spend_discovery();
             }
-            // Uma seleção já deu 1/4; três páginas completam o crédito antes de abrir o breaker.
-            s.queue.next(NOW);
+            // As seleções deixam o crédito a três páginas de completar, antes de abrir o breaker.
+            for _ in 0..(1.0 / scheduler::DISCOVERY_SHARE) as usize - 3 {
+                s.queue.next(NOW);
+            }
         }
         if blocked {
             for endpoint in [

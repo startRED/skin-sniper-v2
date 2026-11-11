@@ -18,7 +18,8 @@ use super::{Hunt, detect};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
 use crate::pricing::groups::{
-    float_band, high_float_band, ranges, seed_ranges, skin_base, table_skins,
+    FLOAT_STEAM_MAX_MULTIPLE, float_band, float_premium, high_float_band, ranges, seed_ranges,
+    skin_base, table_skins,
 };
 use crate::pricing::sell::{
     MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
@@ -41,10 +42,13 @@ pub const MIN_SALES_PER_DAY: f64 = 1.0;
 const SCORE_SALES_CAP: f64 = 10.0;
 pub const WATCH_MAX: usize = 40;
 pub const RARE_MAX_TASKS: usize = 24;
-/// Float de elite: até tantas skins × desgaste, as que mais vendem primeiro (giro traz anúncio novo na faixa).
-pub const FLOAT_MAX_TASKS: usize = 16;
+/// Float de elite: até tantas skins × desgaste, as de maior lucro possível × giro primeiro.
+pub const FLOAT_MAX_TASKS: usize = 24;
 /// Abaixo disso quase nunca chega anúncio novo na faixa de elite (10 % do desgaste).
 const FLOAT_MIN_SALES: f64 = 20.0;
+/// Com prêmio de float medido basta o giro mínimo do aprendizado de patterns (5 vendas por dia).
+const FLOAT_MEASURED_MIN_SALES: f64 = 5.0;
+const UNMEASURED_RANK_CAP: f64 = 1e6;
 /// Rank das entradas vindas da busca por nome de skin com tabela (depois da popularidade); não rebaixa o rank
 /// que a varredura já deu ao item.
 const SKIN_RANK_BASE: i64 = 100_000;
@@ -303,6 +307,7 @@ pub(super) fn common_candidates(items: &[Item], c: &Ctx) -> Vec<Task> {
 
 pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     let ratio_floor = |i: &Item| i.triage_brl(c.now, c.ratio);
+    let min_floor = min_discount_floor();
     let mut tasks = common_candidates(items, c);
     tasks.truncate(WATCH_MAX);
     let total: f64 = tasks.iter().map(|t| t.score).sum();
@@ -379,9 +384,11 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         score: per_weight * w,
         ..t
     }));
-    // Float de elite: skin comum × desgaste com faixa conhecida, piso que cabe e giro. Sem piso mínimo de
-    // desconto: o prêmio de float (1,3–2,8× nas vendas medidas) paga a taxa mesmo em skin barata. A faixa vista
-    // acima do saldo sai até a consulta envelhecer.
+    // Float de elite: skin comum × desgaste com faixa conhecida e piso que cabe. Com prêmio medido nas vendas
+    // (`float_premium`), entra quem paga o lucro mínimo comprando no piso e vendendo pelo prêmio, em ordem de
+    // lucro × giro × parte das vendas que cai na faixa. Em 11/11/2026 a escolha só por giro vigiava skin de
+    // R$ 0,34 a R$ 1,12, cujo prêmio não paga a taxa. Sem medida ainda, vale o giro alto e o piso mínimo do
+    // desconto, atrás dos medidos. A faixa vista acima do saldo sai até a consulta envelhecer.
     let mut float: Vec<(f64, Task)> = items
         .iter()
         .filter(|i| !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir"))
@@ -395,14 +402,32 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         })
         .filter_map(|(i, prefix, band)| {
             let id = format!("{prefix}{}", i.name);
-            let spd = i.sales_per_day.filter(|s| *s >= FLOAT_MIN_SALES)?;
             let f = ratio_floor(i)?;
             let seen = observed(c.floors, &id, c.now);
             if f > c.saldo || seen.floor.is_some_and(|f| f > c.saldo) {
                 return None;
             }
+            let rank = match float_premium(&i.name).filter(|_| prefix == "f:") {
+                Some((premium, share)) => {
+                    let spd = i.sales_per_day.filter(|s| *s >= FLOAT_MEASURED_MIN_SALES)?;
+                    let sale = (f as f64 * premium.min(FLOAT_STEAM_MAX_MULTIPLE)) as i64;
+                    let gain = seller_gets(sale) - f;
+                    if gain < min_profit(f) {
+                        return None;
+                    }
+                    // lucro × anúncios esperados na faixa; medidos na frente dos sem medida (`UNMEASURED_RANK_CAP`)
+                    UNMEASURED_RANK_CAP + gain as f64 * spd * share
+                }
+                None => {
+                    let spd = i.sales_per_day.filter(|s| *s >= FLOAT_MIN_SALES)?;
+                    if prefix == "f:" && f < min_floor {
+                        return None;
+                    }
+                    spd.min(UNMEASURED_RANK_CAP)
+                }
+            };
             Some((
-                spd,
+                rank,
                 Task {
                     id,
                     name: i.name.clone(),
@@ -971,6 +996,7 @@ pub async fn maybe_reselect(h: &Hunt) -> Result<()> {
 
 pub async fn reselect_now(h: &Hunt) -> Result<()> {
     let now = h.now();
+    patterns::load_bands(h).await?;
     let (saldo, ratio, floors, learned) = {
         let s = h.lock();
         (s.saldo, s.ratio, s.floors.clone(), s.learned.clone())
@@ -1589,7 +1615,9 @@ mod tests {
         let id_of = |tasks: &[Task]| {
             tasks
                 .iter()
-                .find(|t| t.rare() && t.name.starts_with("Desert Eagle | Heat Treated ("))
+                .find(|t| {
+                    !t.seeds.is_empty() && t.name.starts_with("Desert Eagle | Heat Treated (")
+                })
                 .map(|t| t.id.clone())
         };
         let id = id_of(&select(&items, &ctx(saldo, &boost, &HashMap::new()))).unwrap();
@@ -1631,7 +1659,7 @@ mod tests {
         let has = |floors: &HashMap<_, _>| {
             select(&items, &ctx(saldo, &boost, floors))
                 .iter()
-                .any(|t| t.name == name)
+                .any(|t| t.id == format!("d:{name}"))
         };
         assert!(has(&HashMap::new()));
         let seen = HashMap::from([(format!("d:{name}"), (Some(saldo + 1), 1_793_769_000))]);

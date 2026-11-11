@@ -8,7 +8,9 @@
 use super::Hunt;
 use super::catalog::{self, Item};
 use crate::csfloat::CsfloatSale;
-use crate::pricing::groups::{Group, group_of, skin_base};
+use crate::pricing::groups::{
+    Group, float_band, group_of, learn_float_band, set_float_bands, skin_base,
+};
 use crate::pricing::sell::{MAX_RARE_MULTIPLE, RARE_MIN_SALES};
 use anyhow::Result;
 use rusqlite::params;
@@ -134,12 +136,75 @@ fn counter(l: &mut Learned, sales: &[Sale]) {
     }
 }
 
+/// Refaz as faixas de float aprendidas (`learn_float_band`) com as vendas guardadas e acerta o grupo gravado
+/// nelas, que é o que o selo conta. Barato: uma leitura da tabela a cada seleção.
+pub async fn load_bands(h: &Hunt) -> Result<()> {
+    let rows: Vec<(String, f64, f64)> =
+        h.db.call(|c| {
+            c.prepare(
+                "SELECT name, \"float\", multiple FROM csfloat_sales WHERE \"float\" IS NOT NULL ORDER BY name",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect()
+        })
+        .await?;
+    let mut bands = HashMap::new();
+    for of_name in rows.chunk_by(|a, b| a.0 == b.0) {
+        let sales: Vec<(f64, f64)> = of_name.iter().map(|r| (r.1, r.2)).collect();
+        if let Some(band) = learn_float_band(&of_name[0].0, &sales) {
+            bands.insert(of_name[0].0.clone(), band);
+        }
+    }
+    let names: Vec<String> = bands.keys().cloned().collect();
+    set_float_bands(bands);
+    // (nome, chave do grupo de float, até): sem faixa, nenhuma venda do nome fica no grupo
+    let groups: Vec<(String, Option<(String, f64)>)> = names
+        .into_iter()
+        .map(|n| {
+            let g = float_band(&n)
+                .and_then(|(lo, hi)| Some((group_of(&n, None, None, Some(lo))?.key, hi)));
+            (n, g)
+        })
+        .collect();
+    h.db.call(move |c| {
+        let tx = c.transaction()?;
+        for (name, g) in groups {
+            tx.execute(
+                "UPDATE csfloat_sales SET grp = NULL WHERE name = ?1 AND grp LIKE 'float:%'",
+                [&name],
+            )?;
+            if let Some((key, hi)) = g {
+                tx.execute(
+                    "UPDATE csfloat_sales SET grp = ?2 WHERE name = ?1 AND grp IS NULL AND \"float\" <= ?3",
+                    params![name, key, hi],
+                )?;
+            }
+        }
+        tx.commit()
+    })
+    .await?;
+    Ok(())
+}
+
 pub async fn load(h: &Hunt) -> Result<()> {
+    load_bands(h).await?;
     let (rows, sales): (Vec<(String, u16, f64)>, Vec<Sale>) =
         h.db.call(|c| {
+            // Venda que o float explica (faixa aprendida) não ensina seed: sem o float guardado, fica.
             let rows = c
-                .prepare("SELECT name, seed, ratio FROM learned_sales")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .prepare(
+                    "SELECT l.name, l.seed, l.ratio, s.\"float\" FROM learned_sales l
+                     LEFT JOIN csfloat_sales s ON s.name = l.name AND s.seed = l.seed AND s.sold_at = l.sold_at",
+                )?
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get::<_, Option<f64>>(3)?))
+                })?
+                .filter(|r| {
+                    r.as_ref().map_or(true, |(name, _, _, float)| {
+                        !float.zip(float_band(name)).is_some_and(|(f, (lo, hi))| (lo..=hi).contains(&f))
+                    })
+                })
+                .map(|r| r.map(|(name, seed, ratio, _)| (name, seed, ratio)))
                 .collect::<rusqlite::Result<_>>()?;
             let sales = c
                 .prepare(
