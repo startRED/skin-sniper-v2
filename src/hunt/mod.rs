@@ -350,8 +350,9 @@ impl Hunt {
             keys.csfloat.detail = Some(detail);
         }
         let paused = stats.paused_until;
-        // anúncios barrados, mas o livro respondeu há pouco: a caça segue por ele
-        let by_book = book_ok_at.is_some_and(|t| self.now() - t < BOOK_LANE_FRESH_SECS);
+        // anúncios barrados, mas o livro respondeu há pouco: a caça segue por ele (só a de comum lê o livro)
+        let by_book = self.cheap.load(std::sync::atomic::Ordering::Relaxed)
+            && book_ok_at.is_some_and(|t| self.now() - t < BOOK_LANE_FRESH_SECS);
         State {
             saldo_cents: s.saldo,
             saldo_source: s.source,

@@ -2,7 +2,7 @@
 //! no banco e evento SSE; anúncio que sumiu numa nova consulta da mesma tarefa → `gone`.
 //! Docs/projeto.md, "Caça" 4 e "Precificação".
 
-use super::catalog::{FLOOR_TTL, HISTORY_TTL, min_profit, wear_label, window_stats};
+use super::catalog::{FLOOR_TTL, HISTORY_TTL, min_profit, usd_to_brl, wear_label, window_stats};
 use super::scheduler::{Found, Task};
 use super::{Active, Hunt};
 use crate::notify::{Alert, NotifyError};
@@ -564,6 +564,57 @@ async fn seal_for(
     )
 }
 
+/// Uma remoção de chaveiro: pacote de 3 por US$ 0,99 na loja do jogo (fonte de terceiros, 11/2026).
+const CHARM_DETACH_USD_CENTS: i64 = 33;
+
+/// O que um chaveiro rende tirado da arma e vendido separado: preço público em reais, menos a taxa do
+/// Mercado e a remoção.
+fn charm_net(usd_cents: i64, ratio: f64) -> i64 {
+    crate::pricing::fees::seller_gets(usd_to_brl(usd_cents, ratio))
+        - usd_to_brl(CHARM_DETACH_USD_CENTS, ratio)
+}
+
+/// Soma do que os chaveiros do anúncio rendem (só os que venderam na última semana e rendem mais que a
+/// remoção) e o texto que explica a conta. Sem razão US$→R$ medida, nada.
+// shortcut: o preço é a média pública em US$ × razão, não o livro do chaveiro em R$; se um aviso de chaveiro
+// não fechar na venda, ler o livro dele antes de avisar. A espera de 7 dias para tirar o chaveiro de arma
+// recém-comprada não está confirmada: o texto manda conferir.
+async fn charm_gain(h: &Hunt, l: &Listing, now: i64) -> Result<Option<(i64, String)>> {
+    let Some((ratio, _)) = h.lock().ratio.filter(|_| !l.keychains.is_empty()) else {
+        return Ok(None);
+    };
+    let names: Vec<String> = l.keychains.iter().map(|k| k.name.clone()).collect();
+    let priced: Vec<(String, i64)> =
+        h.db.call(move |c| {
+            let mut out = vec![];
+            for name in names {
+                let usd: Option<i64> = c
+                    .query_row(
+                        "SELECT usd_cents FROM charm_prices WHERE name = ?1 AND observed_at >= ?2",
+                        params![name, now - 7 * DAY],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                out.extend(usd.map(|u| (name, u)));
+            }
+            Ok(out)
+        })
+        .await?;
+    let (mut total, mut text) = (0, String::new());
+    for (name, usd) in priced {
+        let net = charm_net(usd, ratio);
+        if net > 0 {
+            total += net;
+            text += &format!(
+                " · {name} vende a {} (média pública, vendeu na semana) e rende {} tirado da arma, já com a taxa e a remoção; confira se a Steam deixa tirar logo após a compra",
+                brl(usd_to_brl(usd, ratio)),
+                brl(net)
+            );
+        }
+    }
+    Ok((total > 0).then_some((total, text)))
+}
+
 /// Avalia um anúncio. `Ok` sem `found`: sem estimativa ou sem lucro (conclusivo). `Err`: falha de rede
 /// ao buscar histórico — o anúncio não é marcado como visto e volta a ser avaliado na próxima consulta.
 async fn evaluate_one(
@@ -622,29 +673,46 @@ async fn evaluate_one(
             )
         };
     }
-    let ev = sell::evaluate(l.price_cents, &est, notify_min);
+    // O chaveiro sai da arma e vende separado: o que ele rende abate do custo (no mínimo 1 centavo).
+    let charm = charm_gain(h, l, now).await?;
+    if let Some((_, text)) = &charm {
+        est.evidence += text;
+    }
+    let gain = charm.as_ref().map_or(0, |c| c.0);
+    let cost = (l.price_cents - gain).max(1);
+    let mut ev = sell::evaluate(cost, &est, notify_min);
+    // chaveiro que rende mais do que a arma custa: o que passou do custo entra direto no lucro
+    let extra = gain - (l.price_cents - cost);
+    for t in [&mut ev.sell.high, &mut ev.sell.mid, &mut ev.sell.quick] {
+        t.profit_cents += extra;
+    }
+    if gain > 0 {
+        // a margem é sobre o que sai do saldo, não sobre o custo abatido
+        ev.margin_pct = ev.sell.mid.profit_cents as f64 * 100.0 / l.price_cents as f64;
+    }
     let near = Some(Near {
         name: l.name.clone(),
         price_cents: l.price_cents,
-        mid_cents: ev.sell.mid.net_cents - l.price_cents,
-        quick_cents: ev.sell.quick.net_cents - l.price_cents,
+        mid_cents: ev.sell.mid.profit_cents,
+        quick_cents: ev.sell.quick.profit_cents,
     });
     // raro: preço médio comum da mesma skin, sem o prêmio do grupo (base do múltiplo e do selo)
     let base_cents = group
         .as_ref()
         .and_then(|_| sell::estimate(&points, now, None, None).ok())
         .map(|e| e.mid.price_cents);
-    let ghost = super::teacher::ghost_worthy(l.price_cents, ev.sell.mid.profit_cents).then(|| {
-        super::teacher::Ghost {
-            listing_id: l.listing_id.clone(),
-            name: l.name.clone(),
-            grp: group.as_ref().map(|g| g.key.clone()),
-            price_cents: l.price_cents,
-            mid_price_cents: ev.sell.mid.price_cents,
-            mid_net_cents: ev.sell.mid.net_cents,
-            base_cents,
-            approved: ev.listable,
-        }
+    // Com chaveiro o professor não aprende: o lucro não vem só da venda da arma.
+    let ghost_worthy =
+        charm.is_none() && super::teacher::ghost_worthy(l.price_cents, ev.sell.mid.profit_cents);
+    let ghost = ghost_worthy.then(|| super::teacher::Ghost {
+        listing_id: l.listing_id.clone(),
+        name: l.name.clone(),
+        grp: group.as_ref().map(|g| g.key.clone()),
+        price_cents: l.price_cents,
+        mid_price_cents: ev.sell.mid.price_cents,
+        mid_net_cents: ev.sell.mid.net_cents,
+        base_cents,
+        approved: ev.listable,
     });
     if !ev.listable {
         return Ok(Judged {

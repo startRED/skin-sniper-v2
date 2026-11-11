@@ -13,6 +13,11 @@ pub const SCHEMA: &str = "CREATE TABLE catalog_references (
     name TEXT PRIMARY KEY, usd_cents INTEGER, observed_at INTEGER NOT NULL, rank INTEGER NOT NULL
 );";
 
+/// Preço público dos chaveiros que venderam na última semana (`detect::charm_gain`).
+pub const CHARM_SCHEMA: &str = "CREATE TABLE charm_prices (
+    name TEXT PRIMARY KEY, usd_cents INTEGER NOT NULL, observed_at INTEGER NOT NULL
+);";
+
 #[derive(Deserialize)]
 struct Catalog {
     version: u32,
@@ -247,6 +252,31 @@ fn parse_prices(bytes: &[u8], names: &HashSet<String>) -> Result<Vec<(String, i6
     Ok(result)
 }
 
+/// Chaveiros (comuns, de adesivo e de souvenir) com venda na última semana, pelo menor preço médio entre 24 h,
+/// 7 dias e 30 dias: quem não vendeu na semana fica de fora, porque preço sem venda não é lucro.
+fn parse_charms(bytes: &[u8]) -> Result<Vec<(String, i64)>> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).context("preços públicos inválidos")?;
+    let prices = value.as_object().context("preços públicos sem objeto")?;
+    Ok(prices
+        .iter()
+        .filter(|(name, _)| {
+            ["Charm | ", "Sticker Slab | ", "Souvenir Charm | "]
+                .iter()
+                .any(|p| name.starts_with(p))
+        })
+        .filter(|(_, row)| row.get("last_7d").is_some_and(|v| !v.is_null()))
+        .filter_map(|(name, row)| {
+            let cents = ["last_24h", "last_7d", "last_30d"]
+                .iter()
+                .filter_map(|k| row.get(k).filter(|v| !v.is_null()))
+                .filter_map(|v| exact_cents(v).ok())
+                .min()?;
+            Some((name.clone(), cents))
+        })
+        .collect())
+}
+
 async fn refresh(db: &Db, client: &reqwest::Client) -> Result<()> {
     let mut response = client.get(PRICE_URL).send().await?.error_for_status()?;
     let at = source_time(
@@ -279,16 +309,23 @@ async fn refresh(db: &Db, client: &reqwest::Client) -> Result<()> {
         })
         .await?;
     let prices = parse_prices(&bytes, &names)?;
-    let count = prices.len();
+    let charms = parse_charms(&bytes)?;
+    let (count, charm_count) = (prices.len(), charms.len());
     db.call(move |c| {
         let tx = c.transaction()?;
         for (name, cents) in prices {
             tx.execute("UPDATE catalog_references SET usd_cents=?1, observed_at=?2 WHERE name=?3 AND observed_at<?2", params![cents, at, name])?;
         }
+        // troca inteira: o chaveiro que parou de vender sai
+        tx.execute("DELETE FROM charm_prices", [])?;
+        for (name, cents) in charms {
+            tx.execute("INSERT INTO charm_prices(name, usd_cents, observed_at) VALUES (?1, ?2, ?3)", params![name, cents, at])?;
+        }
         tx.commit()
     }).await?;
     tracing::info!(
         items = count,
+        charms = charm_count,
         observed_at = at,
         "referências públicas conferidas"
     );
@@ -322,6 +359,25 @@ pub fn spawn_refresh(db: Db) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn charms_need_a_sale_in_the_week_and_take_the_lowest_average() {
+        let body = br#"{
+          "Charm | Hot Hands": {"last_24h": 5.5, "last_7d": 5.0, "last_30d": 6.25, "last_90d": 1.0},
+          "Sticker Slab | Crown (Foil)": {"last_24h": null, "last_7d": 288.75, "last_30d": 442.03},
+          "Souvenir Charm | Austin 2025 Highlight | X": {"last_24h": null, "last_7d": null, "last_30d": 9.0},
+          "Sticker | Crown (Foil)": {"last_24h": 400.0, "last_7d": 400.0, "last_30d": 400.0}
+        }"#;
+        let mut charms = parse_charms(body).unwrap();
+        charms.sort();
+        assert_eq!(
+            charms,
+            vec![
+                ("Charm | Hot Hands".to_string(), 500),
+                ("Sticker Slab | Crown (Foil)".to_string(), 28875)
+            ]
+        );
+    }
 
     const SAMPLE: &str = r#"{"version":1,"generated_at":100,"items":[
       {"name":"Glock-18 | Moonrise (Field-Tested)","code":"G180420B6053004","paint_index":694,"reference_usd_cents":300,"rank":4,"icon_url":"icon"},
