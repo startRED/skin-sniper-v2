@@ -212,6 +212,8 @@ pub struct Queue {
     pub last_exploring: bool,
     /// Hora da última leitura de anúncios (`LISTINGS_REST_SECS`).
     listed_at: i64,
+    /// Último modo raro escolhido (`rare_turn`); fica na fila porque o alvo lido pode sair da seleção.
+    rare_last: Option<Mode>,
     cursors: HashMap<String, usize>,
     selection_revision: u64,
     query_revisions: HashMap<String, u64>,
@@ -377,21 +379,15 @@ impl Queue {
         now - self.listed_at < LISTINGS_REST_SECS
     }
 
-    /// Modo raro (seed ou float) escolhido há mais tempo: a leitura de anúncios alterna entre os dois.
+    /// Modo raro (seed ou float) da vez: a leitura de anúncios alterna entre os dois.
     // shortcut: metade para cada modo, fixo; trocar pelo retorno medido quando o float tiver achados vendidos.
     pub fn rare_turn(&self) -> Option<Mode> {
-        let last = |m: Mode| {
-            self.entries
-                .values()
-                .filter(|e| e.task.mode() == m)
-                .map(|e| self.stats.get(&e.task.id).map_or(0, |s| s.picked_at))
-                .max()
-        };
-        match (last(Mode::Seed), last(Mode::Float)) {
-            (Some(seed), Some(float)) if float < seed => Some(Mode::Float),
-            (Some(_), _) => Some(Mode::Seed),
-            (None, Some(_)) => Some(Mode::Float),
-            (None, None) => None,
+        let has = |m: Mode| self.entries.values().any(|e| e.task.mode() == m);
+        match (has(Mode::Seed), has(Mode::Float)) {
+            (true, true) if self.rare_last == Some(Mode::Seed) => Some(Mode::Float),
+            (true, _) => Some(Mode::Seed),
+            (false, true) => Some(Mode::Float),
+            (false, false) => None,
         }
     }
 
@@ -483,7 +479,11 @@ impl Queue {
                 })
                 .map(|(_, e)| e)
         };
-        let id = pick?.task.id.clone();
+        let pick = pick?;
+        let (id, mode) = (pick.task.id.clone(), pick.task.mode());
+        if mode != Mode::Cheap {
+            self.rare_last = Some(mode);
+        }
         if exploring {
             self.explore -= 1.0;
         }
@@ -1462,12 +1462,18 @@ mod tests {
             rare("f:b", vec![], Some((0.0, 0.01))),
         ]);
         let mut picked = Vec::new();
+        let mut last = String::new();
         for now in 1..=4 {
             let mode = q.rare_turn().unwrap();
             let t = q.next_matching(now, |t| t.mode() == mode).unwrap();
             picked.push(t.mode());
+            last = t.id;
         }
         assert_eq!(picked, [Mode::Seed, Mode::Float, Mode::Seed, Mode::Float]);
+        // o float recém-lido sai da seleção (preço acima do saldo): a vez continua sendo do seed
+        let rest = q.tasks().into_iter().filter(|t| t.id != last).collect();
+        q.set_tasks(rest);
+        assert_eq!(q.rare_turn(), Some(Mode::Seed));
     }
 
     #[test]
