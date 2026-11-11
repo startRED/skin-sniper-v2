@@ -160,6 +160,7 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE reads (at INTEGER NOT NULL, arm TEXT NOT NULL, fresh INTEGER NOT NULL);
     CREATE INDEX reads_at ON reads(at);
     "#,
+    crate::hunt::bootstrap::CHARM_SCHEMA,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.

@@ -12,7 +12,7 @@ comprar lá. **Desde 09/11/2026 o app não usa a conta Steam** (pedido do Erick)
 sessão, carteira ou compra pelo servidor; só consultas públicas do mercado. O Skin
 Sniper escolhe sozinho o que caçar. Leve no PC: um binário Rust, um banco SQLite que se limpa sozinho.
 
-Não é objetivo da v1: vender pelo painel, valorizar adesivo/chaveiro, auto-compra, facas e luvas. Auto-compra e confirmação sem celular: plano futuro em
+Não é objetivo da v1: vender pelo painel, valorizar adesivo (o chaveiro entra no lucro desde 11/11, ver "Chaveiro" no item da caça), auto-compra, facas e luvas. Auto-compra e confirmação sem celular: plano futuro em
 `docs/superpowers/plans/2026-11-06-auto-compra.md`.
 
 ## Arquitetura
@@ -314,7 +314,18 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Em 10/11, ~200 leituras de anúncios/h por 3 h terminaram em 429 desse balde por horas, com o livro respondendo;
    124–153/h tinham rodado 3–4 h sem 429. O número é hipótese de poucas horas. O achado ativo é conferido a cada
    60 s enquanto é novo e depois a cada décimo da idade, até 30 min: um achado parado há 5 h gastava 40 leituras
-   de anúncios por hora. Venda do CSFloat com chaveiro não é venda limpa (como a com adesivo): o chaveiro paga
+   de anúncios por hora. **Chaveiro (11/11, pedido do Erick):** todo anúncio lido traz os chaveiros presos à arma;
+   o que cada um rende tirado e vendido separado abate do custo do anúncio na avaliação (`detect::charm_gain`), sem
+   consulta nova à Steam. Rende = líquido da taxa do Mercado sobre o preço público (`charm_prices`, da mesma
+   tabela diária de referência, US$ × razão medida) − uma remoção (US$ 0,33: pacote de 3 por US$ 0,99). Só entra
+   chaveiro com venda nos últimos 7 dias (1 856 dos 6 155 da tabela em 11/11), pelo menor preço médio entre 24 h,
+   7 e 30 dias, e só se render mais que a remoção; o texto da oportunidade mostra a conta. Anúncio com chaveiro
+   contado não vira compra virtual do professor. Medido antes de construir: em 9 419 anúncios vistos (06–11/11),
+   179 tinham chaveiro e nenhum rendia R$ 2 depois da remoção — o aviso é para o caso raro, não uma fonte de
+   achados. Não confirmado (fontes de terceiros): o preço da remoção e se a Steam deixa tirar o chaveiro de arma
+   recém-comprada sem esperar 7 dias. Adesivo fica de fora: raspado, some; no CSFloat o comprador pagou ~10 % do
+   valor de referência dos adesivos (1 365 vendas do cache) e na Steam não há prova de prêmio.
+   Venda do CSFloat com chaveiro não é venda limpa (como a com adesivo): o chaveiro paga
    acima da base e não prova pattern. **Bloqueio sem cegueira (10/11):** com a Steam barrando o histórico de
    preços, a avaliação usa o guardado de até 24 h e escreve a idade na evidência; antes, todo candidato de nome com
    histórico vencido (6 h) ficava "adiado" enquanto o bloqueio durasse. Nome sem histórico guardado continua sem

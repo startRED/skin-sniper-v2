@@ -1630,6 +1630,37 @@ async fn newly_unaffordable_page_reselects_without_waiting_fifteen_minutes() {
 }
 
 #[tokio::test]
+async fn a_charm_that_sold_this_week_adds_its_net_value_to_the_profit() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    bodies.listings.lock().unwrap()["data"]["listings"][0]["asset"]["asset_accessories"] =
+        json!([{"description": {"market_hash_name": "Charm | Hot Hands", "type": "Charm"}}]);
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO charm_prices(name, usd_cents, observed_at) VALUES ('Charm | Hot Hands', 500, ?1)",
+            [NOW],
+        )
+    })
+    .await
+    .unwrap();
+
+    let found = run_until_two(&h, &mut rx).await;
+    let o = found.iter().find(|o| o.id == ID_CHEAP).unwrap();
+    // razão medida 4,0: US$ 5,00 → R$ 20,00; líquido da taxa menos a remoção (US$ 0,33 → R$ 1,32)
+    let gain = crate::pricing::fees::seller_gets(2000) - 132;
+    assert_eq!(o.price_cents, 800);
+    assert_eq!(
+        o.sell.mid.profit_cents,
+        o.sell.mid.net_cents - 800 + gain,
+        "{}",
+        o.evidence
+    );
+    assert!(o.evidence.contains("Charm | Hot Hands"), "{}", o.evidence);
+}
+
+#[tokio::test]
 async fn cheap_hunt_off_keeps_only_seed_and_float_targets() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();
