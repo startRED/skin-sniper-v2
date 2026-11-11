@@ -118,6 +118,9 @@ pub struct Opportunity {
     pub float: Option<f64>,
     pub seed: Option<i64>,
     pub group: Option<String>,
+    /// Para leigo: o que faz este anúncio valer mais (desconto, seed, float, pattern e o que ele é).
+    #[serde(default)]
+    pub why: Option<String>,
     pub kind: Kind,
     pub price_cents: i64,
     pub sell: Sell,
@@ -286,6 +289,7 @@ impl fmt::Debug for SettingsInput {
 
 /// Eventos do SSE; outros módulos publicam em `AppState::events`.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // um evento por anúncio achado; caixa não compensa
 pub enum Event {
     Opportunity(Opportunity),
     Gone {
