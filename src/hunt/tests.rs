@@ -1661,6 +1661,38 @@ async fn a_charm_that_sold_this_week_adds_its_net_value_to_the_profit() {
 }
 
 #[tokio::test]
+async fn rare_premium_comes_from_what_closed_on_steam_when_there_is_enough() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    // três Center Star do mesmo nome que sumiram em 1 h a R$ 34,71, 3× o preço comum (R$ 11,57)
+    db.call(|c| {
+        for i in 0..3 {
+            c.execute(
+                "INSERT INTO observations(listing_id, name, query, grp, price_cents, first_seen, last_seen,
+                    cheapest, gone_at)
+                 VALUES (?1, ?2, 'q', 'cs:Glock-18 | Moonrise:t1', 3471, ?3, ?3, 0, ?3 + 3600)",
+                rusqlite::params![format!("gone{i}"), MOON, NOW - 86_400],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let found = run_until_two(&h, &mut rx).await;
+    let t1 = found.iter().find(|o| o.id == ID_T1).unwrap();
+    assert!(
+        t1.evidence.contains("prêmio medido na Steam"),
+        "{}",
+        t1.evidence
+    );
+    // 3× a mediana comum já com a queda de 2 %; só com as 3 vendas do CSFloat (~1,5×) era R$ 17,76
+    assert_eq!(t1.sell.mid.price_cents, 3473, "{}", t1.evidence);
+}
+
+#[tokio::test]
 async fn cheap_hunt_off_keeps_only_seed_and_float_targets() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();
