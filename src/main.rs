@@ -156,7 +156,17 @@ async fn main() -> Result<()> {
     // Saída extra (celular na Starlink) só vale com IP diferente do de casa: em 08/11 as duas saíram pelo mesmo
     // IP e somaram a carga que abriu o bloqueio longo. Começa desligada até a 1ª conferência.
     let steam = Arc::new(
-        steam::client::SteamClient::new()?.with_public_alt_proxy(steam::client::ALT_PROXY)?,
+        steam::client::SteamClient::new()?
+            .with_public_alt_proxy(steam::client::ALT_PROXY)?
+            .with_browsers(
+                steam::browser::find_chrome().map(|exe| {
+                    steam::browser::Browser::new(exe, dir.join("chrome-principal"), 9331, None)
+                }),
+                steam::browser::find_chrome().map(|exe| {
+                    let p = Some(steam::client::ALT_PROXY);
+                    steam::browser::Browser::new(exe, dir.join("chrome-extra"), 9332, p)
+                }),
+            ),
     );
     steam.set_alt_usable(false);
     tokio::spawn(steam::client::watch_alt_ip(steam.clone()));

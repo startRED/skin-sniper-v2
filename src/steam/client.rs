@@ -596,6 +596,8 @@ pub struct SteamClient {
     research_db: Mutex<Option<crate::db::Db>>,
     main_send_pace: tokio::sync::Mutex<SendPace>,
     alt_send_pace: tokio::sync::Mutex<SendPace>,
+    /// Chrome sem login que lê os anúncios (principal, extra); `None` nos testes e sem Chrome instalado.
+    browsers: [Option<Arc<super::browser::Browser>>; 2],
 }
 
 #[derive(Default)]
@@ -670,6 +672,7 @@ impl SteamClient {
             research_db: Mutex::new(None),
             main_send_pace: tokio::sync::Mutex::new(SendPace::default()),
             alt_send_pace: tokio::sync::Mutex::new(SendPace::default()),
+            browsers: [None, None],
             http: http_builder().build()?,
             alt: None,
             alt_public_only: false,
@@ -780,10 +783,11 @@ impl SteamClient {
                         inner.bucket(ep).note_query(now);
                     }
                     inner.last_any = Some(now);
+                    let read = jittered(now, inner.read_spacing);
                     if bucket != 2 && alt {
-                        inner.alt_last_read = Some(now);
+                        inner.alt_last_read = Some(read);
                     } else if bucket != 2 {
-                        inner.last_read = Some(now);
+                        inner.last_read = Some(read);
                     }
                     pace.last_bucket[bucket] = Some(now);
                     return Ok(());
@@ -827,6 +831,67 @@ impl SteamClient {
     }
 
     /// Saída extra somente para livro e anúncios públicos da interface antiga.
+    /// Anúncios passam pelo Chrome de cada saída (`alt` com o proxy da extra).
+    pub fn with_browsers(
+        mut self,
+        main: Option<super::browser::Browser>,
+        alt: Option<super::browser::Browser>,
+    ) -> Self {
+        self.browsers = [main.map(Arc::new), alt.map(Arc::new)];
+        self
+    }
+
+    /// Envia pela saída; anúncios vão pelo Chrome dela quando há um.
+    async fn execute(
+        &self,
+        ep: Endpoint,
+        request: reqwest::Request,
+        via_alt: bool,
+    ) -> std::result::Result<reqwest::Response, String> {
+        match &self.browsers[via_alt as usize] {
+            // Só leitura pública em JSON: o `fetch` segue redirecionamento (o 302 do código G fica no reqwest)
+            // e não manda o cookie de login nem o `bMarketOptOut` da interface antiga.
+            Some(b)
+                if matches!(
+                    ep,
+                    Endpoint::Listings | Endpoint::Book | Endpoint::History | Endpoint::Search
+                ) && request.method() == reqwest::Method::GET
+                    && !request.headers().contains_key(COOKIE)
+                    && request
+                        .headers()
+                        .get("accept")
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.contains("json")) =>
+            {
+                let headers: Vec<(String, String)> = ["accept", "x-valve-request-type"]
+                    .iter()
+                    .filter_map(|k| {
+                        let v = request.headers().get(*k)?.to_str().ok()?;
+                        Some((k.to_string(), v.to_string()))
+                    })
+                    .collect();
+                let (status, body) = b.fetch(request.url().as_str(), &headers).await?;
+                let resp = http::Response::builder()
+                    .status(status)
+                    .body(body)
+                    .map_err(|e| e.to_string())?;
+                Ok(reqwest::Response::from(resp))
+            }
+            _ => {
+                let client = if via_alt {
+                    self.alt.as_ref()
+                } else {
+                    Some(&self.http)
+                };
+                client
+                    .ok_or("saída extra desligada")?
+                    .execute(request)
+                    .await
+                    .map_err(|e| e.without_url().to_string())
+            }
+        }
+    }
+
     pub fn with_public_alt_proxy(self, url: &str) -> anyhow::Result<Self> {
         let mut c = self.with_alt_proxy(url)?;
         c.alt_public_only = true;
@@ -1467,12 +1532,12 @@ impl SteamClient {
             crate::research::finish(attempt, "not_sent").await;
             return Err(e);
         }
-        let resp = match self.http.execute(request).await {
+        let resp = match self.execute(ep, request, false).await {
             Ok(r) => r,
             Err(e) => {
                 crate::research::finish(attempt, "network_error").await;
                 self.inner.lock().unwrap().breakers[ep.idx()].on_fail(Instant::now());
-                return Err(Error::Transport(e.without_url().to_string()));
+                return Err(Error::Transport(e));
             }
         };
         let result = self
@@ -1525,7 +1590,7 @@ impl SteamClient {
         check: Option<EnvelopeCheck>,
         reset_on_success: bool,
     ) -> Option<Result<(Parts, Vec<u8>)>> {
-        let alt = self.alt.as_ref()?;
+        self.alt.as_ref()?;
         let mut request = req.try_clone()?.build().ok()?;
         if let Err(e) = self.public_request(ep, &mut request) {
             return Some(Err(e));
@@ -1550,7 +1615,7 @@ impl SteamClient {
                 Some(Err(e))
             };
         }
-        match alt.execute(request).await {
+        match self.execute(ep, request, true).await {
             Ok(r) if r.status() == StatusCode::TOO_MANY_REQUESTS => {
                 crate::research::finish(attempt, "rate_limited").await;
                 let retry = retry_after(&r);
@@ -1581,7 +1646,7 @@ impl SteamClient {
                 crate::research::finish(attempt, "network_error").await;
                 let mut g = self.inner.lock().unwrap();
                 if g.alt_down_until.is_none_or(|t| Instant::now() >= t) {
-                    tracing::warn!(erro = %e.without_url(), "saída extra indisponível; tenta de novo em 5 min");
+                    tracing::warn!(erro = %e, "saída extra indisponível; tenta de novo em 5 min");
                 }
                 g.alt_down_until = Some(Instant::now() + ALT_DOWN);
                 None
@@ -3007,3 +3072,20 @@ mod tests {
 #[cfg(test)]
 #[path = "client_legacy_tests.rs"]
 mod legacy_tests;
+
+/// Marca da última leitura deslocada em até ±30 % do intervalo: quem lê na mão não clica num relógio.
+/// A média do ritmo fica igual. Nos testes, sem sorteio.
+fn jittered(now: Instant, spacing: Duration) -> Instant {
+    if cfg!(test) {
+        return now;
+    }
+    use std::hash::BuildHasher;
+    let r = std::collections::hash_map::RandomState::new().hash_one(now) % 601;
+    let f = (r as f64 - 300.0) / 1000.0;
+    let d = spacing.mul_f64(f.abs());
+    if f >= 0.0 {
+        now + d
+    } else {
+        now.checked_sub(d).unwrap_or(now)
+    }
+}
