@@ -525,6 +525,15 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   do grupo (mediana 1,78×). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
   prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
   usa a base comum e escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço.
+  **Prova da própria Steam (11/11):** em grupo de tabela ou seed aprendido, quando o banco guarda 3 ou mais
+  anúncios do mesmo nome e grupo que sumiram em até 48 h sem relistagem (`observations`), o múltiplo passa a ser
+  preço ÷ preço comum desses sumiços, no lugar do CSFloat (`detect::steam_closed`), e a evidência diz "prêmio
+  medido na Steam". Medido em 11/11: Center Star FT 1,6× no CSFloat × 2,0–2,6× fechado na Steam; High Beam T1
+  2,9× × 1,4×; seed 425 do Serpent Strike 1,0× na Steam. Refeitas as avaliações antigas de raro com 3+
+  fechamentos, a regra muda uma (o Moonrise a R$ 7,20 recusado em 10/11 passa a +R$ 3,72) e não cria aviso. Grupo de
+  float fica de fora: os anúncios da faixa são pedidos a preço comum e somem como comum (205 fechamentos de Red
+  Quartz a 0,99×), a mediana não mede o prêmio. Limites: sumir não é vender com certeza e anúncio barato some
+  primeiro (a mediana tende para baixo); 3 fechamentos e 48 h são hipóteses.
 - Prazo `eta_hours` = 24 / (vendas/dia × fração do peso com mediana ≥ preço), depois da trava.
 - Confiança: alta (≥ 20 vendas/dia e ≥ 100 pontos em 7 dias; raro com n ≥ 8), média (≥ 5/dia; raro n ≥ 3),
   baixa no resto.

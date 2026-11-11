@@ -387,6 +387,35 @@ async fn rare_evidence(
     })
 }
 
+/// Múltiplos fechados na própria Steam: anúncios do mesmo nome e grupo que sumiram em até 48 h sem relistagem,
+/// preço ÷ `base_cents`. O prêmio do CSFloat erra para os dois lados (medido em 11/11/2026): Center Star FT
+/// previsto a 1,6× fechou a 2,0–2,6× na Steam; High Beam T1 previsto a 2,9× fechou a 1,4×.
+/// Grupo de float fica de fora: quase todo anúncio da faixa é pedido a preço comum e some como comum (205
+/// fechamentos de Red Quartz a 0,99×), então a mediana dos sumiços não mede o prêmio.
+// shortcut: sumir não é vender com certeza (retirada sem relistagem conta como venda) e anúncio barato some
+// primeiro, o que puxa a mediana para baixo; se um aviso com esta prova não fechar na venda, exigir mais de
+// `RARE_MIN_SALES` fechamentos ou medir a taxa de sumiço por faixa de preço.
+async fn steam_closed(h: &Hunt, name: &str, group_key: &str, base_cents: i64) -> Result<Vec<f64>> {
+    if group_key.starts_with("float:") {
+        return Ok(vec![]);
+    }
+    let (name, grp) = (name.to_string(), group_key.to_string());
+    let prices: Vec<i64> =
+        h.db.call(move |c| {
+            c.prepare(
+                "SELECT price_cents FROM observations WHERE grp = ?1 AND name = ?2 AND relisted = 0
+                 AND gone_at IS NOT NULL AND gone_at - first_seen <= ?3",
+            )?
+            .query_map(params![grp, name, super::teacher::FAST], |r| r.get(0))?
+            .collect()
+        })
+        .await?;
+    Ok(prices
+        .into_iter()
+        .map(|p| p as f64 / base_cents as f64)
+        .collect())
+}
+
 fn api_confidence(c: SellConfidence) -> Confidence {
     match c {
         SellConfidence::High => Confidence::Alta,
@@ -633,12 +662,25 @@ async fn evaluate_one(
         .or_else(|| learned.as_ref().map(|(g, _)| g.clone()));
     let correction = h.correction(group.is_some());
     sell::discount(&mut points, correction);
-    let rare = match (&group, learned) {
+    // raro: preço médio comum da mesma skin, sem o prêmio do grupo (base do múltiplo e do selo)
+    let base_cents = group
+        .as_ref()
+        .and_then(|_| sell::estimate(&points, now, None, None).ok())
+        .map(|e| e.mid.price_cents);
+    let mut rare = match (&group, learned) {
         // pattern aprendido: o prêmio são as vendas que ensinaram (todos os desgastes), não as desta página
         (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
         (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key, l.float).await?),
         (None, _) => None,
     };
+    // Vende-se na Steam: com fechamentos suficientes lá, o prêmio é o que a Steam pagou, não o do CSFloat.
+    let mut on_steam = false;
+    if let (Some(g), Some(b), Some(r)) = (&group, base_cents.filter(|b| *b > 0), rare.as_mut()) {
+        let closed = steam_closed(h, &l.name, &g.key, b).await?;
+        if closed.len() >= sell::RARE_MIN_SALES {
+            (r.multiples, on_steam) = (closed, true);
+        }
+    }
     let mut est = match sell::estimate(&points, now, others_min, rare) {
         Ok(est) => est,
         Err(e) => {
@@ -651,6 +693,10 @@ async fn evaluate_one(
             });
         }
     };
+    if on_steam {
+        est.evidence +=
+            " · prêmio medido na Steam: anúncios do grupo que sumiram em até 48 h sem voltar";
+    }
     if hist_age >= HISTORY_TTL {
         est.evidence += &format!(
             " · histórico de preços de {} h atrás, a Steam não deixou atualizar",
@@ -697,11 +743,6 @@ async fn evaluate_one(
         mid_cents: ev.sell.mid.profit_cents,
         quick_cents: ev.sell.quick.profit_cents,
     });
-    // raro: preço médio comum da mesma skin, sem o prêmio do grupo (base do múltiplo e do selo)
-    let base_cents = group
-        .as_ref()
-        .and_then(|_| sell::estimate(&points, now, None, None).ok())
-        .map(|e| e.mid.price_cents);
     // Com chaveiro o professor não aprende: o lucro não vem só da venda da arma.
     let ghost_worthy =
         charm.is_none() && super::teacher::ghost_worthy(l.price_cents, ev.sell.mid.profit_cents);
