@@ -322,8 +322,10 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    7 e 30 dias, e só se render mais que a remoção; o texto da oportunidade mostra a conta. Anúncio com chaveiro
    contado não vira compra virtual do professor. Medido antes de construir: em 9 419 anúncios vistos (06–11/11),
    179 tinham chaveiro e nenhum rendia R$ 2 depois da remoção — o aviso é para o caso raro, não uma fonte de
-   achados. Não confirmado (fontes de terceiros): o preço da remoção e se a Steam deixa tirar o chaveiro de arma
-   recém-comprada sem esperar 7 dias. Adesivo fica de fora: raspado, some; no CSFloat o comprador pagou ~10 % do
+   achados. A remoção sai na hora, gasta um removedor e devolve o chaveiro ao inventário (ajuda da Steam,
+   "CS2 - Charms"; removedor vem com chaveiro do Arsenal, nos pacotes semanais ou comprado no jogo). O chaveiro
+   tirado guarda a trava de 7 dias da arma (informado pelo Erick em 11/11, fontes de terceiros): é a mesma espera
+   que a oportunidade já conta para a arma. Não confirmado: o preço da remoção (US$ 0,99 por 3). Adesivo fica de fora: raspado, some; no CSFloat o comprador pagou ~10 % do
    valor de referência dos adesivos (1 365 vendas do cache) e na Steam não há prova de prêmio.
    Venda do CSFloat com chaveiro não é venda limpa (como a com adesivo): o chaveiro paga
    acima da base e não prova pattern. **Bloqueio sem cegueira (10/11):** com a Steam barrando o histórico de
