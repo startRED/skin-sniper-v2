@@ -188,7 +188,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    a agenda segue para a caça normal. A candidata externa continua fora dessa prioridade.
    Nessa pausa, as mesmas vagas também enriquecem candidatos do catálogo depois de renovar os vigiados;
    sem fila autenticada disponível, aguardam. Não há consulta adicional fora da cota de descoberta.
-2. **Seleção:** vigia itens com piso entre o mínimo viável e o saldo e ≥ 1 venda/dia. Nota = vendas/dia
+2. **Seleção:** (os alvos comuns em desconto deste item estão **desligados desde 11/11** — ver "Caça de comum em
+   desconto desligada" abaixo; valem os de seed e de float) vigia itens com piso entre o mínimo viável e o saldo e ≥ 1 venda/dia. Nota = vendas/dia
    (até 10: quem compra uma unidade não ganha com giro maior) × lucro possível em reais × fator aprendido do alvo (abaixo). Lucro possível = `seller_gets(piso ÷ (1 − dispersão))` − piso,
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
@@ -296,13 +297,20 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
    (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
    de ligar não tem com o que comparar. **Descanso da leitura de anúncios (10/11):** alvo raro ou de float só é
-   escolhido 36 s depois da última leitura de anúncios (≤ 100/h; era 24 s até 11/11); a vaga do meio vai a um alvo
-   barato, pelo livro. **Foco em seed e float (11/11):** passado o descanso, a vaga é sempre de um alvo de seed ou
-   de float, alternando entre os dois modos (o que foi escolhido há mais tempo); dentro do modo vale a agenda. Antes
-   a vaga livre disputava com os alvos baratos pelo valor da leitura e, em 12 h, foram 1 869 leituras de barato,
-   531 de seed e 87 de float, sem achado. A alternância meio a meio é hipótese, não medida. O crédito de descoberta
-   caiu de 0,25 para 0,125 por consulta (≈ 11 % das vagas): eram 42 históricos de catálogo por hora no mesmo balde
-   dos anúncios.
+   escolhido 42 s depois da última leitura de anúncios (era 24 s, depois 36 s). **Foco em seed e float (11/11):**
+   passado o descanso, a vaga é sempre de um alvo de seed ou de float, **duas leituras de seed para cada uma de
+   float** (`SEEDS_PER_FLOAT`, pedido do Erick; a proporção é hipótese, não medida); dentro do modo vale a agenda.
+   Antes a vaga livre disputava com os alvos baratos pelo valor da leitura e, em 12 h, foram 1 869 leituras de
+   barato, 531 de seed e 87 de float, sem achado. O crédito de descoberta caiu de 0,25 para 0,125 por consulta
+   (≈ 11 % das vagas): eram 42 históricos de catálogo por hora no mesmo balde dos anúncios.
+   **Caça de comum em desconto desligada (11/11, pedido do Erick):** `main` chama `Hunt::disable_cheap_hunt` e a
+   seleção fica só com seed e float. Quem anuncia abaixo do maior pedido de compra vende na hora para o pedido, e
+   em 6 dias foram 5 235 anúncios de comum avaliados para 1 achado de R$ 0,93. Ela gastava 150 das ~277 consultas
+   por hora do app (livro 94, interface antiga 48, busca 8; medido em 11/11, 04:00–10:30Z). Saem junto: os alvos
+   `barato` do painel, a exploração de alvo novo e os pedidos de compra sugeridos (leem o livro dos alvos comuns).
+   O código continua (os testes ligam a caça). Total esperado: ~86 anúncios/h + ~11 de descoberta ≈ 100/h, o teto
+   pedido pelo Erick; não é número seguro medido — as 8 janelas livres desde 06/11 (123 a 262 consultas/h de
+   anúncios + histórico) terminaram todas em 429 depois de 1 a 7 h, sem relação com o ritmo.
    Em 10/11, ~200 leituras de anúncios/h por 3 h terminaram em 429 desse balde por horas, com o livro respondendo;
    124–153/h tinham rodado 3–4 h sem 429. O número é hipótese de poucas horas. O achado ativo é conferido a cada
    60 s enquanto é novo e depois a cada décimo da idade, até 30 min: um achado parado há 5 h gastava 40 leituras

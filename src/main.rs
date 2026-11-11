@@ -170,6 +170,7 @@ async fn main() -> Result<()> {
         settings: settings.clone(),
         telegram: Some(telegram.clone()),
     });
+    hunt.disable_cheap_hunt();
     hunt.load().await?;
     hunt::bootstrap::spawn_refresh(db.clone());
     let rt = runtime::Runtime::new(

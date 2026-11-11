@@ -129,6 +129,8 @@ pub struct Hunt {
     pub(crate) sh: Mutex<Shared>,
     /// Acorda o laço quando o saldo muda.
     pub(crate) wake: Notify,
+    /// Caça de skin comum em desconto (`disable_cheap_hunt`).
+    pub(crate) cheap: std::sync::atomic::AtomicBool,
 }
 
 fn no_key() -> KeyStatus {
@@ -144,6 +146,16 @@ impl Hunt {
         Self::with_clock(deps, now_unix)
     }
 
+    /// Tira da seleção os alvos comuns em desconto; ficam seed e float. O app liga assim desde 11/11/2026
+    /// (pedido do Erick): quem anuncia abaixo do maior pedido de compra vende na hora para o pedido, e em 6 dias
+    /// foram 5 235 anúncios avaliados para 1 achado de R$ 0,93, com 150 das ~277 consultas por hora do app
+    /// (livro, interface antiga e busca).
+    // shortcut: fixo no `main`; virar opção do painel se a caça de comum voltar a interessar.
+    pub fn disable_cheap_hunt(&self) {
+        self.cheap
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn with_clock(deps: HuntDeps, now: fn() -> i64) -> Arc<Self> {
         deps.steam.set_research_db(deps.db.clone());
         deps.csfloat.set_research_db(deps.db.clone());
@@ -156,6 +168,7 @@ impl Hunt {
             telegram: deps.telegram,
             now,
             wake: Notify::new(),
+            cheap: true.into(),
             sh: Mutex::new(Shared {
                 saldo: 0,
                 source: SaldoSource::None,

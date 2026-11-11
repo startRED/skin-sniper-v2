@@ -1014,7 +1014,12 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         floors: &floors,
         learned: &learned,
     };
-    let tasks = super::explore::select(h, &items, &ctx, select(&items, &ctx)).await?;
+    let mut tasks = select(&items, &ctx);
+    if h.cheap.load(std::sync::atomic::Ordering::Relaxed) {
+        tasks = super::explore::select(h, &items, &ctx, tasks).await?;
+    } else {
+        tasks.retain(Task::rare);
+    }
     let (n, removed) = {
         let mut s = h.lock();
         let removed = s.queue.set_tasks(tasks);

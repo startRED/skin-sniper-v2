@@ -47,12 +47,16 @@ const SAVE_EVERY_SECS: i64 = 30;
 const ACTIVE_RECHECK_SECS: i64 = 60;
 /// Teto da conferência do achado antigo (ver `recheck_secs`).
 const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
-/// Descanso da leitura de anúncios: no máximo uma a cada 36 s (≤ 100/h); a vaga que sobra vai ao livro de ofertas.
+/// Descanso da leitura de anúncios: no máximo uma a cada 42 s (≤ 86/h); com o histórico, ~100/h no balde escasso.
 // shortcut: 100/h é hipótese. Medido: ~200 leituras de anúncios/h por 3 h terminaram em 429 por horas (10/11),
 // como 220–250/h em 06/11 e 07/11; 75–85/h de anúncios + 46–49/h de histórico rodaram 6 h (11/11) e a mesma soma
-// terminou em bloqueio às 4 h (10/11). Com a vaga livre sempre indo a seed/float, o teto vira o ritmo real:
-// 100/h + ~25/h de histórico mantém a soma que já rodava (~125/h). Rever com mais dias.
-const LISTINGS_REST_SECS: i64 = 36;
+// terminou em bloqueio às 4 h (10/11). Com a vaga livre sempre indo a seed/float, o teto vira o ritmo real.
+// 11/11: 8 janelas livres desde 06/11, de 123 a 262/h somados, terminaram todas em bloqueio depois de 1 a 7 h;
+// o ritmo não explica a duração. 42 s (86/h + ~11/h de descoberta + avaliação ≈ 100/h) é o teto pedido pelo
+// Erick, não um número medido como seguro.
+const LISTINGS_REST_SECS: i64 = 42;
+/// Leituras de seed para cada leitura de float (`Queue::rare_turn`).
+const SEEDS_PER_FLOAT: u32 = 2;
 
 /// Intervalo de conferência do achado: 60 s enquanto é novo, depois um décimo da idade, até 30 min. Em 10/11 um
 /// achado parado há 5 h gastava 40 leituras de anúncios por hora (20 % do balde) só para dizer que seguia lá.
@@ -212,8 +216,9 @@ pub struct Queue {
     pub last_exploring: bool,
     /// Hora da última leitura de anúncios (`LISTINGS_REST_SECS`).
     listed_at: i64,
-    /// Último modo raro escolhido (`rare_turn`); fica na fila porque o alvo lido pode sair da seleção.
-    rare_last: Option<Mode>,
+    /// Leituras de seed seguidas desde a última de float (`rare_turn`); fica na fila porque o alvo lido pode
+    /// sair da seleção.
+    seed_run: u32,
     cursors: HashMap<String, usize>,
     selection_revision: u64,
     query_revisions: HashMap<String, u64>,
@@ -379,12 +384,13 @@ impl Queue {
         now - self.listed_at < LISTINGS_REST_SECS
     }
 
-    /// Modo raro (seed ou float) da vez: a leitura de anúncios alterna entre os dois.
-    // shortcut: metade para cada modo, fixo; trocar pelo retorno medido quando o float tiver achados vendidos.
+    /// Modo raro (seed ou float) da vez: duas leituras de seed para cada uma de float.
+    // shortcut: 2 para 1 fixo (pedido do Erick em 11/11/2026; os achados reais até aqui vieram de seed); trocar
+    // pelo retorno medido quando o float tiver achados vendidos.
     pub fn rare_turn(&self) -> Option<Mode> {
         let has = |m: Mode| self.entries.values().any(|e| e.task.mode() == m);
         match (has(Mode::Seed), has(Mode::Float)) {
-            (true, true) if self.rare_last == Some(Mode::Seed) => Some(Mode::Float),
+            (true, true) if self.seed_run >= SEEDS_PER_FLOAT => Some(Mode::Float),
             (true, _) => Some(Mode::Seed),
             (false, true) => Some(Mode::Float),
             (false, false) => None,
@@ -481,8 +487,10 @@ impl Queue {
         };
         let pick = pick?;
         let (id, mode) = (pick.task.id.clone(), pick.task.mode());
-        if mode != Mode::Cheap {
-            self.rare_last = Some(mode);
+        match mode {
+            Mode::Seed => self.seed_run += 1,
+            Mode::Float => self.seed_run = 0,
+            Mode::Cheap => {}
         }
         if exploring {
             self.explore -= 1.0;
@@ -1463,13 +1471,23 @@ mod tests {
         ]);
         let mut picked = Vec::new();
         let mut last = String::new();
-        for now in 1..=4 {
+        for now in 1..=6 {
             let mode = q.rare_turn().unwrap();
             let t = q.next_matching(now, |t| t.mode() == mode).unwrap();
             picked.push(t.mode());
             last = t.id;
         }
-        assert_eq!(picked, [Mode::Seed, Mode::Float, Mode::Seed, Mode::Float]);
+        assert_eq!(
+            picked,
+            [
+                Mode::Seed,
+                Mode::Seed,
+                Mode::Float,
+                Mode::Seed,
+                Mode::Seed,
+                Mode::Float
+            ]
+        );
         // o float recém-lido sai da seleção (preço acima do saldo): a vez continua sendo do seed
         let rest = q.tasks().into_iter().filter(|t| t.id != last).collect();
         q.set_tasks(rest);
