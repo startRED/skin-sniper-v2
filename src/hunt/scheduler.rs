@@ -5,8 +5,10 @@
 //! de float. Cada leitura vai para o alvo com mais centavos esperados agora: taxa de anúncio novo × estoque
 //! acumulado desde a última leitura × retorno por anúncio novo. O limitador segue sendo o gargalo.
 //! Uma busca pode conferir vários braços; os preços próximos do teto geram consultas adicionais de anúncios.
-//! A descoberta divide a mesma vaga: cada consulta de vigilância rende 0,25 de crédito e cada passo de
-//! descoberta gasta 1 (≈ 20 % do total); enquanto há poucas tarefas (arranque), a descoberta pode usar tudo.
+//! A leitura de anúncios (seed e float) é o balde escasso da Steam: quando ela não está descansando, a vaga é
+//! de um alvo de seed ou de float, alternados; no descanso a vaga é dos alvos baratos, lidos pelo livro de ofertas.
+//! A descoberta divide a mesma vaga: cada consulta de vigilância rende 0,125 de crédito e cada passo de
+//! descoberta gasta 1 (≈ 11 % do total); enquanto há poucas tarefas (arranque), a descoberta pode usar tudo.
 //!
 //! Determinístico (teste reprodutível, relógio injetável) e sem crate de números aleatórios. Além do valor:
 //! - **Cota de exploração** (`EXPLORE_SHARE`): 1 consulta em 8 vai para o braço menos testado, sempre; o slot
@@ -25,8 +27,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Crédito de descoberta por consulta de vigilância: 1 passo a cada 4 consultas = 20 % do total.
-pub const DISCOVERY_SHARE: f64 = 0.25;
+/// Crédito de descoberta por consulta de vigilância: 1 passo a cada 8 consultas ≈ 11 % do total. Era 0,25: em
+/// 11/11/2026 isso dava 42 históricos de catálogo por hora, no mesmo balde da leitura de seed e float (~125/h).
+pub const DISCOVERY_SHARE: f64 = 0.125;
 /// Com menos tarefas que isto a descoberta tem prioridade (primeiro ciclo).
 pub const BOOT_TASKS: usize = 10;
 const CREDIT_CAP: f64 = 4.0;
@@ -44,10 +47,12 @@ const SAVE_EVERY_SECS: i64 = 30;
 const ACTIVE_RECHECK_SECS: i64 = 60;
 /// Teto da conferência do achado antigo (ver `recheck_secs`).
 const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
-/// Descanso da leitura de anúncios: no máximo uma a cada 24 s (≤ 150/h); a vaga que sobra vai ao livro de ofertas.
-// shortcut: 150/h é hipótese de poucas horas medidas (10/11: ~200 leituras de anúncios/h por 3 h terminaram em
-// 429 por horas, como 220–250/h em 06/11 e 07/11; 124–153/h rodaram 3–4 h sem 429); rever com mais dias.
-const LISTINGS_REST_SECS: i64 = 24;
+/// Descanso da leitura de anúncios: no máximo uma a cada 36 s (≤ 100/h); a vaga que sobra vai ao livro de ofertas.
+// shortcut: 100/h é hipótese. Medido: ~200 leituras de anúncios/h por 3 h terminaram em 429 por horas (10/11),
+// como 220–250/h em 06/11 e 07/11; 75–85/h de anúncios + 46–49/h de histórico rodaram 6 h (11/11) e a mesma soma
+// terminou em bloqueio às 4 h (10/11). Com a vaga livre sempre indo a seed/float, o teto vira o ritmo real:
+// 100/h + ~25/h de histórico mantém a soma que já rodava (~125/h). Rever com mais dias.
+const LISTINGS_REST_SECS: i64 = 36;
 
 /// Intervalo de conferência do achado: 60 s enquanto é novo, depois um décimo da idade, até 30 min. Em 10/11 um
 /// achado parado há 5 h gastava 40 leituras de anúncios por hora (20 % do balde) só para dizer que seguia lá.
@@ -370,6 +375,24 @@ impl Queue {
     /// A leitura de anúncios ainda descansa da última (`LISTINGS_REST_SECS`).
     pub fn resting(&self, now: i64) -> bool {
         now - self.listed_at < LISTINGS_REST_SECS
+    }
+
+    /// Modo raro (seed ou float) escolhido há mais tempo: a leitura de anúncios alterna entre os dois.
+    // shortcut: metade para cada modo, fixo; trocar pelo retorno medido quando o float tiver achados vendidos.
+    pub fn rare_turn(&self) -> Option<Mode> {
+        let last = |m: Mode| {
+            self.entries
+                .values()
+                .filter(|e| e.task.mode() == m)
+                .map(|e| self.stats.get(&e.task.id).map_or(0, |s| s.picked_at))
+                .max()
+        };
+        match (last(Mode::Seed), last(Mode::Float)) {
+            (Some(seed), Some(float)) if float < seed => Some(Mode::Float),
+            (Some(_), _) => Some(Mode::Seed),
+            (None, Some(_)) => Some(Mode::Float),
+            (None, None) => None,
+        }
     }
 
     /// Centavos esperados de ler o alvo agora (`value`): nunca visto vale infinito.
@@ -744,11 +767,18 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
-            // No descanso da leitura de anúncios a vaga é do livro de ofertas (alvo barato).
+            // No descanso da leitura de anúncios a vaga é do livro de ofertas (alvo barato); fora dele, de um
+            // alvo de seed ou float: é a leitura escassa e é onde está o anúncio mal precificado.
             let no_listings = listings_blocked || s.queue.resting(now);
+            let turn = if no_listings {
+                None
+            } else {
+                s.queue.rare_turn()
+            };
             (
-                s.queue.next_matching(now, |t| {
-                    (!no_listings || !t.rare()) && (t.rare() || !recent.contains(&t.id))
+                s.queue.next_matching(now, |t| match turn {
+                    Some(mode) => t.mode() == mode,
+                    None => !t.rare() && !recent.contains(&t.id),
                 }),
                 credit,
             )
@@ -1413,6 +1443,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn listings_slot_alternates_between_seed_and_float() {
+        let rare = |id: &str, seeds: Vec<(u16, u16)>, float: Option<(f64, f64)>| Task {
+            id: id.into(),
+            name: id.into(),
+            code: "G1".into(),
+            wear: None,
+            seeds,
+            float,
+            score: 1.0,
+        };
+        let mut q = Queue::default();
+        assert_eq!(q.rare_turn(), None);
+        q.set_tasks(vec![
+            rare("d:a", vec![], None),
+            rare("r:a", vec![(1, 1)], None),
+            rare("f:a", vec![], Some((0.0, 0.01))),
+            rare("f:b", vec![], Some((0.0, 0.01))),
+        ]);
+        let mut picked = Vec::new();
+        for now in 1..=4 {
+            let mode = q.rare_turn().unwrap();
+            let t = q.next_matching(now, |t| t.mode() == mode).unwrap();
+            picked.push(t.mode());
+        }
+        assert_eq!(picked, [Mode::Seed, Mode::Float, Mode::Seed, Mode::Float]);
+    }
+
+    #[test]
     fn listings_rest_between_reads_and_an_old_find_is_rechecked_less_often() {
         let mut q = Queue::default();
         assert!(!q.resting(1_000_000));
@@ -1807,7 +1865,7 @@ mod tests {
     #[test]
     fn one_call_is_one_query_and_feeds_discovery_credit() {
         let mut q = arms_queue();
-        // fora do arranque (≥ BOOT_TASKS tarefas), a descoberta fica com ~20 %
+        // fora do arranque (≥ BOOT_TASKS tarefas), a descoberta fica com ~11 % (1 passo a cada 8 consultas)
         q.set_tasks(
             (0..BOOT_TASKS)
                 .map(|i| task(&format!("t{i}"), 1.0))
@@ -1824,7 +1882,7 @@ mod tests {
             }
         }
         let share = f64::from(disc) / f64::from(disc + watch);
-        assert!((0.19..=0.21).contains(&share), "parcela {share}");
+        assert!((0.10..=0.12).contains(&share), "parcela {share}");
     }
 
     #[test]
