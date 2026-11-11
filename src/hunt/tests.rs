@@ -1630,6 +1630,20 @@ async fn newly_unaffordable_page_reselects_without_waiting_fifteen_minutes() {
 }
 
 #[tokio::test]
+async fn cheap_hunt_off_keeps_only_seed_and_float_targets() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    lone_moonrise(&h, &mut rx).await;
+    catalog::reselect_now(&h).await.unwrap();
+    assert!(h.lock().queue.tasks().iter().any(|t| !t.rare()));
+    h.disable_cheap_hunt();
+    catalog::reselect_now(&h).await.unwrap();
+    let tasks = h.lock().queue.tasks();
+    assert!(!tasks.is_empty() && tasks.iter().all(Task::rare));
+}
+
+#[tokio::test]
 async fn a_recent_common_page_does_not_spend_another_listing_query() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
