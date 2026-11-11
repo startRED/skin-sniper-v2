@@ -2860,6 +2860,7 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
     );
     h.set_saldo(3608, SaldoSource::Manual);
     let mut hit = None;
+    let mut refused = None;
     for _ in 0..400 {
         tick(&h).await;
         while let Ok(ev) = rx.try_recv() {
@@ -2869,22 +2870,37 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
                 hit = Some(o);
             }
         }
-        if hit.is_some() {
+        refused =
+            h.db.call(|c| {
+                Ok(c.query_row(
+                    "SELECT rare_group, mid_profit_cents, detail FROM evaluations
+                     WHERE listing_id = ?1 AND reason = 'raro_nao_comprovado'",
+                    [ID_LEARNED],
+                    |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .ok())
+            })
+            .await
+            .unwrap();
+        if hit.is_some() || refused.is_some() {
             break;
         }
     }
-    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; o pattern aprendido vendeu a 2,0–2,4×
-    let o = hit.expect("pattern aprendido vira oportunidade");
-    assert_eq!(
-        (o.kind, o.group.as_deref()),
-        (Kind::Raro, Some("Pattern #269"))
-    );
+    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; o pattern aprendido vendeu a 2,0–2,4× no CSFloat, mas
+    // nenhuma venda fechada prova o prêmio: fica de fora (11/11, Serpent Strike #804).
+    assert!(hit.is_none(), "{hit:?}");
+    let (_, mid, detail) = refused.expect("recusa registrada");
+    assert!(detail.contains("grupo raro: 3 vendas"), "{detail}");
     assert!(
-        o.evidence.contains("grupo raro: 3 vendas"),
-        "{}",
-        o.evidence
+        mid >= 100,
+        "o prêmio aprendido ainda aparece no lucro médio: {mid}"
     );
-    assert!(o.sell.mid.profit_cents >= 100, "{:?}", o.sell);
     // e o seed entra na busca rara do Moonrise
     let tasks = h.lock().queue.tasks();
     assert!(

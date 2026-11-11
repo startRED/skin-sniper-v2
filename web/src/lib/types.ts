@@ -29,6 +29,7 @@ export type Opportunity = {
   float: number | null;
   seed: number | null;
   group: string | null;
+  why?: string | null;
   kind: 'desconto' | 'raro';
   price_cents: number;
   sell: Sell;

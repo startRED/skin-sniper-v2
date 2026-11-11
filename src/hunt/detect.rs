@@ -541,6 +541,42 @@ fn no_estimate_reason(e: &sell::NoEstimate) -> &'static str {
     }
 }
 
+/// O que faz o anúncio valer mais, para leigo; o tipo vem do prefixo da chave do grupo (`pricing::groups`).
+fn why(
+    group: Option<&crate::pricing::groups::Group>,
+    seed: Option<u16>,
+    float: Option<f64>,
+) -> String {
+    let Some(g) = group else {
+        return "Desconto: anunciado abaixo do preço normal desta skin; o seed e o float não pesam no preço."
+            .into();
+    };
+    let seed = seed.map_or("?".into(), |s| s.to_string());
+    let float = float.map_or("?".into(), |f| format!("{f:.4}").replace('.', ","));
+    let label = &g.label;
+    match g.key.split(':').next().unwrap_or("") {
+        "cs" => format!(
+            "Pattern de tabela ({label}): o seed {seed} põe a estampa numa posição das mais procuradas desta skin, e colecionador paga mais por ela."
+        ),
+        "bluegem" => format!(
+            "{label}: o seed {seed} deixa a arma com bastante azul (Case Hardened), o que colecionador paga mais."
+        ),
+        "fade" => format!(
+            "{label}: o seed {seed} dá um degradê quase completo, a versão mais procurada do Fade."
+        ),
+        "phase" => format!(
+            "Fase {label}: a cor desta faca/arma Doppler ou Gamma é mais rara que as fases comuns."
+        ),
+        "float" | "highfloat" => format!(
+            "Float {float} ({label}): o desgaste é dos mais raros desta condição, e há quem pague mais por ele."
+        ),
+        "learned" => format!(
+            "{label}: não é um padrão com nome conhecido. O app aprendeu o seed {seed} porque ele vendeu no CSFloat bem acima do preço comum; confira a estampa antes de pagar mais."
+        ),
+        _ => format!("{label} (seed {seed}, float {float})."),
+    }
+}
+
 /// Selo do raro: vendas fechadas do grupo (as do CSFloat guardadas e os anúncios da mesma skin no grupo que
 /// sumiram em até 48 h sem relistagem, múltiplo = preço ÷ `base_cents`) e anúncios do grupo parados há mais de 48 h.
 async fn seal_for(
@@ -771,6 +807,17 @@ async fn evaluate_one(
         )),
         None => None,
     };
+    // Raro sem nenhuma venda fechada que prove o prêmio só é oportunidade se dá lucro vendido como comum (11/11: Serpent
+    // Strike #804 a R$ 3,56 com prêmio de 3 vendas no CSFloat, 0 fechadas, −R$ 0,91 no rápido).
+    if seal.as_ref().is_some_and(|s| !s.proven && s.sales == 0) && ev.sell.quick.profit_cents <= 0 {
+        return Ok(Judged {
+            found: None,
+            near,
+            refused: Some("raro_nao_comprovado"),
+            detail: Some(est.evidence),
+            ghost,
+        });
+    }
     let opp = Opportunity {
         id: l.listing_id.clone(),
         name: l.name.clone(),
@@ -781,6 +828,7 @@ async fn evaluate_one(
         float: l.float,
         seed: l.seed.map(i64::from),
         group: group.as_ref().map(|g| g.label.clone()),
+        why: Some(why(group.as_ref(), l.seed, l.float)),
         kind: if group.is_some() {
             Kind::Raro
         } else {
@@ -1329,6 +1377,28 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>, reserved_a
 #[cfg(test)]
 mod tests {
     use super::rare_multiples;
+
+    #[test]
+    fn why_names_the_reason_for_each_kind() {
+        use crate::pricing::groups::Group;
+        let g = |key: &str, label: &str| Group {
+            key: key.into(),
+            label: label.into(),
+        };
+        assert!(super::why(None, Some(1), Some(0.2)).starts_with("Desconto"));
+        let learned = g("learned:Desert Eagle | Serpent Strike:804", "Pattern #804");
+        let w = super::why(Some(&learned), Some(804), Some(0.21));
+        assert!(
+            w.contains("não é um padrão com nome conhecido") && w.contains("804"),
+            "{w}"
+        );
+        let f = g("float:AK-47 | Redline:FT", "Float ≤ 0.155");
+        assert!(super::why(Some(&f), None, Some(0.15)).contains("Float 0,1500"));
+        let cs = g("cs:Glock-18 | Moonrise:t1", "T1 Center Star");
+        assert!(
+            super::why(Some(&cs), Some(694), None).contains("Pattern de tabela (T1 Center Star)")
+        );
+    }
 
     #[test]
     fn rare_premium_uses_worse_floats_for_float_and_the_whole_group_for_tables() {

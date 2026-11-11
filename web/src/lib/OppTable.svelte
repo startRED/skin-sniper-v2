@@ -167,6 +167,7 @@
             {/if}
           </div>
           <div class="info">
+            {#if o.why}<p class="ev"><b>Por que é oportunidade:</b> {o.why}</p>{/if}
             <p class="ev"><b>Por que confiar:</b> {o.evidence}</p>
             {#if o.seal}<p class="ev"><b>Raro {o.seal.proven ? 'comprovado' : 'ainda não comprovado'}:</b> {o.seal.text.replace(/^(ainda não )?comprovado: /, '')}{#if o.seal.open_cents != null && o.seal.floor_cents != null && o.seal.open_cents > o.seal.floor_cents}. Anuncie a {money(o.seal.open_cents)} e desça até {money(o.seal.floor_cents)}.{/if}</p>{/if}
             <div class="tbl" role="table" aria-label="Preços para vender {o.name}">
