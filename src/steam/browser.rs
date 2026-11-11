@@ -74,6 +74,16 @@ impl Browser {
         out
     }
 
+    #[cfg(test)]
+    async fn probe(&self, expr: &str) -> Result<Value, String> {
+        let mut live = self.live.lock().await;
+        if live.is_none() {
+            *live = Some(self.start().await?);
+        }
+        let (_, ws) = live.as_mut().unwrap();
+        self.eval(ws, expr, 20).await
+    }
+
     async fn start(&self) -> Result<(tokio::process::Child, Ws), String> {
         let mut cmd = tokio::process::Command::new(&self.exe);
         cmd.arg("--headless=new")
@@ -84,6 +94,7 @@ impl Browser {
                 "--no-default-browser-check",
                 "--disable-gpu",
                 "--mute-audio",
+                "--window-size=1920,1080",
             ])
             .arg("about:blank")
             .stdout(std::process::Stdio::null())
@@ -127,16 +138,22 @@ impl Browser {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
             .await
             .map_err(|e| e.to_string())?;
-        // O modo sem janela se anuncia como "HeadlessChrome"; o resto do navegador é o Chrome instalado.
-        let ua = version["User-Agent"]
-            .as_str()
-            .unwrap_or("")
-            .replace("HeadlessChrome", "Chrome");
+        // O modo sem janela se anuncia como "HeadlessChrome" e, com o UA trocado, manda as marcas
+        // (`sec-ch-ua`) vazias; as duas coisas vêm aqui como o Chrome instalado mandaria.
         self.call(&mut ws, "Network.enable", json!({}), 10).await?;
         self.call(
             &mut ws,
             "Network.setUserAgentOverride",
-            json!({"userAgent": ua}),
+            user_agent_override(&version),
+            10,
+        )
+        .await?;
+        // Sem janela a tela é 800×600, tamanho que monitor de verdade não tem.
+        self.call(
+            &mut ws,
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width": 1920, "height": 937, "deviceScaleFactor": 1, "mobile": false,
+                   "screenWidth": 1920, "screenHeight": 1080}),
             10,
         )
         .await?;
@@ -212,6 +229,44 @@ impl Browser {
     }
 }
 
+/// UA e Client Hints do Chrome de Windows, a partir do `/json/version` (`Browser: HeadlessChrome/157.0.x.y`).
+fn user_agent_override(version: &Value) -> Value {
+    let ua = version["User-Agent"]
+        .as_str()
+        .unwrap_or("")
+        .replace("HeadlessChrome", "Chrome");
+    let full = version["Browser"]
+        .as_str()
+        .and_then(|b| b.split('/').nth(1))
+        .unwrap_or("0.0.0.0")
+        .to_string();
+    let major = full.split('.').next().unwrap_or("0").to_string();
+    let brands = |v: &str| {
+        json!([
+            {"brand": "Google Chrome", "version": v},
+            {"brand": "Chromium", "version": v},
+            {"brand": "Not.A/Brand", "version": if v.contains('.') { "99.0.0.0" } else { "99" }},
+        ])
+    };
+    json!({
+        "userAgent": ua,
+        "acceptLanguage": "pt-BR,pt,en-US,en",
+        "platform": "Win32",
+        "userAgentMetadata": {
+            "brands": brands(&major),
+            "fullVersionList": brands(&full),
+            "fullVersion": full,
+            "platform": "Windows",
+            "platformVersion": "19.0.0",
+            "architecture": "x86",
+            "model": "",
+            "mobile": false,
+            "bitness": "64",
+            "wow64": false,
+        },
+    })
+}
+
 /// Script do `fetch`; URL e cabeçalhos entram como JSON, nunca colados no código.
 fn fetch_js(url: &str, headers: &[(String, String)]) -> String {
     let h: serde_json::Map<String, Value> = headers
@@ -258,6 +313,27 @@ mod tests {
             .unwrap();
         println!("status={s} bytes={}", body.len());
         assert!(s == 200 || s == 429, "status {s}");
+    }
+
+    /// Ao vivo, fora da Steam: os cabeçalhos que o Chrome manda não podem dizer "Headless".
+    #[tokio::test]
+    #[ignore]
+    async fn chrome_headers_look_real() {
+        let exe = find_chrome().expect("Chrome instalado");
+        let dir = std::env::temp_dir().join("skin-sniper-chrome-teste-ua");
+        let b = Browser::new(exe, dir, 9338, None);
+        let v = b
+            .probe("(async()=>JSON.stringify({ua:navigator.userAgent,wd:navigator.webdriver,\
+                    brands:navigator.userAgentData&&navigator.userAgentData.brands,\
+                    full:navigator.userAgentData&&await navigator.userAgentData.getHighEntropyValues(['fullVersionList','platform']),\
+                    plugins:navigator.plugins.length,langs:navigator.languages,\
+                    screen:[screen.width,screen.height]}))()")
+            .await
+            .unwrap();
+        let body = v.as_str().unwrap().to_string();
+        println!("{body}");
+        assert!(!body.contains("Headless"), "{body}");
+        assert!(!body.contains("\"wd\":true"), "{body}");
     }
 
     fn urlencode(s: &str) -> String {

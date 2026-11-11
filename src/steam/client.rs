@@ -783,10 +783,11 @@ impl SteamClient {
                         inner.bucket(ep).note_query(now);
                     }
                     inner.last_any = Some(now);
+                    let read = jittered(now, inner.read_spacing);
                     if bucket != 2 && alt {
-                        inner.alt_last_read = Some(now);
+                        inner.alt_last_read = Some(read);
                     } else if bucket != 2 {
-                        inner.last_read = Some(now);
+                        inner.last_read = Some(read);
                     }
                     pace.last_bucket[bucket] = Some(now);
                     return Ok(());
@@ -848,7 +849,20 @@ impl SteamClient {
         via_alt: bool,
     ) -> std::result::Result<reqwest::Response, String> {
         match &self.browsers[via_alt as usize] {
-            Some(b) if ep == Endpoint::Listings && request.method() == reqwest::Method::GET => {
+            // Só leitura pública em JSON: o `fetch` segue redirecionamento (o 302 do código G fica no reqwest)
+            // e não manda o cookie de login nem o `bMarketOptOut` da interface antiga.
+            Some(b)
+                if matches!(
+                    ep,
+                    Endpoint::Listings | Endpoint::Book | Endpoint::History | Endpoint::Search
+                ) && request.method() == reqwest::Method::GET
+                    && !request.headers().contains_key(COOKIE)
+                    && request
+                        .headers()
+                        .get("accept")
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.contains("json")) =>
+            {
                 let headers: Vec<(String, String)> = ["accept", "x-valve-request-type"]
                     .iter()
                     .filter_map(|k| {
@@ -3058,3 +3072,20 @@ mod tests {
 #[cfg(test)]
 #[path = "client_legacy_tests.rs"]
 mod legacy_tests;
+
+/// Marca da última leitura deslocada em até ±30 % do intervalo: quem lê na mão não clica num relógio.
+/// A média do ritmo fica igual. Nos testes, sem sorteio.
+fn jittered(now: Instant, spacing: Duration) -> Instant {
+    if cfg!(test) {
+        return now;
+    }
+    use std::hash::BuildHasher;
+    let r = std::collections::hash_map::RandomState::new().hash_one(now) % 601;
+    let f = (r as f64 - 300.0) / 1000.0;
+    let d = spacing.mul_f64(f.abs());
+    if f >= 0.0 {
+        now + d
+    } else {
+        now.checked_sub(d).unwrap_or(now)
+    }
+}
