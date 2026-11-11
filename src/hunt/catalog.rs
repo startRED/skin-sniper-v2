@@ -388,7 +388,8 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
     // (`float_premium`), entra quem paga o lucro mínimo comprando no piso e vendendo pelo prêmio, em ordem de
     // lucro × giro × parte das vendas que cai na faixa. Em 11/11/2026 a escolha só por giro vigiava skin de
     // R$ 0,34 a R$ 1,12, cujo prêmio não paga a taxa. Sem medida ainda, vale o giro alto e o piso mínimo do
-    // desconto, atrás dos medidos. A faixa vista acima do saldo sai até a consulta envelhecer.
+    // desconto, atrás dos medidos. A faixa vista acima do saldo fica: o float bom é anunciado a 2,4–3,8× o comum
+    // (11/11/2026: Serpent Strike FN a R$ 40,33 com o comum a R$ 10,66) e o mal precificado aparece entre os dois.
     let mut float: Vec<(f64, Task)> = items
         .iter()
         .filter(|i| !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir"))
@@ -403,8 +404,7 @@ pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
         .filter_map(|(i, prefix, band)| {
             let id = format!("{prefix}{}", i.name);
             let f = ratio_floor(i)?;
-            let seen = observed(c.floors, &id, c.now);
-            if f > c.saldo || seen.floor.is_some_and(|f| f > c.saldo) {
+            if f > c.saldo {
                 return None;
             }
             let rank = match float_premium(&i.name).filter(|_| prefix == "f:") {
@@ -1683,11 +1683,11 @@ mod tests {
             let i = items.iter().find(|i| i.name == t.name).unwrap();
             assert!(i.sales_per_day.unwrap() >= FLOAT_MIN_SALES);
         }
-        // faixa vista acima do saldo: sai
+        // faixa vista acima do saldo: fica, o anúncio mal precificado entra abaixo dela
         let id = floats[0].id.clone();
         let seen = HashMap::from([(id.clone(), (Some(saldo + 1), 1_793_769_000))]);
         let again = select(&items, &ctx(saldo, &NO_BOOST(), &seen));
-        assert!(again.iter().all(|t| t.id != id));
+        assert!(again.iter().any(|t| t.id == id));
     }
 
     #[test]
