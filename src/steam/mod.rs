@@ -1,4 +1,5 @@
 pub mod book;
+pub mod browser;
 pub mod client;
 pub mod history;
 pub mod legacy;
