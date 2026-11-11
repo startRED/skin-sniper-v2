@@ -21,12 +21,14 @@ const RESEARCHED: &str = include_str!("../../assets/patterns/researched.json");
 /// a mediana em várias delas (XM1014 Zombie Offensive FN, USP-S Tropical Breeze FN, M4A1-S Solitude MW).
 /// Hipótese de recorte, não calibração: o prêmio de cada skin vem das vendas da mesma faixa (n ≥ 3).
 const FLOAT_ELITE_SHARE: f64 = 0.10;
-/// Faixa aprendida: vendas mínimas do nome, vendas vizinhas por janela, prêmio mínimo da janela (1,3× paga a
-/// taxa de 15 % e os 10 % de margem) e teto da faixa em parte do desgaste.
+/// Faixa aprendida: vendas mínimas do nome, vendas vizinhas por janela, prêmio mínimo da janela (1,5× deixa 30 %
+/// depois da taxa de 15 %) e teto da faixa em parte do desgaste. A faixa é também o filtro da consulta, que traz
+/// os mais baratos primeiro: faixa larga enche a página de float mediano no piso e esconde o float de ponta. Na
+/// Steam só há prova de saída para os 10 % melhores (37 % dos anúncios a 1,5–2× o comum sumiram, 36 nomes).
 const FLOAT_LEARN_MIN_SALES: usize = 20;
 const FLOAT_WINDOW: usize = 5;
-const FLOAT_MIN_PREMIUM: f64 = 1.3;
-const FLOAT_MAX_SHARE: f64 = 0.5;
+const FLOAT_MIN_PREMIUM: f64 = 1.5;
+const FLOAT_MAX_SHARE: f64 = 0.25;
 /// Teto do prêmio de float no preço de venda na Steam. As vendas do CSFloat pagam 3–8× em float baixo, mas na
 /// Steam (anúncios de float bom vistos de 05 a 11/11/2026) some sem voltar 36 % do que pede 1,15–1,5× o preço
 /// comum, 16 % do que pede 1,5–2× e 5 % do que pede 3× ou mais.
@@ -223,7 +225,7 @@ pub fn float_premium(market_hash_name: &str) -> Option<(f64, f64)> {
 /// para o pior em janelas de `FLOAT_WINDOW` vendas vizinhas e para na primeira janela em que duas delas saíram
 /// abaixo de `FLOAT_MIN_PREMIUM` × o múltiplo mediano do nome. Devolve a faixa (`Band`),
 /// `Some(None)` se nem a primeira janela paga e `None` com vendas de menos para medir.
-// shortcut: janela, 1,3× e teto de metade do desgaste são hipótese sobre 6 dias de vendas (05–11/11/2026);
+// shortcut: janela, 1,5× e teto de um quarto do desgaste são hipótese sobre 6 dias de vendas (05–11/11/2026);
 // rever quando houver achado de float vendido de verdade.
 pub fn learn_float_band(market_hash_name: &str, sales: &[(f64, f64)]) -> Option<Band> {
     let (lo, hi) = wear_span(market_hash_name)?;
@@ -464,14 +466,14 @@ mod tests {
 
     #[test]
     fn float_band_is_learned_from_sales_and_stops_where_the_premium_ends() {
-        // FN vai de 0 a 0,07: 8 vendas de float baixo a 3×, 22 comuns a 1×
+        // FN vai de 0 a 0,07 (teto da faixa: 0,0175): 8 vendas de float baixo a 3×, 22 comuns a 1×
         let name = "Desert Eagle | Serpent Strike (Factory New)";
-        let mut sales: Vec<(f64, f64)> = (0..8).map(|i| (0.002 * f64::from(i), 3.0)).collect();
-        sales.extend((0..22).map(|i| (0.02 + 0.002 * f64::from(i), 1.0)));
+        let mut sales: Vec<(f64, f64)> = (0..8).map(|i| (0.001 * f64::from(i), 3.0)).collect();
+        sales.extend((0..22).map(|i| (0.01 + 0.002 * f64::from(i), 1.0)));
         let (edge, premium, share) = learn_float_band(name, &sales).unwrap().unwrap();
         // a última janela que paga tem 4 vendas caras e 1 comum: a faixa termina nessa comum
         assert!(
-            (edge - 0.02).abs() < 1e-9 && (premium - 3.0).abs() < 1e-9,
+            (edge - 0.01).abs() < 1e-9 && (premium - 3.0).abs() < 1e-9,
             "{edge} {premium}"
         );
         assert!((share - 0.3).abs() < 1e-9, "9 das 30 vendas: {share}");

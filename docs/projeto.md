@@ -465,10 +465,13 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   raro do grupo `float:<skin>:<desgaste>` (pattern vence float).
   - **Faixa aprendida (11/11, `groups::learn_float_band`):** com ≥ 20 vendas limpas guardadas do nome, a faixa vai
     do menor float até onde as vendas pagaram prêmio: janelas de 5 vendas vizinhas em ordem de float, parando na
-    primeira em que duas saíram abaixo de 1,3× o múltiplo mediano do nome; teto de metade do desgaste. Se nem a
+    primeira em que duas saíram abaixo de 1,5× o múltiplo mediano do nome; teto de um quarto do desgaste. Se nem a
     primeira janela paga, o nome não tem faixa. Sem 20 vendas vale a faixa fixa dos 10 % melhores. Refeita a cada
-    seleção (15 min). Medido em 11/11 (642 nomes, 34 787 vendas): 214 nomes com faixa (mediana de 16 % do
-    desgaste), 391 sem prêmio, 37 sem medida. Janela, 1,3× e teto são hipótese.
+    seleção (15 min). Medido em 11/11 (642 nomes, 34 787 vendas): 136 nomes com faixa (mediana de 14 % do
+    desgaste), 470 sem prêmio, 37 sem medida. Janela, 1,5× e teto são hipótese: a faixa é o filtro da consulta,
+    que traz os mais baratos primeiro, e faixa larga enche a página de float mediano no piso. Na Steam só há
+    prova de saída para os 10 % melhores (36 nomes: sumiram sem voltar 10 de 27 anúncios a 1,5–2× o comum; fora
+    da faixa, 2 de 92 a 1,15–1,5×).
   - **Prêmio por anúncio:** as 8 vendas do mesmo nome com float igual ou pior que o do anúncio, as mais próximas
     primeiro, cada múltiplo limitado a 2× (`FLOAT_STEAM_MAX_MULTIPLE`); sem 3 vendas, não há prêmio. Float melhor
     não é pago por menos, então o preço não passa do que float pior já pagou. O limite de 2× é hipótese: nas
