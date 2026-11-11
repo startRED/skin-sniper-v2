@@ -594,7 +594,9 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
 
 - Braço de float (`f:<nome>` e `h:<nome>`, modo `float`): até 24 skins comuns × desgaste com faixa de float conhecida
   e piso que cabe no saldo; consulta com o desgaste e o filtro de float da faixa de elite (propriedade 2). Faixa
-  vista acima do saldo sai até a consulta envelhecer (6 h). Desde 11/11, nome com faixa aprendida entra se tem
+  vista acima do saldo **fica** (até o #102 saía por 6 h): o float bom é anunciado a 2,4–3,8× o preço comum
+  (medido 11/11: Serpent Strike FN a R$ 40,33 com o comum a R$ 10,66) e o anúncio mal precificado aparece entre
+  os dois. Desde 11/11, nome com faixa aprendida entra se tem
   ≥ 5 vendas/dia e se comprar no piso e vender pelo prêmio medido (limitado a 2×) paga o lucro mínimo, em ordem de
   lucro × vendas/dia × parte das vendas que cai na faixa; nome sem medida entra depois, com ≥ 20 vendas/dia e
   piso ≥ o mínimo do desconto. Antes a ordem era só vendas/dia e 6 dos 16 alvos custavam R$ 0,34 a R$ 1,12, onde
