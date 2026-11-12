@@ -161,6 +161,19 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX reads_at ON reads(at);
     "#,
     crate::hunt::bootstrap::CHARM_SCHEMA,
+    // Caça no feed do CSFloat (`csfloat_feed`): achados e uma linha por leitura (anúncios novos, buraco).
+    r#"
+    CREATE TABLE csfloat_deals (
+        id TEXT PRIMARY KEY, at INTEGER NOT NULL, created_at INTEGER NOT NULL, name TEXT NOT NULL,
+        price_cents INTEGER NOT NULL, predicted_cents INTEGER NOT NULL, base_cents INTEGER NOT NULL,
+        quantity INTEGER NOT NULL, "float" REAL, seed INTEGER, stickers INTEGER NOT NULL,
+        profit_cents INTEGER NOT NULL, state_60s TEXT
+    );
+    CREATE TABLE csfloat_feed (
+        at INTEGER NOT NULL, fresh INTEGER NOT NULL, gap INTEGER NOT NULL, deals INTEGER NOT NULL
+    );
+    CREATE INDEX csfloat_feed_at ON csfloat_feed(at);
+    "#,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.

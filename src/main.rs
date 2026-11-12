@@ -1,6 +1,7 @@
 //! Skin Sniper v2 — desenho em docs/projeto.md.
 
 mod csfloat;
+mod csfloat_feed;
 mod db;
 mod hunt;
 mod notify;
@@ -183,6 +184,7 @@ async fn main() -> Result<()> {
     hunt.disable_cheap_hunt();
     hunt.load().await?;
     hunt::bootstrap::spawn_refresh(db.clone());
+    let (feed_db, feed_settings) = (db.clone(), settings.clone());
     let rt = runtime::Runtime::new(
         db,
         settings,
@@ -194,6 +196,7 @@ async fn main() -> Result<()> {
     );
     rt.settings_changed().await?;
     tokio::spawn(hunt::scheduler::run(hunt));
+    tokio::spawn(csfloat_feed::run(feed_db, feed_settings));
     app.rt = Some(rt);
 
     tracing::info!(%listen, data = %dir.display(), "no ar");

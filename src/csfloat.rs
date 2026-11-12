@@ -117,60 +117,13 @@ impl CsfloatClient {
     /// Vendas recentes (até 40) da skin pelo `market_hash_name`. Recusa sem chamar a rede enquanto a
     /// janela estiver esgotada (`remaining == 0` antes do `reset`) ou depois de um 429.
     pub async fn sales(&self, market_hash_name: &str) -> Result<Vec<CsfloatSale>> {
-        // Bloqueio e cota são reconferidos a cada volta, inclusive ao acordar: outra chamada pode ter
-        // tomado 429 enquanto esta dormia.
-        loop {
-            let wait = {
-                let mut s = self.state.lock().unwrap();
-                let now = now_unix();
-                if let Some(until) = s.blocked_until.filter(|u| *u > now) {
-                    return Err(Error::RateLimited { until });
-                }
-                if s.rl.remaining == Some(0)
-                    && let Some(reset) = s.rl.reset.filter(|r| *r > now)
-                {
-                    return Err(Error::RateLimited { until: reset });
-                }
-                let t = Instant::now();
-                if t >= s.next_at {
-                    s.next_at = t + MIN_GAP;
-                    break;
-                }
-                s.next_at - t
-            };
-            tokio::time::sleep(wait).await;
-        }
-
-        let mut req = self.http.get(format!(
+        let url = format!(
             "{}/history/{}/sales",
             self.base,
             path_escape(market_hash_name)
-        ));
-        let key = self.state.lock().unwrap().key.clone();
-        if let Some(k) = &key {
-            req = req.header("Authorization", k);
-        }
-        let request = req
-            .build()
-            .map_err(|e| Error::Transport(e.without_url().to_string()))?;
-        let db = self.research_db.lock().unwrap().clone();
-        let attempt = if let Some(db) = db {
-            Some(
-                crate::research::record_external(db)
-                    .await
-                    .map_err(|e| Error::Transport(format!("registro de pesquisa: {e:#}")))?,
-            )
-        } else {
-            None
-        };
-        let result = self.read_sales(request).await;
-        let outcome = match &result {
-            Ok(_) => "ok",
-            Err(Error::RateLimited { .. }) => "rate_limited",
-            Err(Error::Transport(_)) => "network_error",
-            Err(_) => "error",
-        };
-        crate::research::finish(attempt, outcome).await;
+        );
+        let (key, result) = self.get_value(url).await;
+        let result = result.and_then(|v| parse_sales(&v));
         let mut s = self.state.lock().unwrap();
         if s.key == key {
             s.last_result = Some(match &result {
@@ -184,7 +137,82 @@ impl CsfloatClient {
         result
     }
 
-    async fn read_sales(&self, request: reqwest::Request) -> Result<Vec<CsfloatSale>> {
+    /// Anúncios "compre já" mais novos do site inteiro (`sort_by=most_recent`), até `limit` (o CSFloat aceita 50).
+    pub async fn recent_listings(&self, limit: u32) -> Result<Value> {
+        let url = format!(
+            "{}/listings?sort_by=most_recent&limit={limit}&type=buy_now",
+            self.base
+        );
+        self.get_value(url).await.1
+    }
+
+    /// Um anúncio pelo id (`state`: `listed`, `sold`, `delisted`…).
+    pub async fn listing(&self, id: &str) -> Result<Value> {
+        let url = format!("{}/listings/{}", self.base, path_escape(id));
+        self.get_value(url).await.1
+    }
+
+    /// GET com o portão de ritmo e de cota; devolve também a chave usada na chamada.
+    async fn get_value(&self, url: String) -> (Option<String>, Result<Value>) {
+        // Bloqueio e cota são reconferidos a cada volta, inclusive ao acordar: outra chamada pode ter
+        // tomado 429 enquanto esta dormia.
+        loop {
+            let wait = {
+                let mut s = self.state.lock().unwrap();
+                let now = now_unix();
+                if let Some(until) = s.blocked_until.filter(|u| *u > now) {
+                    return (s.key.clone(), Err(Error::RateLimited { until }));
+                }
+                if s.rl.remaining == Some(0)
+                    && let Some(reset) = s.rl.reset.filter(|r| *r > now)
+                {
+                    return (s.key.clone(), Err(Error::RateLimited { until: reset }));
+                }
+                let t = Instant::now();
+                if t >= s.next_at {
+                    s.next_at = t + MIN_GAP;
+                    break;
+                }
+                s.next_at - t
+            };
+            tokio::time::sleep(wait).await;
+        }
+
+        let mut req = self.http.get(url);
+        let key = self.state.lock().unwrap().key.clone();
+        if let Some(k) = &key {
+            req = req.header("Authorization", k);
+        }
+        let request = match req.build() {
+            Ok(r) => r,
+            Err(e) => return (key, Err(Error::Transport(e.without_url().to_string()))),
+        };
+        let db = self.research_db.lock().unwrap().clone();
+        let attempt = if let Some(db) = db {
+            match crate::research::record_external(db).await {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    return (
+                        key,
+                        Err(Error::Transport(format!("registro de pesquisa: {e:#}"))),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let result = self.execute_json(request).await;
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(Error::RateLimited { .. }) => "rate_limited",
+            Err(Error::Transport(_)) => "network_error",
+            Err(_) => "error",
+        };
+        crate::research::finish(attempt, outcome).await;
+        (key, result)
+    }
+
+    async fn execute_json(&self, request: reqwest::Request) -> Result<Value> {
         let resp = self
             .http
             .execute(request)
@@ -226,9 +254,7 @@ impl CsfloatClient {
             .bytes()
             .await
             .map_err(|e| Error::Transport(e.without_url().to_string()))?;
-        let v: Value = serde_json::from_slice(&body)
-            .map_err(|e| Error::Parse(format!("csfloat sales: {e}")))?;
-        parse_sales(&v)
+        serde_json::from_slice(&body).map_err(|e| Error::Parse(format!("csfloat: {e}")))
     }
 }
 
@@ -291,7 +317,7 @@ fn sale(s: &Value) -> Option<CsfloatSale> {
 }
 
 /// `2026-11-03T19:38:15.684938Z` → segundos Unix. Só aceita UTC (`Z`), que é o que o CSFloat manda.
-fn parse_rfc3339(s: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339(s: &str) -> Option<i64> {
     let s = s.strip_suffix('Z')?;
     let (date, time) = s.split_once('T')?;
     let mut d = date.split('-');

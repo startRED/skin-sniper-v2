@@ -297,9 +297,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
    (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
    de ligar não tem com o que comparar. **Descanso da leitura de anúncios (10/11):** alvo raro ou de float só é
-   escolhido 42 s depois da última leitura de anúncios (era 24 s, depois 36 s). **Foco em seed e float (11/11):**
-   passado o descanso, a vaga é sempre de um alvo de seed ou de float, **duas leituras de seed para cada uma de
-   float** (`SEEDS_PER_FLOAT`, pedido do Erick; a proporção é hipótese, não medida); dentro do modo vale a agenda.
+   escolhido 28 s depois da última leitura de anúncios (era 24 s, depois 36 s e 42 s). **Foco em seed e float (11/11):**
+   passado o descanso, a vaga é sempre de um alvo de seed ou de float, e entre eles decide a agenda (valor da
+   leitura). De 11/11 a 12/11 foram duas de seed para cada uma de float, fixo: 950 leituras de seed deram 29
+   anúncios novos em 24 h, contra 200 em 850 de float. **Caça no CSFloat (12/11):** `csfloat_feed` lê os 50
+   anúncios mais novos do CSFloat a cada 20 s, compara com o `predicted_price`, avisa e grava em `csfloat_deals`
+   (com o estado 60 s depois) e `csfloat_feed`; não compra.
    Antes a vaga livre disputava com os alvos baratos pelo valor da leitura e, em 12 h, foram 1 869 leituras de
    barato, 531 de seed e 87 de float, sem achado. O crédito de descoberta caiu de 0,25 para 0,125 por consulta
    (≈ 11 % das vagas): eram 42 históricos de catálogo por hora no mesmo balde dos anúncios.
