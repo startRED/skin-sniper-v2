@@ -61,7 +61,7 @@
   </div>
 {:else if filtersPaused() && app.state}
   <div class="banner" role="status">
-    <b>Leitura de seed e float da Steam em pausa.</b> A caça no CSFloat segue normalmente.
+    <b>Leitura de seed e float da Steam em pausa.</b> Os preços seguem atualizando.
     Nova tentativa às {clock(app.state.hunt.filters_paused_until!)}.
   </div>
 {/if}

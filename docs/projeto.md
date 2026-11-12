@@ -303,7 +303,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    gastavam 36 % das tentativas de anúncios falhando (`conhecimento.md` 1.3.1). **Foco em seed e float (11/11):**
    passado o descanso, a vaga é sempre de um alvo de seed ou de float, e entre eles decide a agenda (valor da
    leitura). De 11/11 a 12/11 foram duas de seed para cada uma de float, fixo: 950 leituras de seed deram 29
-   anúncios novos em 24 h, contra 200 em 850 de float. **Caça no CSFloat (12/11): removida no mesmo dia.** O feed dos anúncios mais novos do CSFloat foi lido por
+   anúncios novos em 24 h, contra 200 em 850 de float. Solta, a agenda deu 66 de seed para 6 de float numa hora;
+   desde 12/11 o float tem piso de uma leitura a cada duas raras (`RARE_WITHOUT_FLOAT_MAX`). **Caça no CSFloat (12/11): removida no mesmo dia.** O feed dos anúncios mais novos do CSFloat foi lido por
    algumas horas e não deu achado que se confirmasse: a API entrega o anúncio ~60 s depois de criado, o próprio
    site já mostra o preço previsto a quem anuncia e comprar lá exige dinheiro depositado (`pesquisa-web.md` 5.1).
    Erick decidiu não gastar consulta nisso. As tabelas `csfloat_deals` e `csfloat_feed` ficam no banco, sem uso;
