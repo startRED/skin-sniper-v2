@@ -567,3 +567,48 @@ async fn account_routes_are_disabled() {
         StatusCode::BAD_REQUEST
     );
 }
+
+#[tokio::test]
+async fn csfloat_deals_lists_only_the_ones_with_evidence() {
+    let s = start().await;
+    s.app
+        .db
+        .call(|c| {
+            c.execute_batch(
+                r#"INSERT INTO csfloat_deals (id, at, created_at, name, price_cents, predicted_cents, base_cents,
+                   quantity, "float", seed, stickers, profit_cents)
+                   VALUES ('antigo', 10, 1, 'AWP | Duality (Minimal Wear)', 594, 696, 406, 1564, 0.07, 839, 0, 88);
+                   INSERT INTO csfloat_deals (id, at, created_at, name, price_cents, predicted_cents, base_cents,
+                   quantity, "float", seed, stickers, profit_cents, kind, sell_cents, evidence, state, checks, gone_at)
+                   VALUES ('novo', 20, 2, 'Glock-18 | Moonrise (Field-Tested)', 1100, 1000, 1000, 150, 0.2, 694, 0,
+                   468, 'pattern', 1600, 'T1 Center Star: 5 vendas', 'sold', 2, 700);"#,
+            )
+        })
+        .await
+        .unwrap();
+    let d: Vec<Value> = s
+        .get("/api/csfloat/deals")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(d.len(), 1);
+    assert_eq!(
+        (
+            &d[0]["id"],
+            &d[0]["kind"],
+            &d[0]["sell_cents"],
+            &d[0]["state"],
+            &d[0]["gone_at"]
+        ),
+        (
+            &json!("novo"),
+            &json!("pattern"),
+            &json!(1600),
+            &json!("sold"),
+            &json!(700)
+        )
+    );
+}

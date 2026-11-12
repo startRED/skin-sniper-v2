@@ -174,6 +174,17 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX csfloat_feed_at ON csfloat_feed(at);
     "#,
+    // Achado do CSFloat com prova (`kind`: pattern | price) e acompanhado até sumir (`checks`, `state`, `gone_at`).
+    // Linha com `kind` nulo é da régua antiga (só o preço previsto), que não se confirmou.
+    r#"
+    ALTER TABLE csfloat_deals ADD COLUMN kind TEXT;
+    ALTER TABLE csfloat_deals ADD COLUMN sell_cents INTEGER;
+    ALTER TABLE csfloat_deals ADD COLUMN evidence TEXT;
+    ALTER TABLE csfloat_deals ADD COLUMN state TEXT;
+    ALTER TABLE csfloat_deals ADD COLUMN checks INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE csfloat_deals ADD COLUMN gone_at INTEGER;
+    ALTER TABLE csfloat_feed ADD COLUMN rare INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.

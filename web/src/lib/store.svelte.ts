@@ -1,7 +1,7 @@
 import { api, ApiError } from './api';
 import { money, signed } from './format';
 import { beep, unlockAudio } from './sound';
-import type { GoneReason, History, Opportunity, Purchase, Settings, SettingsInput, State, WatchRow } from './types';
+import type { CsfloatDeal, GoneReason, History, Opportunity, Purchase, Settings, SettingsInput, State, WatchRow } from './types';
 
 export type SortKey = 'profit' | 'margin' | 'safe' | 'eta' | 'new';
 export type TierKey = 'quick' | 'mid' | 'high';
@@ -17,6 +17,7 @@ export const app = $state({
   opps: {} as Record<string, Opportunity>,
   settings: null as Settings | null,
   purchases: [] as Purchase[],
+  csfloat: [] as CsfloatDeal[], // achados do feed do CSFloat, mais novos primeiro
   watch: [] as WatchRow[], // o que a caça vigia (ordem do servidor: mais perto de dar lucro primeiro)
   now: Math.floor(Date.now() / 1000),
   sort: { key: 'profit' as SortKey, dir: 'desc' as 'asc' | 'desc' },
@@ -144,6 +145,12 @@ export async function loadWatch() {
   watchBusy = false;
 }
 
+export async function loadCsfloat() {
+  try {
+    app.csfloat = await api<CsfloatDeal[]>('/api/csfloat/deals');
+  } catch {} // fica a lista anterior; tenta de novo em 30 s
+}
+
 const reason = (r: PromiseRejectedResult) => (r.reason instanceof ApiError ? r.reason.message : 'Não consegui carregar uma parte dos dados.');
 
 // Devolve true se o essencial (estado) carregou. As outras rotas falhando só viram aviso.
@@ -235,6 +242,8 @@ export function start() {
   void resync();
   void loadWatch();
   setInterval(loadWatch, 30000);
+  void loadCsfloat();
+  setInterval(loadCsfloat, 30000);
   connect();
 }
 

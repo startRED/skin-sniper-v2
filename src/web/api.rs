@@ -470,3 +470,53 @@ pub async fn put_settings(
 pub async fn api_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "rota inexistente")
 }
+
+/// Achado do feed do CSFloat. Dinheiro em centavos de **USD** (é a moeda do CSFloat), não BRL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CsfloatDeal {
+    pub id: String,
+    pub at: i64,
+    pub name: String,
+    pub price_cents: i64,
+    pub sell_cents: i64,
+    pub profit_cents: i64,
+    /// `pattern` (grupo raro com venda fechada) ou `price` (abaixo das vendas reais de float próximo).
+    pub kind: String,
+    pub evidence: String,
+    pub float: Option<f64>,
+    pub seed: Option<i64>,
+    /// Última conferência: `listed`, `sold`, `gone`…; nulo antes da primeira (60 s depois do aviso).
+    pub state: Option<String>,
+    pub gone_at: Option<i64>,
+}
+
+/// Os 100 achados mais novos do CSFloat. Os da régua antiga (sem prova, `kind` nulo) ficam de fora.
+pub async fn csfloat_deals(AxState(app): AxState<AppState>) -> ApiResult<Vec<CsfloatDeal>> {
+    let rows = app
+        .db
+        .call(|c| {
+            c.prepare(
+                r#"SELECT id, at, name, price_cents, sell_cents, profit_cents, kind, evidence, "float", seed,
+                   state, gone_at FROM csfloat_deals WHERE kind IS NOT NULL ORDER BY at DESC LIMIT 100"#,
+            )?
+            .query_map([], |r| {
+                Ok(CsfloatDeal {
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    name: r.get(2)?,
+                    price_cents: r.get(3)?,
+                    sell_cents: r.get(4)?,
+                    profit_cents: r.get(5)?,
+                    kind: r.get(6)?,
+                    evidence: r.get(7)?,
+                    float: r.get(8)?,
+                    seed: r.get(9)?,
+                    state: r.get(10)?,
+                    gone_at: r.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await?;
+    Ok(Json(rows))
+}
