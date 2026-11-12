@@ -65,7 +65,7 @@
   </div>
 {:else if filtersPaused() && app.state}
   <div class="banner" role="status">
-    <b>A Steam bloqueou a leitura das skins de seed e float.</b> As skins "Barato" seguem sendo lidas normalmente.
+    <b>Leitura de seed e float da Steam em pausa.</b> A caça no CSFloat segue normalmente.
     Nova tentativa às {clock(app.state.hunt.filters_paused_until!)}.
   </div>
 {/if}
