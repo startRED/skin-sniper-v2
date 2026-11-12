@@ -152,9 +152,9 @@ async fn recheck_targets_the_active_seed_even_after_another_range_was_read() {
         );
         let overdue = scheduler::overdue_task(&s, NOW).unwrap();
         assert_eq!(overdue.seeds, vec![(706, 706)]);
-        assert_eq!(s.queue.focus(overdue).seeds, vec![(706, 706)]);
+        assert_eq!(s.queue.focus(overdue, NOW).seeds, vec![(706, 706)]);
         assert_eq!(
-            s.queue.focus(task.clone()).seeds,
+            s.queue.focus(task.clone(), NOW).seeds,
             vec![(58, 59)],
             "acompanhar não pula uma faixa da caça"
         );
@@ -1240,61 +1240,6 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     assert_eq!(reason, "unavailable");
 }
 
-#[tokio::test]
-async fn elite_float_listing_is_priced_by_the_premium_of_its_band() {
-    const ID_FLOAT: &str = "6932893052431123649";
-    let (base, bodies) = serve().await;
-    {
-        let mut b = bodies.listings.lock().unwrap();
-        let l = &mut b["data"]["listings"][12];
-        l["asset"]["asset_properties"][1]["float_value"] = json!(0.152);
-        l["unPrice"] = json!(1044);
-        l["unFee"] = json!(156);
-    }
-    let (db, _dir) = temp_db();
-    let (h, mut rx) = hunt_against(&base, db);
-    h.set_saldo(3608, SaldoSource::Manual);
-    let mut hit = None;
-    for _ in 0..400 {
-        tick(&h).await;
-        while let Ok(ev) = rx.try_recv() {
-            if let Event::Opportunity(o) = ev
-                && o.id == ID_FLOAT
-            {
-                hit = Some(o);
-            }
-        }
-        if hit.is_some() {
-            break;
-        }
-    }
-    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; com float 0,152 as 8 vendas de float igual ou pior mais
-    // próximas saíram a 1,5–2× (o prêmio de float é o das vendas vizinhas, não só o das 3 da faixa)
-    let o = hit.expect("float de elite vira oportunidade");
-    assert_eq!(
-        (o.kind, o.group.as_deref()),
-        (Kind::Raro, Some("Float ≤ 0.173"))
-    );
-    assert!(
-        o.evidence.contains("grupo raro: 8 vendas"),
-        "{}",
-        o.evidence
-    );
-    assert!(o.sell.mid.profit_cents >= 100 && !o.safe, "{:?}", o.sell);
-    // o raro chega com selo: 3 vendas fechadas do grupo (CSFloat guardado) não comprovam
-    let seal = o.seal.as_ref().expect("raro tem selo");
-    assert_eq!((seal.proven, seal.sales), (false, 3), "{seal:?}");
-    assert_eq!(seal.text, "ainda não comprovado: 3 de 10 vendas fechadas");
-    assert!(seal.open_cents.is_some() && seal.floor_cents.is_some());
-    // a agenda tem braços de float, com o filtro de float na consulta
-    let tasks = h.lock().queue.tasks();
-    assert!(
-        tasks
-            .iter()
-            .any(|t| t.id == format!("f:{MOON}") && t.float.is_some())
-    );
-}
-
 /// Roda a caça até aparecerem as duas oportunidades da fixture.
 async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Vec<Opportunity> {
     let mut found = vec![];
@@ -1918,7 +1863,7 @@ async fn only_a_lower_lowest_ask_counts_as_a_new_listing_on_the_book() {
     for ask in [3500, 3600, 3400, 3400] {
         set_lowest_ask(&bodies, ask);
         scheduler::run_task(&h, &task).await.unwrap();
-        fresh.extend(h.lock().queue.take_reads().into_iter().map(|r| r.2));
+        fresh.extend(h.lock().queue.take_reads().into_iter().map(|r| r.fresh));
     }
     assert_eq!(fresh, [0, 0, 1, 0]);
     assert_eq!(
@@ -2836,16 +2781,17 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
         l["unFee"] = json!(156);
     }
     let (db, _dir) = temp_db();
-    // três vendas guardadas pelo coletor (dois desgastes): sobrevivem a reinício pelo banco
+    // vendas guardadas do CSFloat: 12 comuns a 1× e três do seed 269 a 2,0–2,4×; a prova sai do banco no arranque
     db.call(|c| {
-        for (name, ratio, at) in [
-            (MOON, 2.0, 1),
-            (MOON, 2.4, 2),
-            ("Glock-18 | Moonrise (Minimal Wear)", 2.2, 3),
-        ] {
+        let commons = (1..=12).map(|i| (900 + i, 1.0));
+        for (at, (seed, multiple)) in commons
+            .chain([(269, 2.0), (269, 2.4), (269, 2.2)])
+            .enumerate()
+        {
             c.execute(
-                "INSERT INTO learned_sales(name, seed, ratio, sold_at) VALUES (?1, 269, ?2, ?3)",
-                rusqlite::params![name, ratio, at],
+                "INSERT INTO csfloat_sales(name, sold_at, price_usd_cents, base_usd_cents, multiple, seed, \"float\")
+                 VALUES (?1, ?2, ?3, 100, ?4, ?5, 0.3)",
+                rusqlite::params![MOON, at as i64 + 1, (multiple * 100.0) as i64, multiple, seed],
             )?;
         }
         Ok(())

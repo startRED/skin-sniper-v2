@@ -1,0 +1,75 @@
+{
+"skins":{
+"AWP | PAW":[
+  {"label":"Golden Cat","seeds":[41,350],"source":"https://cs2pattern-prices.com/weapons/awp/paw/golden-cat-1"},
+  {"label":"Stoner Cat","seeds":[420,788],"source":"https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1"}
+],
+"AWP | Sun in Leo":[
+  {"label":"Big Centered Sun","seeds":[82,102,146,187,190,255,308,379,457,648,664],"source":"https://cs2pattern-prices.com/weapons/awp/sun-in-leo/big-centered-sun"}
+],
+"AWP | POP AWP":[
+  {"label":"Cyrillic","seeds":[5,16,48,112,213,340,578,728,770,972,994],"source":"https://cs2pattern-prices.com/weapons/awp/pop-awp/1"}
+],
+"AK-47 | Aphrodite":[
+  {"label":"Pink Gem","seeds":[117,354,356,370,426,542,567,587,764,880,904,948],"source":"https://cs2pattern-prices.com/weapons/ak-47/aphrodite/pink-gems"}
+],
+"Desert Eagle | Serpent Strike":[
+  {"label":"Max Orange","seeds":[129,363,425,564,698,775,783,944,949,965],"source":"https://cs2pattern-prices.com/weapons/desert-eagle/serpent-strike/max-orange-1"}
+],
+"Five-SeveN | Kami":[
+  {"label":"Pussy","seeds":[590,662,909],"source":"https://cs2pattern-prices.com/weapons/five-seven/kami/pussy"}
+],
+"Five-SeveN | Berries And Cherries":[
+  {"label":"Max Red","seeds":[60,182,522,546,553,663,853],"source":"https://cs2pattern-prices.com/weapons/five-seven/berries-and-cherries/max-red"},
+  {"label":"Max Blue","seeds":[73,80,236,278,336,382,449,511,961],"source":"https://cs2pattern-prices.com/weapons/five-seven/berries-and-cherries/max-blue"}
+],
+"Galil AR | Sandstorm":[
+  {"label":"Max Purple","seeds":[583,761],"source":"https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple"},
+  {"label":"Max Sand","seeds":[449,555],"source":"https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-sand"}
+],
+"Galil AR | Metallic Squeezer":[
+  {"label":"Gold Graffiti","seeds":[147,159,272,443,466,541,554,655,672,689,854,912],"source":"https://cs2pattern-prices.com/weapons/galil-ar/metallic-squeezer/gold-graffiti"}
+],
+"Galil AR | Phoenix Blacklight":[
+  {"label":"Centered Phoenix","seeds":[289,419,432,619,729,775,963,978],"source":"https://cs2pattern-prices.com/weapons/galil-ar/phoenix-blacklight/centered-phoenix"}
+],
+"Galil AR | Sky Mandala":[
+  {"label":"Centered Sun","seeds":[109,153,216,255,345,388,411,503,555,797,879],"source":"https://cs2pattern-prices.com/weapons/galil-ar/sky-mandala/centered-sun"}
+],
+"Glock-18 | Trace Lock":[
+  {"label":"Max White","seeds":[82,309,390,517,570,605,650,659,679,838,888],"source":"https://cs2pattern-prices.com/weapons/glock-18/trace-lock/max-white-1"}
+],
+"M4A1-S | Solitude":[
+  {"label":"Yellow Mountains","seeds":[12,95,112,154,180,220,304,379,533,650,652,669,731,743,863,871],"source":"https://cs2pattern-prices.com/weapons/m4a1-s/solitude/yellow-mountains"}
+],
+"MAC-10 | Arabesque Mosaic":[
+  {"label":"Sun","seeds":[107,125,251,263,419,425,432,511,731,759,831,849],"source":"https://cs2pattern-prices.com/weapons/mac-10/arabesque-mosaic/sun-1"},
+  {"label":"Moon","seeds":[52,221,521,609,661,713,765,791,817,869,892,921],"source":"https://cs2pattern-prices.com/weapons/mac-10/arabesque-mosaic/moon-1"},
+  {"label":"Pyramid","seeds":[88,91,103,124,319,383,460,508,624,756,836,867,954],"source":"https://cs2pattern-prices.com/weapons/mac-10/arabesque-mosaic/pyramid-1"}
+],
+"MAC-10 | Snow Splash":[
+  {"label":"Max White","seeds":[222,309,828],"source":"https://cs2pattern-prices.com/weapons/mac-10/snow-splash/max-white-1"},
+  {"label":"Max White T2","seeds":[60,234,339,463,675,824,840,956],"source":"https://cs2pattern-prices.com/weapons/mac-10/snow-splash/max-white-2"}
+],
+"MP7 | Amberline":[
+  {"label":"Full White","seeds":[269,350,435,543,613,890,959],"source":"https://cs2pattern-prices.com/weapons/mp7/amberline/full-white"}
+],
+"P250 | Nevermore":[
+  {"label":"Raven","seeds":[73,127,708,923],"source":"https://cs2pattern-prices.com/weapons/p250/nevermore/raven-1"}
+],
+"P250 | Plum Netting":[
+  {"label":"Max Purple","seeds":[298,723,991],"source":"https://cs2pattern-prices.com/weapons/p250/plum-netting/max-purple-1"}
+],
+"Sawed-Off | Brake Light":[
+  {"label":"Hot Rod","seeds":[22,29],"source":"https://cs2pattern-prices.com/weapons/sawed-off/brake-light/hot-rod"}
+],
+"Tec-9 | Sandstorm":[
+  {"label":"Max Purple","seeds":[70,83,86,271,296,328,460,487,552,572,583,654,696,705,858,862,911],"source":"https://cs2pattern-prices.com/weapons/tec-9/sandstorm/max-purple-1"}
+],
+"XM1014 | Seasons":[
+  {"label":"Blue Leaf","seeds":[26,78,115,130,182,234,286,334,338,390,442,494,546,598,605,650,659,698,955],"source":"https://cs2pattern-prices.com/weapons/xm1014/seasons/blue-leaf"}
+],
+"XM1014 | Solitude":[
+  {"label":"Yellow Mountains and Sun","seeds":[95,154,220,743,863,871],"source":"https://cs2pattern-prices.com/weapons/xm1014/solitude/yellow-mountains-and-sun"}
+]
+}}

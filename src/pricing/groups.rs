@@ -1,9 +1,10 @@
-//! Grupo raro de um anúncio: tier de pattern (guias CSPatterns / blue gem), faixa de fade do topo
-//! ou fase Doppler. Tabelas embutidas de `assets/patterns/` (ver LICENSES.md); sem rede.
+//! Grupo raro de um anúncio: pattern (seed) ou fase Doppler. Tabelas embutidas de `assets/patterns/` (ver
+//! LICENSES.md); sem rede. Float não é mais motivo de raro (12/11/2026: só pattern).
 //!
-//! Só vale caçar o topo: o prêmio de fade só paga no topo do rank e, nas vendas pagas, tier fraco não
-//! garantiu prêmio (docs/conhecimento.md 5.6). Por isso `seed_ranges` devolve só o tier 1 e o topo do fade,
-//! enquanto `group_of` ainda reconhece os tiers menores (para a evidência ser honesta).
+//! As tabelas são o catálogo de candidatos: tiers de guia, % de azul por seed (`blue.json`), % do fade e grupos
+//! nomeados curados (`named.json`). Quem decide se um seed é raro são as vendas: `hunt::patterns` mede cada
+//! skin e publica os seeds que pagam (`set_paying`). Skin medida: só os seeds pagantes têm grupo. Skin ainda sem
+//! medida (instalação nova, teste): vale a tabela (tier 1, topo do fade, grupo nomeado).
 
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -14,28 +15,12 @@ const BLUEGEM: &str = include_str!("../../assets/patterns/bluegem.json");
 const FADE: &str = include_str!("../../assets/patterns/fade.json");
 const PHASES: &str = include_str!("../../assets/patterns/phases.json");
 const FLOATS: &str = include_str!("../../assets/patterns/floats.json");
-const RESEARCHED: &str = include_str!("../../assets/patterns/researched.json");
+const NAMED: &str = include_str!("../../assets/patterns/named.json");
+const BLUE: &str = include_str!("../../assets/patterns/blue.json");
 
-/// Float de elite: a fração do desgaste (a partir do menor float possível da skin) que conta como "float
-/// baixo". Em 06/11, nas vendas do CSFloat de 157 skins, os 10 % melhores de cada desgaste saíram de 1,3× a 2,8×
-/// a mediana em várias delas (XM1014 Zombie Offensive FN, USP-S Tropical Breeze FN, M4A1-S Solitude MW).
-/// Hipótese de recorte, não calibração: o prêmio de cada skin vem das vendas da mesma faixa (n ≥ 3).
+/// Float de elite: a fração do desgaste (a partir do menor float possível da skin) cujas vendas o float pode
+/// explicar (1,3× a 2,8× a mediana em várias skins, 06/11/2026). Só serve para essas vendas não ensinarem seed.
 const FLOAT_ELITE_SHARE: f64 = 0.10;
-/// Faixa aprendida: vendas mínimas do nome, vendas vizinhas por janela, prêmio mínimo da janela (1,5× deixa 30 %
-/// depois da taxa de 15 %) e teto da faixa em parte do desgaste. A faixa é também o filtro da consulta, que traz
-/// os mais baratos primeiro: faixa larga enche a página de float mediano no piso e esconde o float de ponta. Na
-/// Steam só há prova de saída para os 10 % melhores (37 % dos anúncios a 1,5–2× o comum sumiram, 36 nomes).
-const FLOAT_LEARN_MIN_SALES: usize = 20;
-const FLOAT_WINDOW: usize = 5;
-const FLOAT_MIN_PREMIUM: f64 = 1.5;
-const FLOAT_MAX_SHARE: f64 = 0.25;
-/// Teto do prêmio de float no preço de venda na Steam. As vendas do CSFloat pagam 3–8× em float baixo, mas na
-/// Steam (anúncios de float bom vistos de 05 a 11/11/2026) some sem voltar 36 % do que pede 1,15–1,5× o preço
-/// comum, 16 % do que pede 1,5–2× e 5 % do que pede 3× ou mais.
-/// Anúncio comum some 6 %, 3 % e 3 % nas mesmas faixas: o prêmio de float fecha na Steam, mas não no tamanho do CSFloat.
-// shortcut: 2× é hipótese (último degrau em que some bem mais que o comum); acertar com venda de float fechada
-// na Steam. O lucro esperado da avaliação ainda pesa a venda rápida, que não leva prêmio nenhum.
-pub const FLOAT_STEAM_MAX_MULTIPLE: f64 = 2.0;
 
 /// Fade: só entra quem tem ao menos este % E está nas primeiras posições do rank da tabela.
 const FADE_MIN_PCT: f64 = 99.0;
@@ -76,12 +61,18 @@ struct FloatsFile {
     skins: HashMap<String, (f64, f64)>,
 }
 #[derive(Deserialize)]
-struct ResearchedFile {
-    skins: HashMap<String, HashMap<u16, ResearchedSeed>>,
+struct NamedFile {
+    skins: HashMap<String, Vec<NamedGroup>>,
 }
 #[derive(Deserialize)]
-struct ResearchedSeed {
+struct NamedGroup {
     label: String,
+    seeds: Vec<u16>,
+}
+#[derive(Deserialize)]
+struct BluePctFile {
+    /// Skin → % de azul da face visível por seed (0–1000).
+    skins: HashMap<String, Vec<f64>>,
 }
 #[derive(Deserialize)]
 struct PhasesFile {
@@ -99,7 +90,8 @@ struct Tables {
     fade: FadeFile,
     phases: PhasesFile,
     floats: FloatsFile,
-    researched: ResearchedFile,
+    named: NamedFile,
+    blue_pct: BluePctFile,
 }
 
 fn tables() -> &'static Tables {
@@ -116,7 +108,8 @@ fn tables() -> &'static Tables {
             fade: load(FADE),
             phases: load(PHASES),
             floats: load(FLOATS),
-            researched: load(RESEARCHED),
+            named: load(NAMED),
+            blue_pct: load(BLUE),
         }
     })
 }
@@ -175,132 +168,103 @@ fn wear_range(market_hash_name: &str) -> Option<(&'static str, f64, f64)> {
     .find(|(w, _, _)| market_hash_name.ends_with(&format!("({w})")))
 }
 
-/// Faixa de float aprendida por nome (`set_float_bands`): `Some((até, prêmio))`, ou `None` quando as vendas
-/// mostram que float baixo não paga prêmio nesse nome. Nome ausente = sem medida, vale a faixa fixa.
-/// `(até, prêmio, parte das vendas do nome que caiu na faixa)`.
-pub type Band = Option<(f64, f64, f64)>;
-static LEARNED_BANDS: RwLock<Option<HashMap<String, Band>>> = RwLock::new(None);
-
-pub fn set_float_bands(bands: HashMap<String, Band>) {
-    if let Ok(mut b) = LEARNED_BANDS.write() {
-        *b = Some(bands);
-    }
-}
-
-fn learned_band(market_hash_name: &str) -> Option<Band> {
-    LEARNED_BANDS
-        .read()
-        .ok()?
-        .as_ref()?
-        .get(market_hash_name)
-        .copied()
-}
-
-/// Limites de float do nome: o desgaste cortado pelo float que a skin tem.
-fn wear_span(market_hash_name: &str) -> Option<(f64, f64)> {
+/// Faixa de float de elite `(de, até)` do nome: os `FLOAT_ELITE_SHARE` melhores do desgaste, a partir do menor
+/// float que a skin tem. `None` sem desgaste no nome, sem tabela de float ou se a skin não chega no desgaste.
+pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
     let (_, lo, hi) = wear_range(market_hash_name)?;
     let (min, max) = *tables().floats.skins.get(split_name(market_hash_name).0)?;
     let (lo, hi) = (lo.max(min), hi.min(max));
-    (lo < hi).then_some((lo, hi))
+    (lo < hi).then_some((lo, lo + (hi - lo) * FLOAT_ELITE_SHARE))
 }
 
-/// Faixa de float de elite `(de, até)` do item, começando no menor float que a skin tem: até onde as vendas do
-/// CSFloat pagaram prêmio (`learn_float_band`) ou, sem medida, os `FLOAT_ELITE_SHARE` melhores do desgaste.
-/// `None` sem desgaste no nome, sem tabela de float, se a skin não chega no desgaste ou se o prêmio medido é nulo.
-pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
-    let (lo, hi) = wear_span(market_hash_name)?;
-    match learned_band(market_hash_name) {
-        Some(band) => band.map(|(edge, _, _)| (lo, edge)),
-        None => Some((lo, lo + (hi - lo) * FLOAT_ELITE_SHARE)),
+/// Seeds que as vendas provaram pagar prêmio, por skin (`hunt::patterns::load`). Skin ausente = sem medida.
+type Paying = HashMap<String, BTreeSet<u16>>;
+#[cfg(not(test))]
+static PAYING: RwLock<Option<Paying>> = RwLock::new(None);
+// Em teste a tabela é por thread: cada teste roda na sua e não vaza para os vizinhos.
+#[cfg(test)]
+thread_local!(static PAYING: RwLock<Option<Paying>> = const { RwLock::new(None) });
+
+fn with_paying<R>(f: impl FnOnce(&RwLock<Option<Paying>>) -> R) -> R {
+    #[cfg(not(test))]
+    return f(&PAYING);
+    #[cfg(test)]
+    PAYING.with(f)
+}
+
+pub fn set_paying(paying: Paying) {
+    with_paying(|p| {
+        if let Ok(mut p) = p.write() {
+            *p = Some(paying);
+        }
+    });
+}
+
+/// `Some(paga?)` se as vendas da skin já foram medidas; `None` = sem medida, vale a tabela.
+fn paying(base: &str, seed: u16) -> Option<bool> {
+    with_paying(|p| Some(p.read().ok()?.as_ref()?.get(base)?.contains(&seed)))
+}
+
+/// Nota do seed na skin, maior = mais raro: % de azul (`blue.json`) ou % do fade. `None` = skin sem nota.
+/// Nas vendas de 13/09 a 12/11/2026 a nota explica o prêmio: Desert Eagle Heat Treated abaixo de 40 % de azul
+/// sai a 0,95× o comum, 50–55 % a 4,3×, 70–80 % a 34×; SSG 08 Acid Fade paga de 99 % para cima.
+pub fn score(base: &str, seed: u16) -> Option<f64> {
+    let t = tables();
+    if let Some(pct) = t.blue_pct.skins.get(base) {
+        return pct.get(usize::from(seed)).copied();
     }
+    let (_, weapon, pattern) = split_name(base);
+    let table = t.fade.finishes.get(pattern)?.get(weapon)?;
+    *table.pct.get(usize::from(seed))?
 }
 
-/// `(múltiplo mediano das vendas dentro da faixa aprendida, parte das vendas do nome que caiu nela)`;
-/// `None` sem medida ou sem prêmio.
-pub fn float_premium(market_hash_name: &str) -> Option<(f64, f64)> {
-    learned_band(market_hash_name)?.map(|(_, premium, share)| (premium, share))
+/// Seeds do mesmo grupo de catálogo do seed (grupo nomeado, tier do guia, tier de blue gem), ele incluído:
+/// de onde vem a prova enquanto o seed tem menos de 3 vendas próprias.
+pub fn siblings(base: &str, seed: u16) -> Option<&'static [u16]> {
+    let t = tables();
+    let (_, weapon, pattern) = split_name(base);
+    let named = t
+        .named
+        .skins
+        .get(base)
+        .into_iter()
+        .flatten()
+        .map(|g| &g.seeds);
+    let cs =
+        t.cs.skins
+            .get(base)
+            .into_iter()
+            .flat_map(|s| s.tiers.values());
+    let blue = t
+        .blue
+        .weapons
+        .get(weapon)
+        .filter(|_| pattern == "Case Hardened")
+        .into_iter()
+        .flat_map(HashMap::values);
+    named
+        .chain(cs)
+        .chain(blue)
+        .find(|seeds| seeds.contains(&seed))
+        .map(Vec::as_slice)
 }
 
-/// Aprende a faixa de float de um nome pelas vendas limpas `(float, múltiplo)` do CSFloat: anda do melhor float
-/// para o pior em janelas de `FLOAT_WINDOW` vendas vizinhas e para na primeira janela em que duas delas saíram
-/// abaixo de `FLOAT_MIN_PREMIUM` × o múltiplo mediano do nome. Devolve a faixa (`Band`),
-/// `Some(None)` se nem a primeira janela paga e `None` com vendas de menos para medir.
-// shortcut: janela, 1,5× e teto de um quarto do desgaste são hipótese sobre 6 dias de vendas (05–11/11/2026);
-// rever quando houver achado de float vendido de verdade.
-pub fn learn_float_band(market_hash_name: &str, sales: &[(f64, f64)]) -> Option<Band> {
-    let (lo, hi) = wear_span(market_hash_name)?;
-    let mut by_float: Vec<(f64, f64)> = sales
-        .iter()
-        .copied()
-        .filter(|(f, m)| f.is_finite() && m.is_finite() && *m > 0.0)
-        .collect();
-    if by_float.len() < FLOAT_LEARN_MIN_SALES {
-        return None;
-    }
-    let median = |v: &mut Vec<f64>| {
-        v.sort_by(f64::total_cmp);
-        v[v.len() / 2]
-    };
-    let ordinary = median(&mut by_float.iter().map(|s| s.1).collect());
-    by_float.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let pays = |w: &[(f64, f64)]| {
-        let mut m: Vec<f64> = w.iter().map(|s| s.1).collect();
-        m.sort_by(f64::total_cmp);
-        m[1] >= FLOAT_MIN_PREMIUM * ordinary
-    };
-    let paid = by_float
-        .windows(FLOAT_WINDOW)
-        .take_while(|w| pays(w))
-        .count();
-    if paid == 0 {
-        return Some(None);
-    }
-    let edge = by_float[paid + FLOAT_WINDOW - 2]
-        .0
-        .min(lo + (hi - lo) * FLOAT_MAX_SHARE);
-    let mut inside: Vec<f64> = by_float
-        .iter()
-        .filter(|s| s.0 <= edge)
-        .map(|s| s.1)
-        .collect();
-    let share = inside.len() as f64 / by_float.len() as f64;
-    Some((edge > lo && !inside.is_empty()).then(|| (edge, median(&mut inside), share)))
+/// Todo seed de catálogo da skin (grupos nomeados e tiers): candidatos a raro mesmo sem venda própria.
+pub fn catalog_seeds(base: &str) -> BTreeSet<u16> {
+    (0..=1000)
+        .filter(|&s| siblings(base, s).is_some())
+        .collect()
 }
 
-/// Faixa de desgaste alto de interesse; a aparência real ainda depende da inspeção.
-pub fn high_float_band(market_hash_name: &str) -> Option<(f64, f64)> {
-    (split_name(market_hash_name).0 == "AWP | Asiimov"
-        && wear_range(market_hash_name).is_some_and(|(wear, _, _)| wear == "Battle-Scarred"))
-    .then_some((0.96, 1.0))
-}
-
-/// Grupo raro do anúncio, ou `None` se não há tabela para a skin / a seed não está nela e o float não é de elite.
-/// `seed`, `paint_index` e `float` vêm das propriedades da listagem. Pattern vence float.
+/// Grupo raro do anúncio, ou `None` se o seed não paga prêmio (skin medida) / não está nas tabelas (sem medida).
+/// `seed` e `paint_index` vêm das propriedades da listagem. O float não cria grupo.
 pub fn group_of(
     market_hash_name: &str,
     seed: Option<u32>,
     paint_index: Option<u32>,
-    float: Option<f64>,
+    _float: Option<f64>,
 ) -> Option<Group> {
     pattern_group(market_hash_name, seed, paint_index)
-        .or_else(|| {
-            let (lo, hi) = high_float_band(market_hash_name)?;
-            float.filter(|f| (lo..=hi).contains(f))?;
-            Some(Group {
-                key: "highfloat:AWP | Asiimov:Battle-Scarred".into(),
-                label: "Blackiimov ≥ 0.96".into(),
-            })
-        })
-        .or_else(|| {
-            let (lo, hi) = float_band(market_hash_name)?;
-            float.filter(|f| (lo..=hi).contains(f))?;
-            let (base, _, _) = split_name(market_hash_name);
-            let (wear, _, _) = wear_range(market_hash_name)?;
-            Some(Group {
-                key: format!("float:{base}:{wear}"),
-                label: format!("Float ≤ {hi:.3}"),
-            })
-        })
 }
 
 fn pattern_group(
@@ -325,6 +289,11 @@ fn pattern_group(
     }
 
     let seed = u16::try_from(seed?).ok()?;
+    let proven = paying(base, seed);
+    if proven == Some(false) {
+        return None;
+    }
+    let proven = proven == Some(true);
     if let Some(tier) = t.cs.skins.get(base).and_then(|s| tier_of(&s.tiers, seed)) {
         return Some(Group {
             key: format!("cs:{base}:t{tier}"),
@@ -340,31 +309,37 @@ fn pattern_group(
         });
     }
     if let Some(table) = t.fade.finishes.get(pattern).and_then(|f| f.get(weapon))
-        && fade_top(table, seed.into())
+        && (proven || fade_top(table, seed.into()))
     {
         return Some(Group {
             key: format!("fade:{pattern}:{weapon}"),
             label: format!("{pattern} 99%+"),
         });
     }
-    if let Some(entry) = t.researched.skins.get(base).and_then(|s| s.get(&seed)) {
-        return Some(Group {
-            key: format!("learned:{base}:{seed}"),
-            label: entry.label.clone(),
-        });
-    }
-    None
+    let named = t.named.skins.get(base).into_iter().flatten();
+    let label = match named.clone().find(|g| g.seeds.contains(&seed)) {
+        Some(g) => format!("{} #{seed}", g.label),
+        None if !proven => return None,
+        None => match score(base, seed) {
+            Some(pct) => format!("Blue {pct:.0}% #{seed}"),
+            None => format!("Pattern #{seed}"),
+        },
+    };
+    Some(Group {
+        key: format!("learned:{base}:{seed}"),
+        label,
+    })
 }
 
-/// Seeds que valem caçar para a skin (tier 1 do guia, blue gem tier 1, topo do fade), juntando seeds
-/// consecutivas em faixas `(de, até)` inclusivas, ordenadas. Vazio se a skin não tem tabela.
-/// Fase Doppler não entra: não se filtra por seed.
+/// Seeds de tabela que valem caçar enquanto a skin não tem medida (tier 1 do guia, blue gem tier 1, topo do
+/// fade, grupos nomeados), juntando seeds consecutivas em faixas `(de, até)` inclusivas, ordenadas. Vazio se a
+/// skin não tem tabela. Fase Doppler não entra: não se filtra por seed.
 pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
     let t = tables();
     let (base, weapon, pattern) = split_name(market_hash_name);
     let mut seeds: BTreeSet<u16> = BTreeSet::new();
-    if let Some(s) = t.researched.skins.get(base) {
-        seeds.extend(s.keys());
+    for g in t.named.skins.get(base).into_iter().flatten() {
+        seeds.extend(&g.seeds);
     }
     if let Some(s) = t.cs.skins.get(base).and_then(|s| s.tiers.get("1")) {
         seeds.extend(s);
@@ -402,7 +377,8 @@ pub fn skin_base(market_hash_name: &str) -> &str {
     split_name(market_hash_name).0
 }
 
-/// Skins (sem desgaste) de todas as tabelas que o mercado de armas pode ter: cspatterns, blue gem e fade.
+/// Skins (sem desgaste) de todas as tabelas que o mercado de armas pode ter: cspatterns, blue gem, fade, % de
+/// azul e grupos nomeados.
 /// Faca fica de fora (a varredura do catálogo descarta ★) e fase Doppler também (só facas).
 pub fn table_skins() -> Vec<String> {
     let t = tables();
@@ -410,7 +386,8 @@ pub fn table_skins() -> Vec<String> {
         !(w.contains("Knife") || w.contains("Bayonet") || w.contains("Daggers") || w == "Karambit")
     };
     let mut out: BTreeSet<String> = t.cs.skins.keys().cloned().collect();
-    out.extend(t.researched.skins.keys().cloned());
+    out.extend(t.named.skins.keys().cloned());
+    out.extend(t.blue_pct.skins.keys().cloned());
     out.extend(
         t.blue
             .weapons
@@ -451,11 +428,10 @@ mod tests {
             v.iter()
                 .all(|n| !n.contains("Knife") && !n.contains("Bayonet"))
         );
-        // todo nome tem consulta de seed: é isso que vira tarefa
-        assert!(
-            v.iter()
-                .all(|n| !seed_ranges(&format!("{n} (Field-Tested)")).is_empty())
-        );
+        // todo nome tem seed de catálogo ou nota por seed: é isso que vira tarefa quando a venda prova
+        assert!(v.iter().all(|n| {
+            !seed_ranges(&format!("{n} (Field-Tested)")).is_empty() || score(n, 1).is_some()
+        }));
     }
 
     const MOON: &str = "Glock-18 | Moonrise (Field-Tested)";
@@ -465,33 +441,67 @@ mod tests {
     }
 
     #[test]
-    fn float_band_is_learned_from_sales_and_stops_where_the_premium_ends() {
-        // FN vai de 0 a 0,07 (teto da faixa: 0,0175): 8 vendas de float baixo a 3×, 22 comuns a 1×
-        let name = "Desert Eagle | Serpent Strike (Factory New)";
-        let mut sales: Vec<(f64, f64)> = (0..8).map(|i| (0.001 * f64::from(i), 3.0)).collect();
-        sales.extend((0..22).map(|i| (0.01 + 0.002 * f64::from(i), 1.0)));
-        let (edge, premium, share) = learn_float_band(name, &sales).unwrap().unwrap();
-        // a última janela que paga tem 4 vendas caras e 1 comum: a faixa termina nessa comum
-        assert!(
-            (edge - 0.01).abs() < 1e-9 && (premium - 3.0).abs() < 1e-9,
-            "{edge} {premium}"
-        );
-        assert!((share - 0.3).abs() < 1e-9, "9 das 30 vendas: {share}");
-        // sem prêmio no float baixo: nome medido, sem faixa
-        let flat: Vec<(f64, f64)> = (0..30).map(|i| (0.002 * f64::from(i), 1.0)).collect();
-        assert_eq!(learn_float_band(name, &flat), Some(None));
-        // poucas vendas: sem medida, vale a faixa fixa
-        assert_eq!(learn_float_band(name, &sales[..10]), None);
-        // nome de teste só deste caso: a tabela aprendida é global
-        let other = "Desert Eagle | Serpent Strike (Minimal Wear)";
-        set_float_bands(HashMap::from([(other.to_string(), Some((0.11, 2.5, 0.2)))]));
-        assert_eq!(float_band(other), Some((0.07, 0.11)));
-        assert_eq!(float_premium(other), Some((2.5, 0.2)));
+    fn measured_skin_keeps_only_the_seeds_that_pay() {
+        let base = "Glock-18 | High Beam";
+        let name = "Glock-18 | High Beam (Factory New)";
         assert_eq!(
-            group_of(other, None, None, Some(0.10)).unwrap().label,
-            "Float ≤ 0.110"
+            group_of(name, Some(302), None, None).unwrap().label,
+            "T1 Full Beam"
         );
-        assert!(float_premium(name).is_none() && float_band(name).is_some());
+        assert_eq!(group_of(name, Some(7), None, None), None);
+        set_paying(HashMap::from([(
+            base.to_string(),
+            BTreeSet::from([7, 511]),
+        )]));
+        // medida: o T1 que não paga some, o seed fora da tabela que paga entra, o T1 que paga fica
+        assert_eq!(group_of(name, Some(302), None, None), None);
+        let g = group_of(name, Some(7), None, None).unwrap();
+        assert_eq!(
+            (g.key.as_str(), g.label.as_str()),
+            ("learned:Glock-18 | High Beam:7", "Pattern #7")
+        );
+        assert_eq!(
+            group_of(name, Some(511), None, None).unwrap().label,
+            "T1 Full Beam"
+        );
+        // outra skin continua sem medida: vale a tabela
+        assert!(group_of(MOON, Some(59), None, None).is_some());
+        // skin com nota: fade fora do topo entra quando paga, e o topo que não paga sai
+        let ssg = "SSG 08 | Acid Fade (Factory New)";
+        set_paying(HashMap::from([(
+            "SSG 08 | Acid Fade".to_string(),
+            BTreeSet::from([872]),
+        )]));
+        assert_eq!(
+            group_of(ssg, Some(872), None, None).unwrap().key,
+            "fade:Acid Fade:SSG 08"
+        );
+        assert_eq!(group_of(ssg, Some(576), None, None), None);
+    }
+
+    #[test]
+    fn score_is_blue_or_fade_percent_and_siblings_come_from_the_catalog() {
+        let deagle = "Desert Eagle | Heat Treated";
+        // 490 é dos mais azuis da Desert Eagle; 1 é comum
+        assert!(
+            score(deagle, 490) > score(deagle, 1),
+            "{:?}",
+            score(deagle, 490)
+        );
+        assert_eq!(score("SSG 08 | Acid Fade", 576), Some(100.0));
+        assert_eq!(score("Glock-18 | Moonrise", 59), None);
+        assert_eq!(score(deagle, 1001), None);
+        assert_eq!(siblings("AWP | PAW", 41).unwrap(), [41, 350]);
+        assert!(siblings("Glock-18 | Moonrise", 59).unwrap().contains(&706));
+        assert_eq!(siblings("AWP | PAW", 1), None);
+        assert!(catalog_seeds("AWP | PAW").contains(&420));
+        // um seed aparece em um grupo só por skin
+        for (base, groups) in &tables().named.skins {
+            let all: Vec<u16> = groups.iter().flat_map(|g| g.seeds.clone()).collect();
+            let unique: BTreeSet<u16> = all.iter().copied().collect();
+            assert_eq!(all.len(), unique.len(), "{base}");
+            assert!(all.iter().all(|s| *s <= 1000), "{base}");
+        }
     }
 
     #[test]
@@ -501,10 +511,12 @@ mod tests {
         assert!(t.blue.weapons.contains_key("AK-47"));
         assert!(t.phases.phases.contains_key(&415));
         assert_eq!(t.fade.finishes["Fade"]["Glock-18"].pct.len(), 1001);
+        assert!(t.blue_pct.skins.values().all(|v| v.len() == 1001));
+        assert_eq!(t.blue_pct.skins.len(), 5);
     }
 
     #[test]
-    fn researched_seeds_are_separate_and_discoverable() {
+    fn named_seeds_are_separate_and_discoverable() {
         for (base, seeds) in [
             ("Galil AR | Sandstorm", &[449, 555, 583, 761][..]),
             ("Five-SeveN | Kami", &[590, 662, 909][..]),
@@ -527,47 +539,23 @@ mod tests {
     }
 
     #[test]
-    fn blackiimov_only_in_high_battle_scarred_range() {
-        let name = "AWP | Asiimov (Battle-Scarred)";
-        assert_eq!(high_float_band(name), Some((0.96, 1.0)));
-        assert_eq!(group_of(name, None, None, Some(0.959999)), None);
-        assert_eq!(
-            group_of(name, None, None, Some(0.96)).unwrap().key,
-            "highfloat:AWP | Asiimov:Battle-Scarred"
-        );
-        assert!(group_of(name, None, None, Some(1.0)).is_some());
-        assert_eq!(group_of(name, None, None, Some(1.01)), None);
-        assert_eq!(high_float_band("AWP | Asiimov (Field-Tested)"), None);
-        assert_eq!(high_float_band("AWP | PAW (Battle-Scarred)"), None);
-        assert_eq!(float_band(name).unwrap().0, 0.45);
-    }
-
-    #[test]
-    fn elite_float_band_and_group() {
+    fn float_is_no_longer_a_rare_group() {
         // Moonrise vai de 0 a 0,65: FT é 0,15–0,38 e a elite são os 10 % do começo
         let (lo, hi) = float_band(MOON).unwrap();
         assert!(
             (lo - 0.15).abs() < 1e-9 && (hi - 0.173).abs() < 1e-9,
             "{lo} {hi}"
         );
-        let g = group_of(MOON, Some(1), None, Some(0.152)).unwrap();
+        assert_eq!(group_of(MOON, Some(1), None, Some(0.152)), None);
         assert_eq!(
-            (g.key.as_str(), g.label.as_str()),
-            ("float:Glock-18 | Moonrise:Field-Tested", "Float ≤ 0.173")
+            group_of("AWP | Asiimov (Battle-Scarred)", None, None, Some(0.99)),
+            None
         );
-        // StatTrak cai no mesmo grupo (as vendas do CSFloat são por nome, então o prêmio é medido à parte)
-        let st = "StatTrak™ Glock-18 | Moonrise (Field-Tested)";
-        assert_eq!(group_of(st, None, None, Some(0.16)).unwrap().key, g.key);
-        assert_eq!(group_of(MOON, Some(1), None, Some(0.2)), None);
-        assert_eq!(group_of(MOON, Some(1), None, None), None);
-        // pattern vence float
         assert_eq!(
             group_of(MOON, Some(59), None, Some(0.152)).unwrap().label,
             "T1 Center Star"
         );
         // a skin começa acima do começo do desgaste: a faixa começa no menor float dela
-        let (min, max) = tables().floats.skins["AK-47 | Slate"];
-        assert_eq!((min, max), (0.0, 1.0));
         let (lo, _) = float_band("AWP | Asiimov (Field-Tested)").unwrap();
         assert!(lo >= 0.18, "Asiimov começa em 0,18: {lo}");
         assert_eq!(float_band("AWP | Asiimov (Factory New)"), None);

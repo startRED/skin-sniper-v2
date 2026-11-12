@@ -1,14 +1,22 @@
-//! Valor de uma leitura: o único número que a agenda compara para decidir quem consultar agora.
+//! Valor de uma leitura: o único número que a agenda compara para decidir o que consultar agora.
 //!
-//! `V = taxa × L·(1 − e^(−Δ/L)) × retorno` (centavos esperados):
-//! - **taxa**: anúncios novos dentro do saldo por segundo de exposição do alvo, encolhida para a taxa da classe
-//!   (`d`/`r`/`f`) enquanto ele tem pouca medida, com otimismo de contagem (`Z·√a`) e teto por seca (`capped`);
-//! - **estoque**: o que se acumulou desde a última leitura (`Δ`), limitado pela vida `L` de um anúncio barato;
-//! - **retorno**: centavos de lucro esperado por anúncio novo, do alvo encolhido para a classe e para o total.
+//! Alvo raro (o único que a caça lê hoje), por faixa de seed:
+//! `V = taxa × peso × L·(1 − e^(−Δ/L)) × lucro` (centavos esperados), onde
+//! - **taxa**: anúncios novos dentro do saldo por segundo e por peso, medida no alvo e encolhida para a taxa da
+//!   classe enquanto ele tem pouca medida, com otimismo de contagem (`Z·√a`) e teto por seca (`capped`);
+//! - **peso**: seeds da faixa × giro da skin (`scheduler::Range`): o que a faixa deve receber de anúncio novo;
+//! - **estoque**: o que se acumulou desde a última leitura **da faixa** (`Δ`), limitado pela vida `L`;
+//! - **lucro**: comprar no piso comum e vender pela mediana da prova do seed (`patterns`), em centavos.
 //!
-//! O sinal é o anúncio novo (milhares por semana), não o achado (3 na vida do app): todo achado é um anúncio novo.
-//! De hora em hora o app repete as leituras dos últimos 7 dias, mede o erro de previsão de cada combinação de
-//! parâmetros e troca quando outra prevê ≥ 1 % melhor (`refit_log`, chaves `fluxo:*`).
+//! O alvo `d:` (caça barata, desligada) segue a conta antiga: taxa do alvo × estoque do alvo × retorno medido.
+//!
+//! Três coisas dizem se isto melhora de verdade, todas gravadas em `Info` de hora em hora:
+//! 1. **controle**: 1 leitura em 8 vai para a faixa lida há mais tempo, sem olhar valor. O placar compara o que
+//!    rende por leitura a escolha por valor e esse rodízio cego. Se não ganhar, o aprendizado é placebo;
+//! 2. **previsão**: o app repete as leituras dos últimos 7 dias prevendo cada uma só com as anteriores, e troca
+//!    os parâmetros quando outra combinação prevê ≥ 1 % melhor (`refit_log`, chaves `fluxo:*`);
+//! 3. **preço**: cada venda de seed pagante é prevista só com as vendas anteriores a ela (`patterns::backtest`).
+//!
 //! `N0`, `Z`, o p25 da vida, a margem de 1 % e o teto por seca são hipóteses de calibração, não medidas.
 //! Docs/projeto.md, "Aprendizado".
 
@@ -37,9 +45,11 @@ pub const Z: f64 = 1.0;
 const MU_FLOOR: f64 = 1e-6;
 /// Contagem de Poisson que deu zero: com 95 % de confiança a média não passa de 3 (regra de três).
 const DRY_CAP: f64 = 3.0;
-const CLASSES: [&str; 3] = ["d", "r", "f"];
+const CLASSES: [&str; 2] = ["d", "r"];
+/// Venda a tantas vezes o preço comum empata depois da taxa da Steam (quem vende recebe o preço ÷ 1,15).
+const BREAK_EVEN: f64 = 1.15;
 const WINDOWS: [f64; 5] = [1800.0, 3600.0, 7200.0, 14_400.0, 28_800.0];
-const PRIORS: [f64; 4] = [0.5, 1.0, 2.0, 4.0];
+const PRIORS: [f64; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
 const HALF_LIVES: [f64; 3] = [24.0 * 3600.0, 72.0 * 3600.0, 168.0 * 3600.0];
 
 /// Padrões medidos em 10/11 no registro da produção (7 100 leituras): docs/superpowers/specs/2026-11-10-*.
@@ -66,13 +76,9 @@ impl Default for Params {
     }
 }
 
-/// Classe do alvo pelo prefixo do id: 0 = desconto, 1 = raro por seed, 2 = faixa de float.
+/// Classe do alvo pelo prefixo do id: 0 = desconto, 1 = raro por seed.
 pub fn class(id: &str) -> usize {
-    match id.as_bytes().first() {
-        Some(b'r') => 1,
-        Some(b'f') => 2,
-        _ => 0,
-    }
+    usize::from(id.starts_with('r'))
 }
 
 /// Exposição de uma leitura feita `gap` segundos depois da anterior do mesmo alvo (`None` = primeira).
@@ -105,7 +111,7 @@ struct Sum {
 /// Somas por classe e do total: o ponto de partida de quem ainda tem pouca medida.
 #[derive(Debug, Clone, Default)]
 pub struct Pool {
-    class: [Sum; 3],
+    class: [Sum; 2],
     all: Sum,
 }
 
@@ -171,18 +177,22 @@ fn poisson_loss(mu: f64, f: f64) -> f64 {
     mu - f * mu.ln()
 }
 
-/// Repete as leituras em ordem e prevê cada uma só com o que veio antes. `reads` = (hora, índice do alvo, anúncios
-/// novos), em ordem de hora; `class_of[alvo]` = classe. A primeira leitura de cada alvo ensina mas não pontua.
-pub fn replay(reads: &[(i64, usize, f64)], class_of: &[usize], p: &Params) -> Replay {
+/// Leitura da repetição: hora, índice do alvo, anúncios novos e, na leitura de faixa de seed, (segundos desde a
+/// leitura anterior da faixa, peso da faixa).
+pub type Obs = (i64, usize, f64, Option<(Option<i64>, f64)>);
+
+/// Repete as leituras em ordem de hora e prevê cada uma só com o que veio antes; `class_of[alvo]` = classe. A
+/// primeira leitura de cada alvo ensina mas não pontua.
+pub fn replay(reads: &[Obs], class_of: &[usize], p: &Params) -> Replay {
     let mut out = Replay {
         arms: vec![ArmState::default(); class_of.len()],
         ..Replay::default()
     };
     // (r, exposição, hora) por classe: todo mundo decai na mesma taxa, então a soma decai junto
-    let mut pool = [(0.0_f64, 0.0_f64, 0_i64); 3];
-    let mut base = [(0.0_f64, 0.0_f64); 3];
+    let mut pool = [(0.0_f64, 0.0_f64, 0_i64); 2];
+    let mut base = [(0.0_f64, 0.0_f64); 2];
     let decay = |dt: i64| 0.5_f64.powf(dt.max(0) as f64 / p.half_life);
-    for &(at, arm, f) in reads {
+    for &(at, arm, f, range) in reads {
         let c = class_of[arm];
         let a = &mut out.arms[arm];
         let (cr, ce, cat) = &mut pool[c];
@@ -192,7 +202,10 @@ pub fn replay(reads: &[(i64, usize, f64)], class_of: &[usize], p: &Params) -> Re
         *cr *= fc;
         *ce *= fc;
         *cat = at;
-        let e = exposure((a.at > 0).then(|| at - a.at), p.window);
+        let e = match range {
+            Some((gap, weight)) => weight * exposure(gap, p.window),
+            None => exposure((a.at > 0).then(|| at - a.at), p.window),
+        };
         if a.at > 0 && *ce > 0.0 {
             let prior = p.prior * p.window;
             let mu = capped((a.r + prior * *cr / *ce) / (a.exposure + prior), a.dry) * e;
@@ -216,11 +229,7 @@ pub fn replay(reads: &[(i64, usize, f64)], class_of: &[usize], p: &Params) -> Re
 }
 
 /// A combinação que melhor prevê e se ela ganha da atual pela margem (com leituras suficientes).
-pub fn tune(
-    reads: &[(i64, usize, f64)],
-    class_of: &[usize],
-    cur: Params,
-) -> (Params, Replay, bool) {
+pub fn tune(reads: &[Obs], class_of: &[usize], cur: Params) -> (Params, Replay, bool) {
     let current = replay(reads, class_of, &cur);
     let mut best = (cur, current.clone());
     for window in WINDOWS {
@@ -248,23 +257,30 @@ pub fn tune(
     }
 }
 
-/// Junta as páginas seguidas do mesmo alvo e troca o id por índice. Devolve (ids, leituras).
-pub fn merge(rows: Vec<(i64, String, i64)>) -> (Vec<String>, Vec<(i64, usize, f64)>) {
+/// Linha de `reads`: hora, alvo, anúncios novos, peso da faixa (nulo = leitura sem faixa) e segundos desde a
+/// leitura anterior da faixa.
+pub type ReadRow = (i64, String, i64, Option<f64>, Option<i64>);
+
+/// Junta as páginas seguidas da mesma leitura e troca o id por índice. Devolve (ids, leituras).
+pub fn merge(rows: Vec<ReadRow>) -> (Vec<String>, Vec<Obs>) {
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut ids = vec![];
     let mut last: Vec<Option<usize>> = vec![];
-    let mut reads: Vec<(i64, usize, f64)> = vec![];
-    for (at, id, fresh) in rows {
+    let mut reads: Vec<Obs> = vec![];
+    for (at, id, fresh, weight, gap) in rows {
         let arm = *index.entry(id.clone()).or_insert_with(|| {
             ids.push(id);
             last.push(None);
             ids.len() - 1
         });
+        let range = weight.map(|w| (gap, w));
+        // outra faixa do mesmo alvo logo em seguida é outra leitura; a mesma faixa de novo é a página seguinte
+        let page = range.is_none_or(|(gap, _)| gap.is_some_and(|g| g <= MERGE_SECS));
         match last[arm] {
-            Some(i) if at - reads[i].0 <= MERGE_SECS => reads[i].2 += fresh as f64,
+            Some(i) if page && at - reads[i].0 <= MERGE_SECS => reads[i].2 += fresh as f64,
             _ => {
                 last[arm] = Some(reads.len());
-                reads.push((at, arm, fresh as f64));
+                reads.push((at, arm, fresh as f64, range));
             }
         }
     }
@@ -278,7 +294,19 @@ pub struct ClassInfo {
     pub fresh: u64,
 }
 
+/// O que um jeito de escolher a faixa de seed rendeu em 7 dias.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ArmScore {
+    pub reads: u64,
+    pub fresh: u64,
+    /// Soma de anúncios novos × lucro por anúncio novo da faixa (centavos): mede toda leitura.
+    pub worth_cents: i64,
+    /// Lucro esperado das oportunidades achadas (centavos): o que importa, mas raro demais para comparar cedo.
+    pub gain_cents: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Info {
     pub window_s: f64,
     pub prior: f64,
@@ -297,6 +325,32 @@ pub struct Info {
     pub predicted: f64,
     pub actual: f64,
     pub tuned_at: i64,
+    /// Leituras de faixa de seed: escolha por valor × controle (a faixa lida há mais tempo).
+    pub policy: ArmScore,
+    pub control: ArmScore,
+    /// Catálogo de pattern: skins com seed pagante e seeds pagantes.
+    pub catalog_skins: u32,
+    pub catalog_seeds: u32,
+    /// Regra de preço fora da amostra: vendas de seed que já pagava só com as vendas anteriores, quantas delas
+    /// saíram a pelo menos `BREAK_EVEN` × o comum e a mediana de (razão real ÷ razão prevista).
+    pub backtest_n: u32,
+    pub backtest_paid: Option<f64>,
+    pub backtest_ratio: Option<f64>,
+}
+
+/// Resumo de `patterns::backtest`: (vendas, parte que empatou ou lucrou, mediana de real ÷ previsto).
+pub fn backtest_summary(pairs: &[(f64, f64)]) -> (u32, Option<f64>, Option<f64>) {
+    if pairs.is_empty() {
+        return (0, None, None);
+    }
+    let paid = pairs.iter().filter(|p| p.1 >= BREAK_EVEN).count() as f64 / pairs.len() as f64;
+    let mut ratios: Vec<f64> = pairs.iter().map(|p| p.1 / p.0).collect();
+    ratios.sort_by(f64::total_cmp);
+    (
+        pairs.len() as u32,
+        Some(paid),
+        Some(ratios[ratios.len() / 2]),
+    )
 }
 
 fn percentile25(v: &mut [i64]) -> Option<f64> {
@@ -324,7 +378,7 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
     // as leituras ainda em memória entram na repetição
     super::scheduler::save_stats(h).await?;
     let since = now - 7 * DAY;
-    let (mut lives, rows) = h
+    let (mut lives, rows, scores) = h
         .db
         .call(move |c| {
             let lives: Vec<i64> = c
@@ -334,11 +388,32 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
                 )?
                 .query_map([since], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
-            let rows: Vec<(i64, String, i64)> = c
-                .prepare("SELECT at, arm, fresh FROM reads WHERE at >= ?1 ORDER BY at, rowid")?
-                .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            let rows: Vec<ReadRow> = c
+                .prepare(
+                    "SELECT at, arm, fresh, weight, gap FROM reads WHERE at >= ?1 ORDER BY at, rowid",
+                )?
+                .query_map([since], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?
                 .collect::<rusqlite::Result<_>>()?;
-            Ok((lives, rows))
+            let scores: Vec<(bool, ArmScore)> = c
+                .prepare(
+                    "SELECT control, COUNT(*), SUM(fresh), SUM(worth), SUM(gain) FROM reads
+                     WHERE at >= ?1 AND weight IS NOT NULL GROUP BY control",
+                )?
+                .query_map([since], |r| {
+                    Ok((
+                        r.get(0)?,
+                        ArmScore {
+                            reads: r.get::<_, i64>(1)? as u64,
+                            fresh: r.get::<_, i64>(2)? as u64,
+                            worth_cents: r.get(3)?,
+                            gain_cents: r.get(4)?,
+                        },
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((lives, rows, scores))
         })
         .await?;
     let cur = h.lock().queue.params;
@@ -355,7 +430,7 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
             ..ClassInfo::default()
         })
         .collect();
-    for &(_, arm, f) in &reads {
+    for &(_, arm, f, _) in &reads {
         classes[class_of[arm]].reads += 1;
         classes[class_of[arm]].fresh += f as u64;
     }
@@ -401,6 +476,16 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
         .await?;
     }
     let per = |x: f64| (r.scored > 0).then(|| x / r.scored as f64);
+    let score = |control: bool| {
+        let found = scores.iter().find(|s| s.0 == control);
+        found.map(|s| s.1.clone()).unwrap_or_default()
+    };
+    let (catalog_skins, catalog_seeds) = super::patterns::size(&h.lock().learned);
+    let sales = super::patterns::sale_rows(h).await?;
+    let (backtest_n, backtest_paid, backtest_ratio) = tokio::task::spawn_blocking(move || {
+        backtest_summary(&super::patterns::backtest(&super::patterns::comps(&sales)))
+    })
+    .await?;
     let info = Info {
         window_s: p.window,
         prior: p.prior,
@@ -416,6 +501,13 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
         predicted: r.predicted,
         actual: r.actual,
         tuned_at: now,
+        policy: score(false),
+        control: score(true),
+        catalog_skins: catalog_skins as u32,
+        catalog_seeds: catalog_seeds as u32,
+        backtest_n,
+        backtest_paid,
+        backtest_ratio,
     };
     set_setting(&h.db, PARAMS_KEY, serde_json::to_string(&p)?).await?;
     set_setting(&h.db, INFO_KEY, serde_json::to_string(&info)?).await?;
@@ -494,7 +586,7 @@ mod tests {
 
     /// Dois alvos da mesma classe: "rico" recebe 1 anúncio novo a cada 600 s, "seco" nenhum; leituras alternadas
     /// com intervalos variados.
-    fn synthetic(n: usize) -> (Vec<(i64, usize, f64)>, Vec<usize>) {
+    fn synthetic(n: usize) -> (Vec<Obs>, Vec<usize>) {
         let (mut reads, mut last, mut t) = (vec![], [0_i64; 2], 1_000_000_i64);
         for i in 0..n {
             let arm = i % 2;
@@ -505,7 +597,7 @@ mod tests {
                 0
             };
             last[arm] = t;
-            reads.push((t, arm, fresh as f64));
+            reads.push((t, arm, fresh as f64, None));
         }
         (reads, vec![0, 0])
     }
@@ -545,14 +637,64 @@ mod tests {
     #[test]
     fn merge_joins_pages_of_one_read_and_indexes_arms() {
         let (ids, reads) = merge(vec![
-            (100, "d:a".into(), 2),
-            (112, "d:a".into(), 3), // segunda página da mesma leitura
-            (130, "r:b".into(), 0),
-            (400, "d:a".into(), 1),
+            (100, "d:a".into(), 2, None, None),
+            (112, "d:a".into(), 3, None, None), // segunda página da mesma leitura
+            (130, "r:b".into(), 0, Some(2.0), None),
+            (160, "r:b".into(), 1, Some(0.5), Some(5000)), // outra faixa do mesmo alvo: outra leitura
+            (170, "r:b".into(), 2, Some(0.5), Some(10)),   // segunda página dessa faixa
+            (400, "d:a".into(), 1, None, None),
         ]);
         assert_eq!(ids, vec!["d:a".to_string(), "r:b".to_string()]);
-        assert_eq!(reads, vec![(100, 0, 5.0), (130, 1, 0.0), (400, 0, 1.0)]);
-        assert_eq!((class("d:a"), class("r:b"), class("f:c")), (0, 1, 2));
+        assert_eq!(
+            reads,
+            vec![
+                (100, 0, 5.0, None),
+                (130, 1, 0.0, Some((None, 2.0))),
+                (160, 1, 3.0, Some((Some(5000), 0.5))),
+                (400, 0, 1.0, None)
+            ]
+        );
+        assert_eq!((class("d:a"), class("r:b")), (0, 1));
+    }
+
+    /// Um alvo raro com duas faixas: a "larga" tem peso 4 e recebe 4× os anúncios novos da "estreita". Com a
+    /// exposição pesada por faixa a taxa do alvo é uma só e a previsão acerta as duas; sem o peso (conta antiga,
+    /// por alvo) a mesma repetição erra mais.
+    #[test]
+    fn range_reads_are_weighed_by_the_range_not_by_the_arm() {
+        let (mut reads, mut plain, mut last, mut t) = (vec![], vec![], [0_i64; 2], 1_000_000_i64);
+        for i in 0..3000 {
+            // a larga é lida 3× mais vezes, como a agenda faria
+            let range = usize::from(i % 4 == 3);
+            t += [200, 500, 1100][i % 3];
+            let (weight, every) = [(4.0, 300), (1.0, 1200)][range];
+            let gap = (last[range] > 0).then(|| t - last[range]);
+            let fresh = gap.map_or(0, |g| g / every) as f64;
+            last[range] = t;
+            reads.push((t, 0, fresh, Some((gap, weight))));
+            plain.push((t, 0, fresh, None));
+        }
+        let p = Params::default();
+        let (weighed, by_arm) = (replay(&reads, &[1], &p), replay(&plain, &[1], &p));
+        assert!(
+            (weighed.predicted / weighed.actual - 1.0).abs() < 0.1,
+            "{weighed:?}"
+        );
+        assert!(
+            weighed.loss < by_arm.loss,
+            "{} {}",
+            weighed.loss,
+            by_arm.loss
+        );
+    }
+
+    #[test]
+    fn backtest_summary_counts_what_paid_and_how_far_the_forecast_was() {
+        assert_eq!(backtest_summary(&[]), (0, None, None));
+        // (previsto, real): duas pagaram a taxa, a do meio saiu 10 % abaixo do previsto
+        let (n, paid, ratio) = backtest_summary(&[(2.0, 1.0), (2.0, 1.8), (2.0, 3.0)]);
+        assert_eq!(n, 3);
+        assert!((paid.unwrap() - 2.0 / 3.0).abs() < 1e-9 && (ratio.unwrap() - 0.9).abs() < 1e-9);
     }
 
     #[test]

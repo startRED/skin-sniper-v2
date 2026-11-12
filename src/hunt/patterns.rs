@@ -1,20 +1,30 @@
-//! Patterns aprendidos: as tabelas embutidas só têm 4 skins de pattern (mais blue gem e fade), e nas vendas do
-//! CSFloat de 06/11 apareceram seeds caros fora delas (MP7 Amberline 890 duas vezes a 5–10×, M4A4 Etch Lord 158 a
-//! 18×). Um coletor lê as vendas de uma skin do catálogo a cada `GAP` e guarda as vendas sem adesivo, fora das
-//! tabelas e do float de elite, que saíram a `MIN_RATIO` × a mediana da skin ou mais. Um seed vira alvo e grupo
-//! raro quando junta `RARE_MIN_SALES` vendas assim (somando os desgastes): a mesma prova que o T1 exige. As razões
-//! guardadas são o prêmio do grupo. Os limites (2×, 60 dias) são hipóteses, não calibração.
+//! Quais seeds pagam prêmio, medido nas vendas do CSFloat (`csfloat_sales`, sem adesivo). É a única porta de
+//! entrada de um pattern raro: tabela, guia ou lista da comunidade só indicam candidatos (`pricing::groups`).
+//!
+//! Cada venda vira uma razão sobre o preço comum do nome (a mediana das vendas dele). Um seed paga quando:
+//! 1. a skin tem nota por seed (% de azul, % do fade): as `NEAR` vendas de nota igual ou pior mais próximas da
+//!    dele pagam (mediana ≥ `PAY_MEDIAN`, quartil de baixo ≥ `PAY_P25`). Seed melhor herda a prova do pior;
+//! 2. é seed de catálogo com 3+ vendas próprias: as vendas dele passam no mesmo teste;
+//! 3. é seed de catálogo com menos de 3 vendas: as vendas do grupo dele passam no teste mais duro (`POOL_P25`);
+//! 4. não está em catálogo nenhum: 3+ vendas próprias, com o quartil de baixo a `MIN_RATIO` × ou mais.
+//!
+//! Em 12/11/2026 (45 759 vendas guardadas) a regra deixou 15 skins e 231 seeds (eram 15 grupos): a Desert Eagle
+//! Heat Treated foi de 43 para 104 seeds, e saíram seeds de tier 1 que vendem a preço comum (Solitude 95/112/154,
+//! Trace Lock 309/390). Prevendo cada venda só com as anteriores (`backtest`): 336 vendas de seed pagante, 97 %
+//! saíram a ≥ 1,15× o comum, real ÷ previsto 1,12 (mediana). Medida repetível: teste `catalog_on_a_real_db`.
+//! shortcut: os limites (1,5 / 1,2 / 2,0, 8 vizinhas) foram escolhidos olhando o mesmo retrato de 12/11 em que a
+//! prova retroativa foi medida; o placar de `hunt::value` refaz a conta a cada hora com as vendas novas,
+//! recalibrar por ele.
 
 use super::Hunt;
 use super::catalog::{self, Item};
-use crate::csfloat::CsfloatSale;
 use crate::pricing::groups::{
-    Group, float_band, group_of, learn_float_band, set_float_bands, skin_base,
+    Group, catalog_seeds, float_band, group_of, score, set_paying, siblings, skin_base, table_skins,
 };
 use crate::pricing::sell::{MAX_RARE_MULTIPLE, RARE_MIN_SALES};
 use anyhow::Result;
 use rusqlite::params;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// shortcut: uma skin a cada 2 min (~720 por dia, dentro da cota do CSFloat); subir se a cota sobrar.
 const GAP: i64 = 120;
@@ -22,15 +32,148 @@ const GAP: i64 = 120;
 const WARM_GAP: i64 = 15;
 /// A mesma skin só é relida depois disso.
 const REFETCH: i64 = 24 * 3600;
-/// Venda a esta razão da mediana da skin ou mais conta como prêmio de pattern.
+/// Seed fora de catálogo: o quartil de baixo das vendas dele precisa chegar a esta razão.
 pub const MIN_RATIO: f64 = 2.0;
 /// Menos vendas limpas que isso não dão uma mediana confiável.
 const MIN_CLEAN_SALES: usize = 10;
 /// Skins com menos vendas por dia quase não têm anúncio novo para caçar.
 const MIN_SALES_PER_DAY: f64 = 5.0;
+/// Vendas vizinhas (nota igual ou pior) que provam um seed de skin com nota.
+const NEAR: usize = 8;
+/// Prova própria ou por nota: mediana e quartil de baixo das razões.
+const PAY_MEDIAN: f64 = 1.5;
+const PAY_P25: f64 = 1.2;
+/// Prova emprestada do grupo de catálogo: mais dura, o seed ainda não vendeu.
+const POOL_P25: f64 = 1.5;
 
-/// Skin-base → seed → razões (preço ÷ mediana da skin) das vendas que ensinaram.
+/// Skin-base → seed que paga → razões (preço ÷ preço comum do nome) das vendas que provam, em ordem crescente.
+/// Skin medida sem seed pagante fica com o mapa vazio.
 pub type Learned = HashMap<String, BTreeMap<u16, Vec<f64>>>;
+
+/// Venda limpa com seed, relativa ao preço comum do nome.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Comp {
+    pub seed: u16,
+    pub ratio: f64,
+    pub sold_at: i64,
+}
+
+/// Linha de `csfloat_sales`: `(nome, seed, múltiplo, float, sold_at)`, em ordem de nome.
+pub type SaleRow = (String, Option<u16>, f64, Option<f64>, i64);
+
+/// Skin-base → vendas comparáveis. Nome com menos de `MIN_CLEAN_SALES` vendas não tem preço comum confiável
+/// e fica de fora; venda que o float de elite explica, sem seed ou absurda não ensina pattern.
+pub fn comps(rows: &[SaleRow]) -> HashMap<String, Vec<Comp>> {
+    let mut out: HashMap<String, Vec<Comp>> = HashMap::new();
+    for of_name in rows.chunk_by(|a, b| a.0 == b.0) {
+        if of_name.len() < MIN_CLEAN_SALES {
+            continue;
+        }
+        let name = &of_name[0].0;
+        let mut m: Vec<f64> = of_name.iter().map(|r| r.2).collect();
+        m.sort_by(f64::total_cmp);
+        let median = m[m.len() / 2];
+        if !(median.is_finite() && median > 0.0) {
+            continue;
+        }
+        let band = float_band(name);
+        let of_base = out.entry(skin_base(name).to_string()).or_default();
+        for (_, seed, multiple, float, sold_at) in of_name {
+            let ratio = multiple / median;
+            let elite = float
+                .zip(band)
+                .is_some_and(|(f, (lo, hi))| (lo..=hi).contains(&f));
+            if let Some(seed) = *seed
+                && !elite
+                && ratio > 0.0
+                && ratio <= MAX_RARE_MULTIPLE
+            {
+                of_base.push(Comp {
+                    seed,
+                    ratio,
+                    sold_at: *sold_at,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// As razões que provam que o seed paga, só com vendas anteriores a `before`; `None` se não paga (regra no
+/// topo do arquivo).
+pub fn evidence_for(base: &str, seed: u16, comps: &[Comp], before: i64) -> Option<Vec<f64>> {
+    let pays = |mut v: Vec<f64>, median: f64, p25: f64| {
+        v.sort_by(f64::total_cmp);
+        // quartil de baixo arredondado para baixo: com 3 ou 4 vendas é a pior delas
+        (v.len() >= RARE_MIN_SALES && v[v.len() / 2] >= median && v[(v.len() - 1) / 4] >= p25)
+            .then_some(v)
+    };
+    let past = comps.iter().filter(|c| c.sold_at < before);
+    if let Some(mine) = score(base, seed) {
+        let mut near: Vec<(f64, f64)> = past
+            .filter_map(|c| {
+                let s = score(base, c.seed)?;
+                (s <= mine).then_some((s, c.ratio))
+            })
+            .collect();
+        near.sort_by(|a, b| b.0.total_cmp(&a.0));
+        near.truncate(NEAR);
+        return pays(near.into_iter().map(|n| n.1).collect(), PAY_MEDIAN, PAY_P25);
+    }
+    let own: Vec<f64> = past
+        .clone()
+        .filter(|c| c.seed == seed)
+        .map(|c| c.ratio)
+        .collect();
+    match siblings(base, seed) {
+        Some(_) if own.len() >= RARE_MIN_SALES => pays(own, PAY_MEDIAN, PAY_P25),
+        Some(group) => pays(
+            past.filter(|c| group.contains(&c.seed))
+                .map(|c| c.ratio)
+                .collect(),
+            0.0,
+            POOL_P25,
+        ),
+        None => pays(own, 0.0, MIN_RATIO),
+    }
+}
+
+/// Os seeds que pagam em cada skin medida, com a prova de cada um.
+pub fn learn(comps: &HashMap<String, Vec<Comp>>) -> Learned {
+    comps
+        .iter()
+        .map(|(base, v)| {
+            // skin com nota: qualquer seed pode herdar a prova; sem nota, só quem vendeu ou é de catálogo
+            let seeds: BTreeSet<u16> = if score(base, 0).is_some() {
+                (0..=1000).collect()
+            } else {
+                v.iter()
+                    .map(|c| c.seed)
+                    .chain(catalog_seeds(base))
+                    .collect()
+            };
+            let paying = seeds
+                .into_iter()
+                .filter_map(|s| Some((s, evidence_for(base, s, v, i64::MAX)?)))
+                .collect();
+            (base.clone(), paying)
+        })
+        .collect()
+}
+
+/// Placar da regra fora da amostra: para cada venda cujo seed já pagava só com as vendas anteriores a ela,
+/// `(razão prevista, razão real)`. A previsão é a mediana da prova.
+pub fn backtest(comps: &HashMap<String, Vec<Comp>>) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    for (base, v) in comps {
+        for c in v {
+            if let Some(e) = evidence_for(base, c.seed, v, c.sold_at) {
+                out.push((e[e.len() / 2], c.ratio));
+            }
+        }
+    }
+    out
+}
 
 fn candidates(mut items: Vec<Item>, saldo: i64, ratio: Option<f64>, now: i64) -> Vec<String> {
     items.retain(|i| {
@@ -52,179 +195,89 @@ fn candidates(mut items: Vec<Item>, saldo: i64, ratio: Option<f64>, now: i64) ->
     items.into_iter().map(|i| i.name).collect()
 }
 
-/// Vendas da skin que pagaram prêmio de pattern ainda desconhecido: `(seed, razão, sold_at)`.
-pub fn premium_sales(name: &str, sales: &[CsfloatSale]) -> Vec<(u16, f64, i64)> {
-    let clean: Vec<&CsfloatSale> = sales
+/// Nomes de skin de catálogo de pattern, do mais vendido ao menos: lidos mesmo com pouco giro ou acima do
+/// saldo, porque é a venda deles que prova (ou derruba) o seed.
+fn catalog_names(items: &[Item]) -> Vec<String> {
+    let table: HashSet<String> = table_skins().into_iter().collect();
+    let mut v: Vec<&Item> = items
         .iter()
-        .filter(|s| !s.has_stickers && s.multiple.is_finite() && s.multiple > 0.0)
+        .filter(|i| catalog::wear_of(&i.name).is_some() && table.contains(skin_base(&i.name)))
         .collect();
-    if clean.len() < MIN_CLEAN_SALES {
-        return vec![];
-    }
-    let mut m: Vec<f64> = clean.iter().map(|s| s.multiple).collect();
-    m.sort_by(f64::total_cmp);
-    let median = m[m.len() / 2];
-    clean
-        .iter()
-        .filter_map(|s| {
-            let seed = s.seed?;
-            // tabela e float de elite já têm grupo próprio
-            if group_of(name, Some(seed.into()), s.paint_index, s.float)
-                .is_some_and(|g| !g.key.starts_with("learned:"))
-            {
-                return None;
-            }
-            let r = s.multiple / median;
-            (MIN_RATIO..=MAX_RARE_MULTIPLE)
-                .contains(&r)
-                .then_some((seed, r, s.sold_at))
-        })
-        .collect()
+    v.sort_by(|a, b| {
+        b.sales_per_day
+            .unwrap_or_default()
+            .total_cmp(&a.sales_per_day.unwrap_or_default())
+            .then(a.name.cmp(&b.name))
+    });
+    v.into_iter().map(|i| i.name.clone()).collect()
 }
 
-/// Seeds aprendidos com prova suficiente para a skin.
+/// Seeds que pagam na skin.
 pub fn active(l: &Learned, base: &str) -> Vec<u16> {
-    l.get(base).map_or(vec![], |m| {
-        m.iter()
-            .filter(|(_, v)| v.len() >= RARE_MIN_SALES)
-            .map(|(s, _)| *s)
-            .collect()
-    })
+    l.get(base).map_or(vec![], |m| m.keys().copied().collect())
 }
 
-/// Grupo aprendido do anúncio e o prêmio dele (as razões guardadas).
+/// Grupo do seed que paga e a prova dele.
 pub fn group(l: &Learned, name: &str, seed: Option<u16>) -> Option<(Group, Vec<f64>)> {
     let base = skin_base(name);
     let seed = seed?;
     let v = l.get(base)?.get(&seed)?;
-    (v.len() >= RARE_MIN_SALES).then(|| {
-        (
-            Group {
-                key: format!("learned:{base}:{seed}"),
-                label: format!("Pattern #{seed}"),
-            },
-            v.clone(),
-        )
-    })
+    // `group_of` lê a mesma medida (`set_paying`); o reserva cobre a tabela montada à mão em teste
+    let g = group_of(name, Some(seed.into()), None, None).unwrap_or_else(|| Group {
+        key: format!("learned:{base}:{seed}"),
+        label: format!("Pattern #{seed}"),
+    });
+    Some((g, v.clone()))
 }
 
-/// Venda limpa guardada: `(nome, seed, múltiplo, grupo)`, em ordem de nome e múltiplo.
-type Sale = (String, Option<u16>, f64, Option<String>);
-
-/// Prova contra: o seed já provado que também vendeu perto do preço comum (menos de `MIN_RATIO` × a mediana da
-/// skin) leva essas vendas no prêmio; sem elas o prêmio só enxerga as vendas caras. Venda comum não completa prova:
-/// só entra em seed que já tem `RARE_MIN_SALES` vendas caras.
-fn counter(l: &mut Learned, sales: &[Sale]) {
-    for of_name in sales.chunk_by(|a, b| a.0 == b.0) {
-        let Some(seeds) = l.get_mut(skin_base(&of_name[0].0)) else {
-            continue;
-        };
-        if of_name.len() < MIN_CLEAN_SALES {
-            continue;
-        }
-        let median = of_name[of_name.len() / 2].2;
-        for (_, seed, multiple, grp) in of_name {
-            // tabela e float de elite têm grupo próprio
-            if multiple / median < MIN_RATIO
-                && grp.as_deref().is_none_or(|g| g.starts_with("learned:"))
-                && let Some(v) = seed.and_then(|s| seeds.get_mut(&s))
-                && v.len() >= RARE_MIN_SALES
-            {
-                v.push(multiple / median);
-            }
-        }
-    }
+/// `(skins com seed pagante, seeds pagantes)`.
+pub fn size(l: &Learned) -> (usize, usize) {
+    (
+        l.values().filter(|m| !m.is_empty()).count(),
+        l.values().map(BTreeMap::len).sum(),
+    )
 }
 
-/// Refaz as faixas de float aprendidas (`learn_float_band`) com as vendas guardadas e acerta o grupo gravado
-/// nelas, que é o que o selo conta. Barato: uma leitura da tabela a cada seleção.
-pub async fn load_bands(h: &Hunt) -> Result<()> {
-    let rows: Vec<(String, f64, f64)> =
-        h.db.call(|c| {
-            c.prepare(
-                "SELECT name, \"float\", multiple FROM csfloat_sales WHERE \"float\" IS NOT NULL ORDER BY name",
-            )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect()
-        })
-        .await?;
-    let mut bands = HashMap::new();
-    for of_name in rows.chunk_by(|a, b| a.0 == b.0) {
-        let sales: Vec<(f64, f64)> = of_name.iter().map(|r| (r.1, r.2)).collect();
-        if let Some(band) = learn_float_band(&of_name[0].0, &sales) {
-            bands.insert(of_name[0].0.clone(), band);
-        }
-    }
-    let names: Vec<String> = bands.keys().cloned().collect();
-    set_float_bands(bands);
-    // (nome, chave do grupo de float, até): sem faixa, nenhuma venda do nome fica no grupo
-    let groups: Vec<(String, Option<(String, f64)>)> = names
-        .into_iter()
-        .map(|n| {
-            let g = float_band(&n)
-                .and_then(|(lo, hi)| Some((group_of(&n, None, None, Some(lo))?.key, hi)));
-            (n, g)
-        })
-        .collect();
-    h.db.call(move |c| {
-        let tx = c.transaction()?;
-        for (name, g) in groups {
-            tx.execute(
-                "UPDATE csfloat_sales SET grp = NULL WHERE name = ?1 AND grp LIKE 'float:%'",
-                [&name],
-            )?;
-            if let Some((key, hi)) = g {
-                tx.execute(
-                    "UPDATE csfloat_sales SET grp = ?2 WHERE name = ?1 AND grp IS NULL AND \"float\" <= ?3",
-                    params![name, key, hi],
-                )?;
-            }
-        }
-        tx.commit()
-    })
-    .await?;
-    Ok(())
+const SALES_SQL: &str = "SELECT name, seed, multiple, \"float\", sold_at FROM csfloat_sales
+     WHERE multiple > 0 ORDER BY name, sold_at, seed";
+
+fn read_sales(c: &rusqlite::Connection) -> rusqlite::Result<Vec<SaleRow>> {
+    c.prepare(SALES_SQL)?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect()
 }
 
+pub(crate) async fn sale_rows(h: &Hunt) -> Result<Vec<SaleRow>> {
+    h.db.call(|c| read_sales(c)).await
+}
+
+/// Refaz a medida com as vendas guardadas e publica os seeds pagantes. Barato: uma leitura da tabela.
+// shortcut: o `grp` já gravado em `csfloat_sales` não é refeito quando um seed entra ou sai; ele só pesa na
+// prova de skin ainda sem medida. Regravar se o selo passar a depender dele.
 pub async fn load(h: &Hunt) -> Result<()> {
-    load_bands(h).await?;
-    let (rows, sales): (Vec<(String, u16, f64)>, Vec<Sale>) =
-        h.db.call(|c| {
-            // Venda que o float explica (faixa aprendida) não ensina seed: sem o float guardado, fica.
-            let rows = c
-                .prepare(
-                    "SELECT l.name, l.seed, l.ratio, s.\"float\" FROM learned_sales l
-                     LEFT JOIN csfloat_sales s ON s.name = l.name AND s.seed = l.seed AND s.sold_at = l.sold_at",
-                )?
-                .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get::<_, Option<f64>>(3)?))
-                })?
-                .filter(|r| {
-                    r.as_ref().map_or(true, |(name, _, _, float)| {
-                        !float.zip(float_band(name)).is_some_and(|(f, (lo, hi))| (lo..=hi).contains(&f))
-                    })
-                })
-                .map(|r| r.map(|(name, seed, ratio, _)| (name, seed, ratio)))
-                .collect::<rusqlite::Result<_>>()?;
-            let sales = c
-                .prepare(
-                    "SELECT name, seed, multiple, grp FROM csfloat_sales ORDER BY name, multiple",
-                )?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok((rows, sales))
+    let rows = sale_rows(h).await?;
+    // skin com nota confere os 1 001 seeds contra todas as vendas dela: fora do laço da caça
+    let l = tokio::task::spawn_blocking(move || learn(&comps(&rows))).await?;
+    set_paying(
+        l.iter()
+            .map(|(base, m)| (base.clone(), m.keys().copied().collect()))
+            .collect(),
+    );
+    let (old, new) = (size(&h.lock().learned), size(&l));
+    h.lock().learned = l;
+    if old != new {
+        tracing::info!(skins = new.0, seeds = new.1, "catálogo de patterns medido");
+        let at = h.now();
+        h.db.call(move |c| {
+            c.execute(
+                "INSERT INTO refit_log(at, key, old, new, why) VALUES (?1, 'catalogo:seeds', ?2, ?3, ?4)",
+                params![at, old.1 as f64, new.1 as f64, format!("{} skins com seed que paga", new.0)],
+            )
         })
         .await?;
-    let mut l = Learned::new();
-    for (name, seed, ratio) in rows {
-        l.entry(skin_base(&name).to_string())
-            .or_default()
-            .entry(seed)
-            .or_default()
-            .push(ratio);
     }
-    counter(&mut l, &sales);
-    h.lock().learned = l;
     Ok(())
 }
 
@@ -294,7 +347,15 @@ pub async fn maybe_step(h: &Hunt) {
         (s.saldo, s.ratio.map(|(r, _)| r), s.learn_seen.clone())
     };
     let names = match catalog::load_items(&h.db).await {
-        Ok(items) => candidates(items, saldo, ratio, now),
+        Ok(items) => {
+            // metade das leituras para as skins de catálogo de pattern, metade para descobrir seed novo
+            let (table, rest) = (catalog_names(&items), candidates(items, saldo, ratio, now));
+            if (now / GAP) % 2 == 0 {
+                [table, rest].concat()
+            } else {
+                [rest, table].concat()
+            }
+        }
         Err(e) => return tracing::warn!("patterns: catálogo ilegível: {e}"),
     };
     let name = {
@@ -327,34 +388,13 @@ pub async fn maybe_step(h: &Hunt) {
         Err(e) => return tracing::warn!("patterns: CSFloat falhou para {name}: {e}"),
     };
     cache_sales(h, &name, &sales).await;
-    let found = premium_sales(&name, &sales);
-    if found.is_empty() {
-        return;
-    }
     let before = active(&h.lock().learned, skin_base(&name)).len();
-    let n = name.clone();
-    if let Err(e) = h
-        .db
-        .call(move |c| {
-            let tx = c.transaction()?;
-            for (seed, ratio, at) in found {
-                tx.execute(
-                    "INSERT OR IGNORE INTO learned_sales(name, seed, ratio, sold_at) VALUES (?1, ?2, ?3, ?4)",
-                    params![n, seed, ratio, at],
-                )?;
-            }
-            tx.commit()
-        })
-        .await
-    {
-        return tracing::warn!("patterns: gravar falhou: {e}");
-    }
     if let Err(e) = load(h).await {
         return tracing::warn!("patterns: reler falhou: {e}");
     }
     let now_active = active(&h.lock().learned, skin_base(&name));
     if now_active.len() > before {
-        tracing::info!(skin = skin_base(&name), seeds = ?now_active, "pattern aprendido");
+        tracing::info!(skin = skin_base(&name), seeds = ?now_active, "pattern provado");
         // a seleção põe o seed novo na agenda na próxima volta
         h.lock().selected = None;
     }
@@ -394,106 +434,180 @@ mod tests {
         assert_eq!(candidates(vec![measured], 600, Some(5.0), 100).len(), 1);
     }
 
-    fn sale(seed: u16, multiple: f64, stickers: bool) -> CsfloatSale {
-        CsfloatSale {
-            price_usd_cents: (multiple * 100.0) as i64,
-            base_price_usd_cents: 100,
-            multiple,
-            seed: Some(seed),
-            float: Some(0.3),
-            paint_index: None,
-            sold_at: 1_793_000_000 + i64::from(seed),
-            has_stickers: stickers,
-            sticker_overpay_cents: 0,
-        }
+    const T: i64 = 1_793_000_000;
+
+    /// 12 vendas comuns (seeds 1–12 a 1×) e as vendas pedidas, todas do mesmo nome.
+    fn rows(name: &str, extra: &[(u16, f64)]) -> Vec<SaleRow> {
+        (1..=12)
+            .map(|i| (i, 1.0))
+            .chain(extra.iter().copied())
+            .enumerate()
+            .map(|(i, (seed, m))| (name.to_string(), Some(seed), m, Some(0.3), T + i as i64))
+            .collect()
+    }
+
+    fn paying(name: &str, extra: &[(u16, f64)]) -> Vec<u16> {
+        active(&learn(&comps(&rows(name, extra))), skin_base(name))
     }
 
     #[test]
-    fn premium_sales_pick_unknown_seeds_far_above_the_median() {
-        const MP7: &str = "MP7 | Amberline (Minimal Wear)";
-        let mut v: Vec<CsfloatSale> = (1..=12).map(|i| sale(i, 1.0, false)).collect();
-        v.push(sale(890, 9.75, false));
-        v.push(sale(891, 1.9, false)); // abaixo de 2×
-        v.push(sale(892, 8.0, true)); // adesivo: o prêmio pode ser dele
-        v.push(sale(893, 500.0, false)); // dado ruim
-        let got = premium_sales(MP7, &v);
-        assert_eq!(got.len(), 1);
-        assert_eq!((got[0].0, got[0].1), (890, 9.75));
-        // amostra pequena: sem mediana confiável
-        assert!(premium_sales(MP7, &v[..5]).is_empty());
-        // seed de tabela (T1 do Moonrise) já tem grupo: não é aprendido
-        let mut m: Vec<CsfloatSale> = (1..=12).map(|i| sale(i, 1.0, false)).collect();
-        m.push(sale(59, 5.0, false));
-        assert!(premium_sales("Glock-18 | Moonrise (Field-Tested)", &m).is_empty());
-    }
-
-    #[test]
-    fn seed_needs_three_sales_across_wears_to_become_a_group() {
-        let mut l = Learned::new();
-        l.entry("MP7 | Amberline".into())
-            .or_default()
-            .insert(890, vec![9.75, 5.48]);
-        let mw = "MP7 | Amberline (Minimal Wear)";
-        assert!(active(&l, "MP7 | Amberline").is_empty());
-        assert_eq!(group(&l, mw, Some(890)), None);
-        l.get_mut("MP7 | Amberline")
-            .unwrap()
-            .get_mut(&890)
-            .unwrap()
-            .push(3.0);
-        assert_eq!(active(&l, "MP7 | Amberline"), vec![890]);
-        // vale para o StatTrak e outro desgaste da mesma skin
-        let (g, prem) = group(&l, "StatTrak™ MP7 | Amberline (Field-Tested)", Some(890)).unwrap();
+    fn unknown_seed_needs_three_sales_that_all_pay() {
+        const MP9: &str = "MP9 | Starlight Protector (Minimal Wear)";
+        assert_eq!(paying(MP9, &[(890, 9.75), (890, 5.0)]), Vec::<u16>::new());
+        assert_eq!(paying(MP9, &[(890, 9.75), (890, 5.0), (890, 3.0)]), [890]);
+        // uma venda perto do comum no quartil de baixo derruba: o seed não paga sempre
         assert_eq!(
-            (g.key.as_str(), g.label.as_str(), prem.len()),
-            ("learned:MP7 | Amberline:890", "Pattern #890", 3)
+            paying(MP9, &[(890, 9.75), (890, 5.0), (890, 3.0), (890, 1.1)]),
+            Vec::<u16>::new()
         );
-        assert_eq!(group(&l, mw, Some(1)), None);
-        assert_eq!(group(&l, mw, None), None);
+        // dado ruim (500×) e venda sem seed não ensinam
+        let mut r = rows(MP9, &[(891, 500.0), (891, 500.0), (891, 500.0)]);
+        r.push((MP9.into(), None, 9.0, None, T));
+        let l = learn(&comps(&r));
+        assert_eq!(size(&l), (0, 0));
+        assert!(
+            l.contains_key("MP9 | Starlight Protector"),
+            "medida, sem seed"
+        );
+        // poucas vendas: sem preço comum, a skin nem é medida
+        assert!(comps(&r[..5]).is_empty());
+        // float de elite explica a venda: não ensina seed (MW vai de 0,07 a 0,15; elite até 0,078)
+        let mut f = rows(MP9, &[]);
+        f.extend((0..3).map(|i| (MP9.to_string(), Some(77), 4.0, Some(0.071), T + 50 + i)));
+        f.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(size(&learn(&comps(&f))), (0, 0));
     }
 
     #[test]
-    fn researched_seed_keeps_learning_with_the_existing_group_identity() {
-        let name = "Galil AR | Sandstorm (Field-Tested)";
-        let mut sales: Vec<_> = (1..=12).map(|i| sale(i, 1.0, false)).collect();
-        sales.push(sale(583, 5.0, false));
-        assert_eq!(premium_sales(name, &sales)[0].0, 583);
-        let learned = HashMap::from([(
-            "Galil AR | Sandstorm".into(),
-            BTreeMap::from([(583, vec![4.0, 5.0, 6.0])]),
-        )]);
-        let (g, evidence) = group(&learned, name, Some(583)).unwrap();
+    fn catalog_seed_pays_by_its_own_sales_or_by_its_group() {
+        // PAW: Golden Cat = 41 e 350; Stoner Cat = 420 e 788
+        const PAW: &str = "AWP | PAW (Field-Tested)";
+        // 41 vendeu 3× bem: paga por conta própria e empresta a prova ao 350, que nunca vendeu
+        assert_eq!(paying(PAW, &[(41, 2.0), (41, 1.6), (41, 1.5)]), [41, 350]);
+        // 3 vendas próprias fracas valem mais que o grupo: 350 sai, 41 fica
         assert_eq!(
-            g.key,
-            group_of(name, Some(583), None, Some(0.3)).unwrap().key
+            paying(
+                PAW,
+                &[
+                    (41, 2.0),
+                    (41, 1.6),
+                    (41, 1.5),
+                    (350, 1.0),
+                    (350, 1.1),
+                    (350, 1.0)
+                ]
+            ),
+            [41]
         );
-        assert_eq!(evidence.len(), 3);
+        // grupo com venda fraca no quartil de baixo não empresta prova
+        assert_eq!(paying(PAW, &[(41, 2.0), (41, 1.3)]), Vec::<u16>::new());
+        // a identidade do grupo é a da tabela, com a prova medida
+        let l = learn(&comps(&rows(PAW, &[(41, 2.0), (41, 1.6), (41, 1.5)])));
+        let (g, e) = group(&l, "StatTrak™ AWP | PAW (Minimal Wear)", Some(350)).unwrap();
+        assert_eq!(g.key, "learned:AWP | PAW:350");
+        assert!(g.label.ends_with("#350"), "{}", g.label);
+        assert_eq!(e, [1.5, 1.6, 2.0]);
+        assert_eq!(group(&l, PAW, Some(1)), None);
+        assert_eq!(group(&l, PAW, None), None);
     }
 
     #[test]
-    fn a_proven_seed_also_carries_its_ordinary_sales() {
-        const NAME: &str = "MP7 | Amberline (Minimal Wear)";
-        let mut l = Learned::new();
-        let seeds = l.entry("MP7 | Amberline".into()).or_default();
-        seeds.insert(7, vec![2.0, 2.5, 3.0]);
-        seeds.insert(8, vec![2.0, 2.5]);
-        let row = |seed, multiple, grp: Option<&str>| -> Sale {
-            (NAME.into(), Some(seed), multiple, grp.map(String::from))
+    fn scored_skin_inherits_proof_from_worse_seeds_and_backtest_only_looks_back() {
+        const SSG: &str = "SSG 08 | Acid Fade (Factory New)";
+        let base = skin_base(SSG);
+        let mut by_score: Vec<u16> = (0..=1000).collect();
+        by_score.sort_by(|a, b| score(base, *b).partial_cmp(&score(base, *a)).unwrap());
+        // 12 vendas comuns nos seeds de fade mais baixo, depois 10 vendas caras nos 10 de fade mais alto
+        let top = &by_score[..10];
+        let sale = |i: usize, seed: u16, m: f64| -> SaleRow {
+            (SSG.to_string(), Some(seed), m, Some(0.03), T + i as i64)
         };
-        let mut sales: Vec<Sale> = (0..8).map(|_| row(100, 1.0, None)).collect();
-        sales.extend([
-            row(7, 1.0, None),
-            row(7, 1.2, Some("learned:MP7 | Amberline:7")),
-            row(7, 1.1, Some("float:elite")), // outro grupo
-            row(7, 3.0, None),                // cara: já está em `learned_sales`
-            row(8, 1.0, None),                // seed sem prova: fica como está
-        ]);
-        sales.sort_by(|a, b| a.2.total_cmp(&b.2));
-        counter(&mut l, &sales);
-        assert_eq!(l["MP7 | Amberline"][&7], vec![2.0, 2.5, 3.0, 1.0, 1.2]);
-        assert_eq!(l["MP7 | Amberline"][&8], vec![2.0, 2.5]);
-        // menos de `MIN_CLEAN_SALES` vendas não dão mediana: nada muda
-        counter(&mut l, &sales[..5]);
-        assert_eq!(l["MP7 | Amberline"][&7].len(), 5);
+        let commons = by_score[989..].iter().enumerate();
+        let mut r: Vec<SaleRow> = commons.map(|(i, s)| sale(i, *s, 1.0)).collect();
+        r.extend(top.iter().enumerate().map(|(i, s)| sale(12 + i, *s, 3.0)));
+        let c = comps(&r);
+        let pay = active(&learn(&c), base);
+        // o melhor seed herda a prova das 8 vendas de nota igual ou pior mais próximas; o de fade médio só tem
+        // as comuns abaixo dele
+        assert!(pay.contains(&top[0]), "{pay:?}");
+        assert!(
+            !pay.contains(&by_score[500]) && pay.len() < 30,
+            "{}",
+            pay.len()
+        );
+        // a prova só olha para trás: antes da primeira venda cara ninguém pagava
+        assert_eq!(evidence_for(base, top[0], &c[base], T + 12), None);
+        // uma 11ª venda no melhor seed já tinha as anteriores a favor: previsto 3×, real 2×
+        r.push(sale(100, top[0], 2.0));
+        assert_eq!(backtest(&comps(&r)).last(), Some(&(3.0, 2.0)));
+    }
+
+    #[test]
+    #[ignore = "medida: SNIPER_DB aponta para um banco de verdade (só leitura); imprime o catálogo e a prova retroativa"]
+    fn catalog_on_a_real_db() {
+        let path = std::env::var("SNIPER_DB").expect("SNIPER_DB");
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let c = rusqlite::Connection::open_with_flags(path, flags).unwrap();
+        let rows = read_sales(&c).unwrap();
+        // menor piso (centavos de dólar) entre os desgastes de cada skin
+        let mut floor: HashMap<String, i64> = HashMap::new();
+        let mut q = c
+            .prepare("SELECT name, floor_cents FROM items WHERE floor_cents > 0")
+            .unwrap();
+        let items = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)));
+        for (name, cents) in items.unwrap().flatten() {
+            let e = floor.entry(skin_base(&name).to_string()).or_insert(cents);
+            *e = (*e).min(cents);
+        }
+        let started = std::time::Instant::now();
+        let comps = comps(&rows);
+        let l = learn(&comps);
+        println!("{} vendas, medida em {:?}", rows.len(), started.elapsed());
+        let mut skins: Vec<_> = l.iter().filter(|(_, m)| !m.is_empty()).collect();
+        skins.sort_by_key(|(base, _)| floor.get(*base).copied().unwrap_or(i64::MAX));
+        for (base, m) in skins {
+            let mut mid: Vec<f64> = m.values().map(|e| e[e.len() / 2]).collect();
+            mid.sort_by(f64::total_cmp);
+            println!(
+                "piso US$ {:>7.2} | {base}: {} seeds, prova mediana {:.2}x ({:.2}x a {:.2}x)",
+                floor.get(base).copied().unwrap_or(0) as f64 / 100.0,
+                m.len(),
+                mid[mid.len() / 2],
+                mid[0],
+                mid[mid.len() - 1]
+            );
+        }
+        println!("total (skins, seeds): {:?}", size(&l));
+        let (n, paid, ratio) = crate::hunt::value::backtest_summary(&backtest(&comps));
+        println!("prova retroativa: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}");
+    }
+
+    #[test]
+    fn catalog_names_come_even_when_slow_or_expensive() {
+        let item = |name: &str, sales: Option<f64>| Item {
+            name: name.into(),
+            code: None,
+            floor_usd_cents: Some(100_000),
+            reference_usd_cents: None,
+            reference_at: None,
+            history_price_cents: None,
+            rank: 0,
+            sales_per_day: sales,
+            dispersion: None,
+            history_at: None,
+        };
+        let items = vec![
+            item("AK-47 | Redline (Field-Tested)", Some(50.0)),
+            item("AWP | PAW (Factory New)", Some(0.2)),
+            item("Glock-18 | Moonrise (Field-Tested)", Some(9.0)),
+            item("★ Karambit | Fade (Factory New)", Some(1.0)),
+        ];
+        assert_eq!(
+            catalog_names(&items),
+            [
+                "Glock-18 | Moonrise (Field-Tested)",
+                "AWP | PAW (Factory New)"
+            ]
+        );
     }
 }

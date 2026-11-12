@@ -183,6 +183,20 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE csfloat_deals ADD COLUMN gone_at INTEGER;
     ALTER TABLE csfloat_feed ADD COLUMN rare INTEGER NOT NULL DEFAULT 0;
     "#,
+    // Só pattern (12/11): a leitura de alvo raro passa a ser por faixa de seed. `weight` nulo = leitura antiga,
+    // sem faixa; `gap` nulo com peso = primeira leitura da faixa. A exposição mudou de unidade (segundos do alvo →
+    // peso × segundos da faixa), então as contagens e as leituras antigas dos raros recomeçam; os alvos de float
+    // saem. `fresh`, `finds` e `gain_cents` da vida inteira ficam.
+    r#"
+    ALTER TABLE reads ADD COLUMN gain INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE reads ADD COLUMN gap INTEGER;
+    ALTER TABLE reads ADD COLUMN weight REAL;
+    ALTER TABLE reads ADD COLUMN control INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE reads ADD COLUMN worth INTEGER NOT NULL DEFAULT 0;
+    DELETE FROM reads WHERE arm NOT LIKE 'd:%';
+    DELETE FROM arm_stats WHERE id LIKE 'f:%' OR id LIKE 'h:%';
+    UPDATE arm_stats SET r = 0, exposure = 0 WHERE id LIKE 'r:%';
+    "#,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
