@@ -184,7 +184,7 @@ async fn main() -> Result<()> {
     hunt.disable_cheap_hunt();
     hunt.load().await?;
     hunt::bootstrap::spawn_refresh(db.clone());
-    let (feed_db, feed_settings) = (db.clone(), settings.clone());
+    let (feed_db, feed_settings, feed_api) = (db.clone(), settings.clone(), csfloat.clone());
     let rt = runtime::Runtime::new(
         db,
         settings,
@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
     );
     rt.settings_changed().await?;
     tokio::spawn(hunt::scheduler::run(hunt));
-    tokio::spawn(csfloat_feed::run(feed_db, feed_settings));
+    tokio::spawn(csfloat_feed::run(feed_db, feed_settings, feed_api));
     app.rt = Some(rt);
 
     tracing::info!(%listen, data = %dir.display(), "no ar");

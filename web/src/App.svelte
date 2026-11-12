@@ -8,10 +8,11 @@
   import Watch from './lib/Watch.svelte';
   import Purchases from './lib/Purchases.svelte';
   import Learning from './lib/Learning.svelte';
+  import Csfloat from './lib/Csfloat.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
 
   // Uma seção por vez; o endereço (#radar) guarda a escolha e o botão de voltar funciona.
-  const TABS = ['oportunidades', 'radar', 'compras', 'aprendizado'] as const;
+  const TABS = ['oportunidades', 'csfloat', 'radar', 'compras', 'aprendizado'] as const;
   type Tab = (typeof TABS)[number];
   const fromHash = (): Tab => TABS.find((t) => t === location.hash.slice(1)) ?? 'oportunidades';
   let hash = $state<Tab>(fromHash());
@@ -35,8 +36,11 @@
   const tab = $derived<Tab>(hash === 'compras' && !hasPurchases ? 'oportunidades' : hash);
   // A contagem aparece na aba do navegador: dá para ver sem voltar ao painel.
   $effect(() => { document.title = (count ? `(${count}) ` : '') + 'Skin Sniper'; });
+  // Achado do CSFloat que ainda estava à venda na última conferência.
+  const csfloatOpen = $derived(app.csfloat.filter((d) => !d.gone_at && app.now - d.at < 86400).length);
   const tabs = $derived([
     { id: 'oportunidades', label: 'Oportunidades', count },
+    { id: 'csfloat', label: 'CSFloat', count: csfloatOpen },
     { id: 'radar', label: 'Radar', count: 0 },
     ...(hasPurchases ? [{ id: 'compras', label: 'Compras', count: 0 }] : []),
     { id: 'aprendizado', label: 'Aprendizado', count: 0 }
@@ -104,6 +108,8 @@
         <OppTable lost />
       {/if}
     </section>
+  {:else if tab === 'csfloat'}
+    <Csfloat />
   {:else if tab === 'radar'}
     <Watch />
   {:else if tab === 'compras'}

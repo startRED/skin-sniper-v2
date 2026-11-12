@@ -108,6 +108,7 @@ pub fn router(app: AppState) -> Router {
         .route("/api/purchases/{id}/sold", post(calibration::sold))
         .route("/api/calibration", get(calibration::get))
         .route("/api/learning", get(learning::get))
+        .route("/api/csfloat/deals", get(api::csfloat_deals))
         .route(
             "/api/settings",
             get(api::get_settings).put(api::put_settings),
