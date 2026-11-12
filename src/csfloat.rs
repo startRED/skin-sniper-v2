@@ -137,21 +137,6 @@ impl CsfloatClient {
         result
     }
 
-    /// Anúncios "compre já" mais novos do site inteiro (`sort_by=most_recent`), até `limit` (o CSFloat aceita 50).
-    pub async fn recent_listings(&self, limit: u32) -> Result<Value> {
-        let url = format!(
-            "{}/listings?sort_by=most_recent&limit={limit}&type=buy_now",
-            self.base
-        );
-        self.get_value(url).await.1
-    }
-
-    /// Um anúncio pelo id (`state`: `listed`, `sold`, `delisted`…).
-    pub async fn listing(&self, id: &str) -> Result<Value> {
-        let url = format!("{}/listings/{}", self.base, path_escape(id));
-        self.get_value(url).await.1
-    }
-
     /// GET com o portão de ritmo e de cota; devolve também a chave usada na chamada.
     async fn get_value(&self, url: String) -> (Option<String>, Result<Value>) {
         // Bloqueio e cota são reconferidos a cada volta, inclusive ao acordar: outra chamada pode ter

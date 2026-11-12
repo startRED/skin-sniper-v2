@@ -161,7 +161,7 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX reads_at ON reads(at);
     "#,
     crate::hunt::bootstrap::CHARM_SCHEMA,
-    // Caça no feed do CSFloat (`csfloat_feed`): achados e uma linha por leitura (anúncios novos, buraco).
+    // Tabelas da caça no feed do CSFloat, removida em 12/11 (não compensa); ficam porque migração aplicada não some.
     r#"
     CREATE TABLE csfloat_deals (
         id TEXT PRIMARY KEY, at INTEGER NOT NULL, created_at INTEGER NOT NULL, name TEXT NOT NULL,
@@ -174,8 +174,6 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX csfloat_feed_at ON csfloat_feed(at);
     "#,
-    // Achado do CSFloat com prova (`kind`: pattern | price) e acompanhado até sumir (`checks`, `state`, `gone_at`).
-    // Linha com `kind` nulo é da régua antiga (só o preço previsto), que não se confirmou.
     r#"
     ALTER TABLE csfloat_deals ADD COLUMN kind TEXT;
     ALTER TABLE csfloat_deals ADD COLUMN sell_cents INTEGER;
