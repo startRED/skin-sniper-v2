@@ -49,7 +49,8 @@
     }
     return [...groups.values()];
   });
-  const CLASS = { d: 'baratos', r: 'seed raro', f: 'float baixo' } as Record<string, string>;
+  const CLASS = { d: 'baratos', r: 'seed raro' } as Record<string, string>;
+  const perRead = (s: { worth_cents: number; reads: number }) => s.worth_cents / s.reads;
   const dec = (x: number, n = 2) => x.toFixed(n).replace('.', ',');
   const life = (s: number) => (s < 120 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
   const of = (a: number, b: number) => (b ? `${a} de ${b}` : '—');
@@ -99,7 +100,7 @@
 
         {#if hv}
           <div class="grp">
-            <h3 title="A agenda consulta onde mais anúncio novo que cabe no saldo deve ter aparecido desde a última leitura, pesado pelo lucro que o alvo já deu.">Agenda de leituras</h3>
+            <h3 title="A agenda lê a faixa de seed onde mais anúncio novo que cabe no saldo deve ter aparecido desde a última leitura, pesado pelo lucro que as vendas daquele seed provam.">Agenda de leituras</h3>
             <dl class="stats">
               {@render kv('Um achado dura', `~${life(hv.life_s)}`, hv.lives ? `Medido em ${hv.lives} sumiços` : 'Valor padrão, ainda sem medida')}
               {#if hv.reads}
@@ -107,6 +108,15 @@
               {/if}
               {#if hv.loss != null && hv.base_loss != null}
                 <div title="Menor é melhor. A comparação é uma taxa fixa por tipo de busca."><dt>Erro de previsão</dt><dd>{dec(hv.loss, 3)}</dd><small>taxa fixa: {dec(hv.base_loss, 3)} · previu {Math.round(hv.predicted)}, vieram {Math.round(hv.actual)}</small></div>
+              {/if}
+              {#if hv.catalog_seeds}
+                <div title="Seeds que as vendas do CSFloat provaram vender acima do preço comum. Só eles são lidos."><dt>Catálogo de pattern</dt><dd>{hv.catalog_seeds} seeds</dd><small>em {hv.catalog_skins} skins</small></div>
+              {/if}
+              {#if hv.policy?.reads && hv.control?.reads}
+                <div title="1 leitura em 8 vai para a faixa lida há mais tempo, sem olhar valor nenhum (rodízio cego). Se a escolha da agenda não render mais por leitura que esse rodízio, o aprendizado não está ajudando. Valor = anúncios novos × lucro que a prova do seed promete."><dt>Agenda × rodízio cego (7 dias)</dt><dd class:amber={perRead(hv.policy) < perRead(hv.control)}>{perRead(hv.control) > 0 ? `${dec(perRead(hv.policy) / perRead(hv.control), 1)}×` : '—'}</dd><small>{money(Math.round(perRead(hv.policy)))} × {money(Math.round(perRead(hv.control)))} por leitura · {hv.policy.reads} × {hv.control.reads} leituras · achados {money(hv.policy.gain_cents)} × {money(hv.control.gain_cents)}</small></div>
+              {/if}
+              {#if hv.backtest_n && hv.backtest_paid != null && hv.backtest_ratio != null}
+                <div title="Cada venda de seed do catálogo foi prevista só com as vendas anteriores a ela. Mostra quantas saíram por pelo menos 1,15× o preço comum (paga a taxa da Steam) e quanto a venda real ficou do previsto."><dt>Seed do catálogo que pagou</dt><dd>{Math.round(hv.backtest_paid * 100)}%</dd><small>{hv.backtest_n} vendas · real ÷ previsto {dec(hv.backtest_ratio, 2)}</small></div>
               {/if}
               <div title="Ajuste de hora em hora"><dt>Janela · memória</dt><dd>{dec(hv.window_s / 3600, 1)} h · {Math.round(hv.half_life_h)} h</dd></div>
               {#if data.refit < 1}{@render kv('Desconto no preço do comum', `${Math.round((1 - data.refit) * 100)}%`, 'O mercado pagou abaixo do previsto')}{/if}

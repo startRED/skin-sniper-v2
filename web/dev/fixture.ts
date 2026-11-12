@@ -160,8 +160,11 @@ function learning(): Learning {
   };
   const value = {
     window_s: 7200, prior: 1, half_life_h: 72, life_s: 928, lives: 607, reads: 7100, fresh: 2694,
-    classes: [{ class: 'd', reads: 6100, fresh: 2500 }, { class: 'r', reads: 800, fresh: 150 }, { class: 'f', reads: 200, fresh: 44 }],
-    scored: 6800, loss: 0.324, base_loss: 0.552, predicted: 2610, actual: 2694, tuned_at: nowS() - 1800
+    classes: [{ class: 'd', reads: 6100, fresh: 2500 }, { class: 'r', reads: 1000, fresh: 194 }],
+    scored: 6800, loss: 0.324, base_loss: 0.552, predicted: 2610, actual: 2694, tuned_at: nowS() - 1800,
+    policy: { reads: 875, fresh: 180, worth_cents: 412000, gain_cents: 372 },
+    control: { reads: 125, fresh: 14, worth_cents: 21000, gain_cents: 0 },
+    catalog_skins: 15, catalog_seeds: 231, backtest_n: 336, backtest_paid: 0.97, backtest_ratio: 1.12
   };
   const weeks: Learning['weeks'] = [
     { queries: 11900, finds: 2, near: 93, alerts: 6, alerts_closed: 4, labeled: 0, profit_cents: 0 },

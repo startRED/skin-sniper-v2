@@ -304,7 +304,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    passado o descanso, a vaga é sempre de um alvo de seed ou de float, e entre eles decide a agenda (valor da
    leitura). De 11/11 a 12/11 foram duas de seed para cada uma de float, fixo: 950 leituras de seed deram 29
    anúncios novos em 24 h, contra 200 em 850 de float. Solta, a agenda deu 66 de seed para 6 de float numa hora;
-   desde 12/11 o float tem piso de uma leitura a cada duas raras (`RARE_WITHOUT_FLOAT_MAX`). **Caça no CSFloat (12/11): removida no mesmo dia.** O feed dos anúncios mais novos do CSFloat foi lido por
+   em 12/11 o float ganhou piso de uma leitura a cada duas raras (#114), desfeito no mesmo dia com "Só pattern"
+   (abaixo). **Caça no CSFloat (12/11): removida no mesmo dia.** O feed dos anúncios mais novos do CSFloat foi lido por
    algumas horas e não deu achado que se confirmasse: a API entrega o anúncio ~60 s depois de criado, o próprio
    site já mostra o preço previsto a quem anuncia e comprar lá exige dinheiro depositado (`pesquisa-web.md` 5.1).
    Erick decidiu não gastar consulta nisso. As tabelas `csfloat_deals` e `csfloat_feed` ficam no banco, sem uso;
@@ -312,6 +313,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    Antes a vaga livre disputava com os alvos baratos pelo valor da leitura e, em 12 h, foram 1 869 leituras de
    barato, 531 de seed e 87 de float, sem achado. O crédito de descoberta caiu de 0,25 para 0,125 por consulta
    (≈ 11 % das vagas): eram 42 históricos de catálogo por hora no mesmo balde dos anúncios.
+   **Só pattern (12/11, pedido do Erick):** float deixou de criar grupo raro e alvo de busca (saem os alvos `f:` e
+   `h:` e os grupos `float:`/`highfloat:`); a leitura de anúncios vai inteira para alvos de seed. Um seed só entra
+   na busca quando as vendas guardadas do CSFloat provam que ele paga (regra em "Precificação", "Catálogo de
+   pattern"); skin já medida é consultada só nos seeds pagantes, e skin de tabela ainda sem medida não é lida
+   (a tabela inteira só vale em instalação nova, sem nenhuma skin medida). A agenda passa a escolher a **faixa
+   de seed**, não o alvo (item 6 do Aprendizado), e 1 leitura em 8 vai para um rodízio cego que serve de régua.
+   O texto abaixo sobre float e sobre a vez fixa de seed e float fica como histórico.
    **Caça de comum em desconto desligada (11/11, pedido do Erick):** `main` chama `Hunt::disable_cheap_hunt` e a
    seleção fica só com seed e float. Quem anuncia abaixo do maior pedido de compra vende na hora para o pedido, e
    em 6 dias foram 5 235 anúncios de comum avaliados para 1 achado de R$ 0,93. Ela gastava 150 das ~277 consultas
@@ -401,31 +409,45 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    - Preço sugerido: anunciar a `base × p75` e descer até `base × prêmio`. Anúncios do grupo à venda há mais de
      48 h (vistos nas últimas 6 h) aparecem como "parados".
    - Sai no painel (etiqueta ao lado do grupo e linha nos detalhes), no aviso do Windows e no Telegram.
-6. **Valor de uma leitura (`hunt/value.rs`).** Projeto e medidas:
-   `docs/superpowers/specs/2026-11-10-aprendizado-unificado-design.md`. Substitui o crédito por proximidade do
-   lucro (≈ 0 em 99,9 % dos anúncios) e a colheita em sombra.
-   - `V = taxa × L·(1 − e^(−Δ/L)) × retorno`. `Δ` = segundos desde a última vez que a agenda olhou o alvo (leitura
-     vazia ou com falha também conta); `L` = percentil 25 da vida (7 dias) dos anúncios que eram o mais barato e
-     sumiram sem relistagem, com ≥ 20 medidas (piso 60 s); senão 900 s.
-   - **Taxa** (anúncios novos por segundo): `a = r + m·W·λ`, `taxa = (a + √a) ÷ (exposição + m·W)`. `r` = anúncios
-     novos do alvo; exposição = Σ `W·(1 − e^(−intervalo/W))` das leituras (a primeira conta `W`); as duas pesam
-     metade a cada `H`. `λ` = Σr ÷ Σexposição da classe (`d`/`r`/`f`): o alvo novo começa na média dos irmãos. `√a`
-     é o otimismo de contagem, que some com medida.
-   - **Teto por seca:** sem nenhum anúncio novo em `s` segundos de exposição seguidos, a taxa não passa de `3 ÷ s`
-     (regra de três). O alvo que secou perde espaço em horas, não em dias; o primeiro anúncio novo zera a seca.
-   - **Retorno** (centavos por anúncio novo, vida inteira): `(N0·w_c + ganho) ÷ (N0 + novos)`, com `w_c` da classe
-     encolhido para o total. Sem nenhum ganho medido, retorno = 1 para todos (só a taxa decide).
-   - **Ajuste de hora em hora, só banco:** repete as leituras dos últimos 7 dias (`reads`; páginas do mesmo alvo
-     em até 90 s contam como uma) para `W` {0,5; 1; 2; 4; 8 h} × `m` {0,5; 1; 2; 4} × `H` {24; 72; 168 h} e mede o
-     erro de previsão (perda de Poisson, cada leitura prevista só com o passado). Troca os parâmetros só com
-     ≥ 1 000 leituras pontuadas e melhora > 1 %; a troca vai para `refit_log` (`fluxo:janela`, `fluxo:prior`,
-     `fluxo:meia_vida`) e refaz `r`/exposição dos alvos. Resumo em `settings.value_info`, mostrado no placar:
-     erro do modelo × erro de uma taxa fixa por classe, previsto × real, anúncios novos por leitura.
-   - Padrões `W` = 2 h, `m` = 1, `H` = 72 h: medidos no histórico de 10/11 (erro 0,32 contra 0,55 da taxa por
-     classe). `N0` = 500, o otimismo, o p25 da vida, a margem de 1 % e o teto de 3 são hipóteses de calibração.
-   - **Prova contra no prêmio aprendido (`patterns::load`):** o seed já provado (≥ 3 vendas caras) leva também as
-     vendas dele abaixo de 2× a mediana da skin (`csfloat_sales`) nos quantis do prêmio. Venda comum não completa
-     prova.
+6. **Valor de uma leitura (`hunt/value.rs`, refeito em 12/11).** Projeto e medidas:
+   `docs/superpowers/specs/2026-11-12-so-pattern-design.md` (o de 10/11,
+   `2026-11-10-aprendizado-unificado-design.md`, descreve a conta por alvo que esta substitui).
+   - **Unidade = faixa de seed.** Uma consulta de anúncios filtra uma faixa de seeds de uma skin × desgaste. A
+     agenda compara faixas: `V = taxa × peso × L·(1 − e^(−Δ/L)) × lucro`, em centavos esperados.
+     - `peso` = seeds pagantes da faixa × vendas/dia da skin, normalizado para média 1 entre as faixas
+       selecionadas: quanto de anúncio novo a faixa deve receber;
+     - `Δ` = segundos desde a última leitura **da faixa** (`progress.seen`, sobrevive a reinício); `L` = percentil
+       25 da vida dos anúncios mais baratos que sumiram sem relistagem (7 dias, ≥ 20 medidas, piso 60 s), senão
+       900 s;
+     - `lucro` = líquido de vender pelo piso comum × mediana da prova dos seeds da faixa − o piso comum, em
+       centavos (mínimo 1);
+     - `taxa` = anúncios novos dentro do saldo por segundo e por peso, medida no alvo (skin × desgaste):
+       `a = r + m·W·λ`, `taxa = (a + √a) ÷ (exposição + m·W)`. A exposição de cada leitura é
+       `peso × W·(1 − e^(−Δ/W))` da faixa lida, gravada com a leitura (`reads.gap`, `reads.weight`); `λ` é a taxa
+       da classe, onde o alvo novo começa; `√a` é o otimismo de contagem, que some com medida; `r` e exposição
+       pesam metade a cada `H`.
+   - **Teto por seca:** sem anúncio novo em `s` de exposição seguidos, a taxa não passa de `3 ÷ s`.
+   - **Seleção:** até 24 alvos raros, ordenados por Σ `peso × lucro` das faixas.
+   - **Três conferências contra placebo**, gravadas de hora em hora em `settings.value_info` e mostradas na seção
+     "Aprendizado" do painel:
+     1. **Controle.** 1 leitura em 8 (`EXPLORE_SHARE` = 12,5 %) ignora o valor e lê a faixa lida há mais tempo.
+        Toda leitura grava `worth` = anúncios novos × lucro da faixa e `gain` (lucro previsto dos avisos); o
+        placar "Agenda × rodízio cego (7 dias)" compara o que cada braço rende por leitura. Se a agenda não
+        ganhar do rodízio, o aprendizado não está servindo.
+     2. **Previsão.** O app repete as leituras dos últimos 7 dias (`reads`; páginas do mesmo alvo em até 90 s
+        contam como uma) prevendo cada uma só com as anteriores, para `W` {0,5; 1; 2; 4; 8 h} × `m` {0,5; 1; 2;
+        4; 8; 16} × `H` {24; 72; 168 h}, e mede o erro (perda de Poisson). Troca os parâmetros só com ≥ 1 000 leituras
+        pontuadas e melhora > 1 %; a troca vai para `refit_log` (`fluxo:*`).
+     3. **Preço.** A prova retroativa do catálogo ("Precificação", "Catálogo de pattern").
+   - **Migração:** a exposição mudou de unidade, então `r`/exposição dos alvos raros e as leituras antigas de raro
+     foram zerados; os alvos de float saíram. O ajuste de parâmetros só volta a trocar depois de ≥ 1 000 leituras
+     novas (~8 h de caça).
+   - **Hipóteses, não medidas:** `L` = 900 s para anúncio raro; `W` = 2 h, `m` = 1, `H` = 72 h (medidos em 10/11
+     na conta antiga, por alvo); `Z` = 1; o teto de 3; `worth` como sinal de lucro (o app teve 5 oportunidades em
+     toda a vida, então lucro realizado não dá para comparar braços); o lucro usa razão do CSFloat.
+   - **Vieses conhecidos do placar:** o rodízio lê faixas com mais tempo parado, então acha mais estoque por
+     leitura do que acharia lendo no ritmo da agenda (comparação conservadora para a agenda); o peso médio muda
+     quando o catálogo muda.
 7. **Recalibração (`teacher::refit`).** Uma vez por dia de Brasília, com ≥ 7 dias de rótulos rápidos e ≥ 30 rótulos de
    comum com mediana na última semana: alvo = fator aplicado × mediana de (real das 48 h ÷ previsto), em
    [0,80; 1,00] (só desconta), andando no máximo 2 % por dia. Entra como `min` com o fator das vendas do Erick no
@@ -491,42 +513,42 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   Concorrente = mesmo nome e mesmo grupo raro (ou ambos comuns); no raro conta também o menor anúncio do grupo
   visto nas outras faixas de seed da mesma skin nas últimas 6 h, porque a página de uma faixa não mostra as outras.
   No grupo de float só concorre o anúncio de float igual ou melhor: float pior mais barato não segura a venda.
-- Float de elite: anúncio comum cujo float está na faixa de elite do nome (a partir do menor float da skin) é
-  raro do grupo `float:<skin>:<desgaste>` (pattern vence float).
-  - **Faixa aprendida (11/11, `groups::learn_float_band`):** com ≥ 20 vendas limpas guardadas do nome, a faixa vai
-    do menor float até onde as vendas pagaram prêmio: janelas de 5 vendas vizinhas em ordem de float, parando na
-    primeira em que duas saíram abaixo de 1,5× o múltiplo mediano do nome; teto de um quarto do desgaste. Se nem a
-    primeira janela paga, o nome não tem faixa. Sem 20 vendas vale a faixa fixa dos 10 % melhores. Refeita a cada
-    seleção (15 min). Medido em 11/11 (642 nomes, 34 787 vendas): 136 nomes com faixa (mediana de 14 % do
-    desgaste), 470 sem prêmio, 37 sem medida. Janela, 1,5× e teto são hipótese: a faixa é o filtro da consulta,
-    que traz os mais baratos primeiro, e faixa larga enche a página de float mediano no piso. Na Steam só há
-    prova de saída para os 10 % melhores (36 nomes: sumiram sem voltar 10 de 27 anúncios a 1,5–2× o comum; fora
-    da faixa, 2 de 92 a 1,15–1,5×).
-  - **Prêmio por anúncio:** as 8 vendas do mesmo nome com float igual ou pior que o do anúncio, as mais próximas
-    primeiro, cada múltiplo limitado a 2× (`FLOAT_STEAM_MAX_MULTIPLE`); sem 3 vendas, não há prêmio. Float melhor
-    não é pago por menos, então o preço não passa do que float pior já pagou. O limite de 2× é hipótese: nas
-    vendas do CSFloat o float baixo paga 3–8×, mas na Steam (anúncios de float bom vistos de 05 a 11/11) sumiu
-    sem voltar 36 % do que pedia 1,15–1,5× o preço comum, 16 % a 1,5–2×, 14 % a 2–3× e 5 % a 3× ou mais (anúncio
-    comum: 6 %, 3 %, 0 %, 3 %).
-  - Medido em 06/11 (157 skins, ~6 000 vendas do CSFloat): os 10 % melhores saíram de 1,3× a 2,8× a mediana em
-    várias skins (XM1014 Zombie Offensive FN 2,8×, USP-S Tropical Breeze FN 2,3×, M4A1-S Solitude MW 1,7×); no
-    Moonrise FT as duas vendas da faixa saíram a ~1,0×. Os 10 % são recorte de hipótese, não calibração.
-- Pattern aprendido (`src/hunt/patterns.rs`): as tabelas só cobrem 4 skins de pattern, e nas vendas do CSFloat de
-  06/11 apareceram seeds caros fora delas (MP7 Amberline 890 a 5–10×, M4A4 Etch Lord 158 a 18×). Um coletor lê as
-  vendas do CSFloat de uma skin do catálogo a cada 2 min (a de mais vendas/dia com piso ≤ saldo, ≥ 5 vendas/dia, cada
-  skin no máximo 1×/24 h; não gasta consulta da Steam). A mesma vaga prioriza nomes vigiados da política normal
-  cujo cache de vendas falta ou venceu (6 h). O aquecimento desses nomes usa intervalo de 15 s enquanto a
-  última consulta não falhou; fora dele, mantém 2 min. A cota e a pausa do CSFloat continuam obrigatórias;
-  falhas por nome esperam 10 min. O cache completo persiste no banco com a hora real da busca e só volta após
-  reinício enquanto tiver menos de 6 h; dados corrompidos ou com data futura são ignorados. Esses prazos são
-  hipóteses e a candidata externa continua fora dessa prioridade. Com ≥ 10 vendas limpas, guarda em
-  `learned_sales` cada venda sem adesivo, fora de tabela e float de elite (a faixa aprendida; ao subir, a venda
-  já guardada cujo float cai nela deixa de contar), que saiu entre 2× e o teto do múltiplo
-  raro sobre a mediana da skin.
-  Com 3 vendas assim do mesmo seed (somando desgastes e StatTrak, últimos 60 dias) o seed vira grupo
-  `learned:<skin>:<seed>` ("Pattern #seed"), o prêmio são as razões guardadas, e entra nas faixas de seed da busca
-  rara da skin junto com as da tabela. Os limites (2×, 3 vendas, 60 dias) são hipóteses, não calibração; demora
-  dias para juntar prova.
+- Float de elite: **removido em 12/11** (pedido do Erick). Float não cria grupo, alvo nem prêmio; `floats.json`
+  só serve para tirar da prova de pattern a venda cujo float está nos 10 % melhores do desgaste (o prêmio dela
+  pode ser do float). Medidas que ficam de histórico: na Steam, de 05 a 11/11,
+  anúncio de float bom sumiu sem voltar em 36 % dos casos a 1,15–1,5× o comum e 5 % a 3× ou mais; 205
+  fechamentos de Red Quartz na faixa saíram a 0,99×.
+- **Catálogo de pattern (`src/hunt/patterns.rs`, 12/11).** As tabelas (`bluegem`, `cspatterns`, `fade`, `phases`,
+  `named.json` com 28 grupos nomeados em 22 skins, `blue.json` com o % de azul por seed de 5 skins) só indicam
+  candidatos. Quem decide se um seed é raro são as vendas guardadas do CSFloat (`csfloat_sales`, sem adesivo nem
+  chaveiro). Cada venda vira uma razão sobre o preço comum do nome (a mediana das vendas dele, com ≥ 10 vendas
+  limpas). O seed paga quando:
+  1. a skin tem nota por seed (% de azul ou % do fade): as 8 vendas de nota igual ou pior mais próximas da dele
+     têm mediana ≥ 1,5× e quartil de baixo ≥ 1,2×. Seed melhor herda a prova do pior;
+  2. é seed de tabela com 3+ vendas próprias: as vendas dele passam no mesmo teste;
+  3. é seed de tabela com menos de 3 vendas: as vendas do grupo dele passam com quartil de baixo ≥ 1,5×;
+  4. não está em tabela nenhuma: 3+ vendas próprias com o quartil de baixo a ≥ 2×.
+  O quartil de baixo arredonda para baixo: com 3 ou 4 vendas é a pior delas. O seed pagante sem grupo de tabela
+  vira `learned:<skin>:<seed>` ("Pattern #seed"); o prêmio são as razões da prova.
+  - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo
+    lentas ou caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo); cada skin no máximo 1×/24 h,
+    sem gastar consulta da Steam. A
+    mesma vaga prioriza nomes vigiados cujo cache de vendas falta ou venceu (6 h), a cada 15 s enquanto a última
+    consulta não falhou. A cota e a pausa do CSFloat continuam obrigatórias; falhas por nome esperam 10 min.
+    Cada leitura refaz a prova; quando os seeds pagantes de uma skin crescem, a seleção é refeita na hora.
+  - **Medido em 12/11** (45 759 vendas guardadas; teste `catalog_on_a_real_db`, só leitura): 15 skins e 231
+    seeds pagantes. Por piso comum: até US$ 2 — Glock-18 High Beam (4 seeds), Sawed-Off Amber Fade (8), USP-S
+    Tropical Breeze (1); US$ 3–5 — P2000 Amber Fade (5), Desert Eagle Serpent Strike (2), MP7 Amberline (5),
+    SSG 08 Acid Fade (34); US$ 6–9 — Glock-18 Moonrise (5), Desert Eagle Heat Treated (104), M4A1-S Solitude (2),
+    XM1014 Seasons (1), AUG Amber Fade (6); US$ 12–15 — Five-SeveN Heat Treated (51), AWP PAW (2), AWP
+    Exothermic (1). Saíram seeds de tier 1 que vendem a preço comum (Solitude 95/112/154, Trace Lock 309/390).
+  - **Prova retroativa (`patterns::backtest`):** cada venda é prevista só com as vendas anteriores a ela. Em 12/11:
+    336 vendas de seed que já pagava; 97 % saíram a ≥ 1,15× o comum; real ÷ previsto 1,12 (mediana). Os limites
+    (1,5 / 1,2 / 2,0, 8 vizinhas, 3 vendas) foram escolhidos olhando esse mesmo retrato, então o número é
+    otimista; o placar refaz a conta a cada hora com as vendas novas, que a regra não viu.
+  - **Limites:** razão do CSFloat não é preço da Steam (medido em 11/11: Center Star 1,6× lá × 2,0–2,6× aqui;
+    High Beam T1 2,9× × 1,4×); skin com menos de 10 vendas limpas por nome não é medida e não é caçada; facas e
+    luvas ficam fora; a tabela `learned_sales` fica no banco, sem uso.
 - Raro: o grupo do anúncio (tier, fase, faixa de fade, float de elite) busca vendas do CSFloat do mesmo grupo
   (`price / reference.base_price`) entre todas as guardadas (`csfloat_sales`), não só as da última leitura do
   nome: as do grupo no mesmo nome ou, com menos de 8, as do grupo em todos os desgastes. Em 10/11 um Moonrise FT
@@ -643,7 +665,7 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   mas avaliava como comum, sem prêmio, então nunca podia achar lucro de float.
   `h:` pesquisa separadamente a AWP Asiimov Battle-Scarred com float ≥ 0,96, faixa visual aproximada da
   Blackiimov; tem preferência dentro das mesmas 16 vagas e exige a mesma prova de vendas para prêmio.
-  Patterns de `assets/patterns/researched.json` têm grupos individuais por seed, compatíveis com as chaves
+  Patterns de `assets/patterns/named.json` (antes `researched.json`) têm grupos individuais por seed, compatíveis com as chaves
   já aprendidas. Os preços de terceiros selecionam o que pesquisar; nunca viram multiplicador automático.
 
 - Varredura limitada a 6 páginas do topo (60 itens) e 6 amostras da cauda por categoria por ciclo, intercaladas

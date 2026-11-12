@@ -56,11 +56,6 @@ const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
 // Erick, não um número medido como seguro. 12/11: com o Chrome (#107), 24 h a ~75 anúncios/h + histórico tiveram
 // só 2 rajadas curtas de 429; o Erick pediu 28 s. Se voltar bloqueio de horas, é o primeiro número a desfazer.
 const LISTINGS_REST_SECS: i64 = 28;
-/// Piso do float: no máximo esta quantidade de leituras raras seguidas sem float (`Queue::float_due`).
-// shortcut: 1 = pelo menos metade das vagas raras; pedido do Erick em 12/11/2026 depois de a agenda livre mandar
-// 66 leituras de seed para 6 de float numa hora. Trocar pela medida quando o float tiver achados.
-const RARE_WITHOUT_FLOAT_MAX: u32 = 1;
-
 /// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
 // Medido em 12/11/2026 (24 h): MP7 | Amberline (seed) falhou 287 de 464 tentativas e Serpent Strike (seed) 129 de
 // 366; cada falha são 2 requisições (a repetição de 5 s falha junto ~9 em 10 vezes) e o alvo voltava a ser
@@ -143,6 +138,64 @@ impl Task {
     }
 }
 
+/// O que a seleção sabe de cada faixa de seed de um alvo raro (`catalog::select_ranges`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Range {
+    /// Anúncios novos esperados em relação à faixa média (seeds × giro; a média entre as faixas é 1).
+    pub weight: f64,
+    /// Centavos de lucro por anúncio novo: comprar no piso comum e vender pela mediana da prova do seed.
+    pub gain: f64,
+}
+
+/// Faixa sem dado da seleção (teste, instalação nova): vale como a faixa média e só reveza.
+const PLAIN_RANGE: Range = Range {
+    weight: 1.0,
+    gain: 1.0,
+};
+
+/// Uma leitura para o registro (`reads`): o histórico que o ajuste repete e o placar compara.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Read {
+    pub at: i64,
+    pub arm: String,
+    pub fresh: u32,
+    /// Lucro esperado das oportunidades novas (centavos).
+    pub gain: i64,
+    pub range: Option<RangeRead>,
+}
+
+/// A faixa de seed lida: o que a repetição precisa para refazer a conta da exposição.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RangeRead {
+    /// Segundos desde a leitura anterior da mesma faixa; `None` = primeira.
+    pub gap: Option<i64>,
+    pub weight: f64,
+    /// Leitura do braço de controle (a faixa lida há mais tempo), não da escolha por valor.
+    pub control: bool,
+    /// Anúncios novos × lucro por anúncio novo da faixa (centavos): a recompensa de toda leitura.
+    pub worth: i64,
+}
+
+/// Faixa em leitura de um alvo raro, de `focus` até `reward`.
+struct Focus {
+    key: String,
+    range: Range,
+    control: bool,
+    /// Leitura anterior da faixa; depois da primeira página, a própria leitura (não soma exposição de novo).
+    prev: Option<i64>,
+}
+
+fn range_key(id: &str, (lo, hi): (u16, u16)) -> String {
+    format!("{id}#{lo}-{hi}")
+}
+
+fn range_info(ranges: &HashMap<String, Vec<Range>>, task: &Task, i: usize) -> Range {
+    ranges
+        .get(&task.id)
+        .filter(|r| r.len() == task.seeds.len())
+        .map_or(PLAIN_RANGE, |r| r[i])
+}
+
 /// O que se sabe do rendimento de um braço. `n`, `r` e `exposure` decaem com o tempo; o resto é vitalício.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Stat {
@@ -206,6 +259,9 @@ struct Progress {
     explore: f64,
     turn: usize,
     cursors: HashMap<String, usize>,
+    /// Última leitura de cada faixa de seed.
+    #[serde(default)]
+    seen: HashMap<String, i64>,
 }
 
 #[derive(Default)]
@@ -220,15 +276,20 @@ pub struct Queue {
     explore_turn: usize,
     /// Parâmetros do valor de uma leitura; o ajuste de hora em hora troca (`value::maybe_step`).
     pub params: value::Params,
-    /// Leituras ainda não gravadas (hora, alvo, anúncios novos): o histórico que o ajuste repete.
-    reads: Vec<(i64, String, u32)>,
+    /// Leituras ainda não gravadas: o histórico que o ajuste repete.
+    reads: Vec<Read>,
+    /// Por alvo raro, peso e lucro de cada faixa de seed, na ordem de `Task::seeds`.
+    ranges: HashMap<String, Vec<Range>>,
+    /// Última leitura de cada faixa (`<id>#<de>-<até>`): o estoque de anúncio novo é por faixa, não por alvo.
+    range_seen: HashMap<String, i64>,
+    /// Faixa que `next_matching` escolheu para o alvo (índice, controle); `focus` consome.
+    choice: HashMap<String, (usize, bool)>,
+    focused: HashMap<String, Focus>,
     pub external: Option<String>,
     pub external_ready: bool,
     pub last_exploring: bool,
     /// Hora da última leitura de anúncios (`LISTINGS_REST_SECS`).
     listed_at: i64,
-    /// Leituras raras seguidas sem float (`float_due`).
-    since_float: u32,
     cursors: HashMap<String, usize>,
     selection_revision: u64,
     query_revisions: HashMap<String, u64>,
@@ -274,6 +335,30 @@ impl Queue {
             }
         }
         removed
+    }
+
+    pub fn set_ranges(&mut self, ranges: HashMap<String, Vec<Range>>) {
+        self.ranges = ranges;
+    }
+
+    /// A faixa do alvo que mais vale ler agora e quanto: peso × lucro × estoque acumulado desde a última leitura
+    /// dela (limitado pela vida de um anúncio barato). Empate fica com a primeira.
+    fn best_range(&self, task: &Task, now: i64) -> Option<(usize, f64)> {
+        task.seeds
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| {
+                let range = range_info(&self.ranges, task, i);
+                let gap = self
+                    .range_seen
+                    .get(&range_key(&task.id, r))
+                    .map(|at| now - at);
+                (
+                    i,
+                    range.weight * range.gain * value::exposure(gap, self.params.life),
+                )
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
     }
 
     pub(super) fn revision(&self, task: &Task) -> (u64, u64) {
@@ -373,8 +458,8 @@ impl Queue {
             .collect()
     }
 
-    /// Leituras feitas desde a última vez (hora, alvo, anúncios novos), para gravar.
-    pub fn take_reads(&mut self) -> Vec<(i64, String, u32)> {
+    /// Leituras feitas desde a última vez, para gravar.
+    pub fn take_reads(&mut self) -> Vec<Read> {
         std::mem::take(&mut self.reads)
     }
 
@@ -396,17 +481,10 @@ impl Queue {
         now - self.listed_at < LISTINGS_REST_SECS
     }
 
-    /// Há alvo de seed ou float: a vaga da leitura de anúncios vai para eles, e entre eles decide a agenda
-    /// (valor da leitura), não uma proporção fixa. 12/11/2026: o 2 seed : 1 float fixo deu 950 leituras de seed
-    /// com 29 anúncios novos em 24 h, contra 200 em 850 de float; o slot de exploração ainda gira entre os modos.
+    /// Há alvo de seed: a vaga da leitura de anúncios vai para eles, e entre eles decide a agenda (valor da
+    /// leitura da melhor faixa de cada um).
     pub fn has_rare(&self) -> bool {
         self.entries.values().any(|e| e.task.rare())
-    }
-
-    /// A vez é do float: já houve `RARE_WITHOUT_FLOAT_MAX` leituras raras seguidas sem ele e há alvo de float.
-    pub fn float_due(&self) -> bool {
-        self.since_float >= RARE_WITHOUT_FLOAT_MAX
-            && self.entries.values().any(|e| e.task.mode() == Mode::Float)
     }
 
     /// Centavos esperados de ler o alvo agora (`value`): nunca visto vale infinito.
@@ -414,8 +492,18 @@ impl Queue {
         let Some(s) = self.stats.get(id).filter(|s| s.seen() > 0) else {
             return f64::INFINITY;
         };
-        self.yield_rate(pool, id, s, now, value::Z)
-            * value::exposure(Some(now - s.seen()), self.params.life)
+        match self
+            .entries
+            .get(id)
+            .and_then(|e| self.best_range(&e.task, now))
+        {
+            // raro: anúncios novos por segundo e por peso do alvo × a melhor faixa dele agora
+            Some((_, best)) => self.rate(pool, id, s, now, value::Z) * best,
+            None => {
+                self.yield_rate(pool, id, s, now, value::Z)
+                    * value::exposure(Some(now - s.seen()), self.params.life)
+            }
+        }
     }
 
     /// Decide o próximo alvo e já conta a consulta (como antes: reagenda antes de consultar, uma falha não
@@ -457,9 +545,13 @@ impl Queue {
         self.explore += EXPLORE_SHARE;
         let exploring = self.explore >= 1.0;
         self.last_exploring = exploring;
+        let mut control = None;
         let pick = if exploring {
             // O slot de exploração gira entre os modos presentes (piso por modo, qualquer que seja o número de
-            // braços de cada um) e, dentro do modo, vai para o menos testado (consultas decaídas).
+            // braços de cada um). No barato vai para o menos testado (consultas decaídas). No seed é o braço de
+            // controle: a faixa lida há mais tempo entre todos os alvos, sem olhar valor nenhum. É a régua do
+            // placar (`value::Info::policy` × `control`): se a escolha por valor não render mais por leitura que
+            // esse rodízio cego, o aprendizado é placebo.
             let mut modes: Vec<Mode> = self
                 .entries
                 .values()
@@ -480,16 +572,41 @@ impl Queue {
                         && mode == Mode::Cheap
                         && (self.explore_turn / modes.len()).is_multiple_of(2)
                 });
-            external.or_else(|| {
+            let of_mode = || {
                 self.entries
                     .values()
                     .filter(|e| eligible(&e.task) && e.task.mode() == mode)
-                    .min_by(|a, b| {
+            };
+            let range_seen = &self.range_seen;
+            let oldest = (external.is_none() && mode == Mode::Seed)
+                .then(|| {
+                    of_mode()
+                        .flat_map(|e| {
+                            e.task.seeds.iter().enumerate().map(move |(i, &r)| {
+                                let key = range_key(&e.task.id, r);
+                                (range_seen.get(&key).copied().unwrap_or(0), e, i)
+                            })
+                        })
+                        .min_by(|a, b| {
+                            a.0.cmp(&b.0)
+                                .then_with(|| tie(a.1, b.1))
+                                .then(a.2.cmp(&b.2))
+                        })
+                })
+                .flatten();
+            match oldest {
+                Some((_, e, i)) => {
+                    control = Some(i);
+                    Some(e)
+                }
+                None => external.or_else(|| {
+                    of_mode().min_by(|a, b| {
                         n_of(self, &a.task.id)
                             .total_cmp(&n_of(self, &b.task.id))
                             .then_with(|| tie(a, b))
                     })
-            })
+                }),
+            }
         } else {
             // maior valor agora; no empate (ex.: nada medido ainda) o olhado há mais tempo, depois a nota-base
             let pool = self.pool(now);
@@ -507,11 +624,14 @@ impl Queue {
         };
         let pick = pick?;
         let id = pick.task.id.clone();
-        match pick.task.mode() {
-            Mode::Float => self.since_float = 0,
-            Mode::Seed => self.since_float += 1,
-            Mode::Cheap => {}
-        }
+        let choice = match control {
+            Some(i) => Some((i, true)),
+            None => self.best_range(&pick.task, now).map(|(i, _)| (i, false)),
+        };
+        match choice {
+            Some(c) => self.choice.insert(id.clone(), c),
+            None => self.choice.remove(&id),
+        };
         if exploring {
             self.explore -= 1.0;
         }
@@ -542,6 +662,13 @@ impl Queue {
             }
             self.dirty.insert(id.to_string());
         }
+        // a faixa escolhida não foi lida: volta a contar o estoque desde a leitura anterior
+        if let Some(f) = self.focused.remove(id) {
+            match f.prev {
+                Some(at) => self.range_seen.insert(f.key, at),
+                None => self.range_seen.remove(&f.key),
+            };
+        }
         (self.credit, self.explore, self.explore_turn, self.cursors) = credit;
         for (id, e) in &mut self.entries {
             e.cursor = self.cursors.get(id).copied().unwrap_or(0);
@@ -566,8 +693,27 @@ impl Queue {
             return;
         };
         s.decay(now, self.params.half_life);
-        let gap = (s.last_at > 0).then(|| now - s.last_at);
-        let exposure = value::exposure(gap, self.params.window);
+        // Raro: a exposição é a da faixa lida (peso × o que se acumulou desde a leitura anterior dela), não a do
+        // alvo. Com a exposição do alvo, quem tem mais faixas pareceria render mais só por ser lido mais vezes.
+        let (exposure, range) = match self.focused.get_mut(id) {
+            Some(f) => {
+                let gap = f.prev.map(|at| now - at);
+                f.prev = Some(now);
+                (
+                    f.range.weight * value::exposure(gap, self.params.window),
+                    Some(RangeRead {
+                        gap,
+                        weight: f.range.weight,
+                        control: f.control,
+                        worth: (f64::from(found.fresh) * f.range.gain).round() as i64,
+                    }),
+                )
+            }
+            None => {
+                let gap = (s.last_at > 0).then(|| now - s.last_at);
+                (value::exposure(gap, self.params.window), None)
+            }
+        };
         s.exposure += exposure;
         s.dry = if found.fresh > 0 {
             0.0
@@ -583,7 +729,13 @@ impl Queue {
         if found.fresh > 0 || found.gain_cents > 0 {
             s.reward_at = now;
         }
-        self.reads.push((now, id.to_string(), found.fresh));
+        self.reads.push(Read {
+            at: now,
+            arm: id.to_string(),
+            fresh: found.fresh,
+            gain: found.gain_cents.max(0),
+            range,
+        });
         self.dirty.insert(id.to_string());
     }
 
@@ -593,7 +745,25 @@ impl Queue {
             return (0.0, "testando alvo novo".into());
         };
         let pool = self.pool(now);
-        let per_hour = self.rate(&pool, id, s, now, 0.0) * 3600.0;
+        let rate = self.rate(&pool, id, s, now, 0.0);
+        let ranges: Vec<Range> = self.entries.get(id).map_or(vec![], |e| {
+            (0..e.task.seeds.len())
+                .map(|i| range_info(&self.ranges, &e.task, i))
+                .collect()
+        });
+        // raro: a taxa é por peso; o alvo inteiro soma os pesos, e a leitura vale a da melhor faixa
+        let (per_hour, worth) = if ranges.is_empty() {
+            (
+                rate * 3600.0,
+                self.yield_rate(&pool, id, s, now, 0.0) * self.params.life,
+            )
+        } else {
+            let best = ranges.iter().map(|r| r.weight * r.gain).fold(0.0, f64::max);
+            (
+                rate * 3600.0 * ranges.iter().map(|r| r.weight).sum::<f64>(),
+                rate * best * self.params.life,
+            )
+        };
         let reason = if s.queries < NEW_QUERIES {
             "testando alvo novo".to_string()
         } else if s.dry_secs(now) >= DRY_REASON_SECS {
@@ -609,14 +779,12 @@ impl Queue {
         } else {
             format!("sem anúncio novo em {} consultas", s.queries)
         };
-        (
-            self.yield_rate(&pool, id, s, now, 0.0) * self.params.life,
-            reason,
-        )
+        (worth, reason)
     }
 
-    /// A tarefa estreitada à próxima faixa de seed (rodízio); desconto volta igual.
-    pub fn focus(&mut self, task: Task) -> Task {
+    /// A tarefa estreitada a uma faixa de seed: a que a agenda escolheu (`next_matching`) ou, sem escolha, a
+    /// próxima do rodízio. Marca a faixa como lida agora; `reward` fecha a conta. Desconto volta igual.
+    pub fn focus(&mut self, task: Task, now: i64) -> Task {
         let Some(e) = self
             .entries
             .get_mut(&task.id)
@@ -624,12 +792,36 @@ impl Queue {
         else {
             return task;
         };
-        if task.seeds.len() == 1 && e.task.seeds.len() > 1 {
-            return task;
-        }
-        let range = task.seeds[e.cursor % task.seeds.len()];
-        e.cursor = e.cursor.wrapping_add(1);
-        self.cursors.insert(task.id.clone(), e.cursor);
+        let seeds = &e.task.seeds;
+        let (i, control) = if task.seeds.len() == 1 && seeds.len() > 1 {
+            // conferência de achado: a tarefa já vem na faixa dele
+            match seeds.iter().position(|r| *r == task.seeds[0]) {
+                Some(i) => (i, false),
+                None => return task,
+            }
+        } else {
+            match self.choice.remove(&task.id).filter(|c| c.0 < seeds.len()) {
+                Some(c) => c,
+                None => {
+                    let i = e.cursor % seeds.len();
+                    e.cursor = e.cursor.wrapping_add(1);
+                    self.cursors.insert(task.id.clone(), e.cursor);
+                    (i, false)
+                }
+            }
+        };
+        let (range, info) = (seeds[i], range_info(&self.ranges, &e.task, i));
+        let key = range_key(&task.id, range);
+        let prev = self.range_seen.insert(key.clone(), now);
+        self.focused.insert(
+            task.id.clone(),
+            Focus {
+                key,
+                range: info,
+                control,
+                prev,
+            },
+        );
         Task {
             seeds: vec![range],
             ..task
@@ -810,12 +1002,9 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             // alvo de seed ou float: é a leitura escassa e é onde está o anúncio mal precificado.
             let no_listings = listings_blocked || s.queue.resting(now);
             let rare = !no_listings && s.queue.has_rare();
-            let float = rare && s.queue.float_due();
             (
                 s.queue.next_matching(now, |t| {
-                    if float {
-                        t.mode() == Mode::Float
-                    } else if rare {
+                    if rare {
                         t.rare()
                     } else {
                         !t.rare() && !recent.contains(&t.id)
@@ -1010,7 +1199,10 @@ async fn gone_by_book(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
 }
 
 pub(super) async fn run_task(h: &Arc<Hunt>, task: &Task) -> anyhow::Result<()> {
-    let task = h.lock().queue.focus(task.clone());
+    let task = {
+        let now = h.now();
+        h.lock().queue.focus(task.clone(), now)
+    };
     if task.rare() {
         if h.steam.blocked(Endpoint::Listings) {
             return gone_by_book(h, &task).await;
@@ -1224,7 +1416,7 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
                 other.clone()
             };
             if same_query(task, &focused) {
-                targets.push(s.queue.focus(other));
+                targets.push(s.queue.focus(other, h.now()));
             }
         }
     }
@@ -1368,23 +1560,38 @@ async fn backoff(h: &Hunt, e: &anyhow::Error) {
 /// Grava no banco as notas alteradas e as leituras feitas.
 pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
     h.steam.checkpoint_pace();
+    let now = h.now();
     let (rows, reads, progress) = {
         let mut s = h.lock();
         let q = &mut s.queue;
+        // faixa que saiu do catálogo há mais de uma semana não volta a ser lida
+        q.range_seen.retain(|_, at| now - *at < 7 * 86_400);
         let progress = serde_json::to_string(&Progress {
             credit: q.credit,
             explore: q.explore,
             turn: q.explore_turn,
             cursors: q.cursors.clone(),
+            seen: q.range_seen.clone(),
         })?;
         (q.take_dirty(), q.take_reads(), progress)
     };
     h.db.call(move |c| {
         let tx = c.transaction()?;
-        for (at, arm, fresh) in reads {
+        for r in reads {
+            let range = r.range;
             tx.execute(
-                "INSERT INTO reads(at, arm, fresh) VALUES (?1, ?2, ?3)",
-                rusqlite::params![at, arm, fresh],
+                "INSERT INTO reads(at, arm, fresh, gain, gap, weight, control, worth)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    r.at,
+                    r.arm,
+                    r.fresh,
+                    r.gain,
+                    range.and_then(|x| x.gap),
+                    range.map(|x| x.weight),
+                    range.is_some_and(|x| x.control),
+                    range.map_or(0, |x| x.worth),
+                ],
             )?;
         }
         for (id, s) in rows {
@@ -1458,6 +1665,7 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
         s.queue.explore = progress.explore.clamp(0.0, 1.0);
         s.queue.explore_turn = progress.turn;
         s.queue.cursors = progress.cursors;
+        s.queue.range_seen = progress.seen;
     }
     value::load(h).await
 }
@@ -1492,25 +1700,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listings_slot_goes_to_seed_and_float_by_value_not_by_turn() {
-        let rare = |id: &str, seeds: Vec<(u16, u16)>, float: Option<(f64, f64)>| Task {
-            id: id.into(),
-            name: id.into(),
-            code: "G1".into(),
-            wear: None,
+    fn listings_slot_goes_to_the_rare_targets_and_never_to_the_cheap_one() {
+        let rare = |id: &str, seeds: Vec<(u16, u16)>| Task {
             seeds,
-            float,
-            score: 1.0,
+            ..task(id, 1.0)
         };
         let mut q = Queue::default();
         assert!(!q.has_rare());
-        q.set_tasks(vec![rare("d:a", vec![], None)]);
+        q.set_tasks(vec![rare("d:a", vec![])]);
         assert!(!q.has_rare());
         q.set_tasks(vec![
-            rare("d:a", vec![], None),
-            rare("r:a", vec![(1, 1)], None),
-            rare("f:a", vec![], Some((0.0, 0.01))),
-            rare("f:b", vec![], Some((0.0, 0.01))),
+            rare("d:a", vec![]),
+            rare("r:a", vec![(1, 1)]),
+            rare("r:b", vec![(2, 3)]),
+            rare("r:c", vec![(7, 7)]),
         ]);
         assert!(q.has_rare());
         let mut picked = Vec::new();
@@ -1520,48 +1723,68 @@ mod tests {
         }
         // nunca lidos valem infinito: a agenda passa pelos três raros, sem vez fixa e sem o barato
         picked.sort();
-        assert_eq!(picked, ["f:a", "f:b", "r:a"]);
+        assert_eq!(picked, ["r:a", "r:b", "r:c"]);
     }
 
     #[test]
-    fn float_gets_at_least_every_other_rare_slot() {
-        let task = |id: &str, seeds: Vec<(u16, u16)>, float: Option<(f64, f64)>| Task {
-            id: id.into(),
-            name: id.into(),
-            code: "G1".into(),
-            wear: None,
-            seeds,
-            float,
-            score: 1.0,
-        };
+    fn rare_reads_go_to_the_range_worth_most_and_the_control_to_the_oldest() {
+        let mut t = task("r:a", 1.0);
+        t.seeds = vec![(1, 1), (5, 9)];
         let mut q = Queue::default();
-        q.set_tasks(vec![
-            task("r:a", vec![(1, 1)], None),
-            task("r:b", vec![(2, 2)], None),
-            task("f:a", vec![], Some((0.0, 0.01))),
-        ]);
-        let mut modes = Vec::new();
-        for now in 1..=8 {
-            let float = q.float_due();
-            let t = q
-                .next_matching(now, |t| {
-                    if float {
-                        t.mode() == Mode::Float
-                    } else {
-                        t.rare()
-                    }
-                })
-                .unwrap();
-            modes.push(t.mode());
-        }
-        // nunca duas leituras raras seguidas sem float
-        assert!(
-            modes.windows(2).all(|w| w.contains(&Mode::Float)),
-            "{modes:?}"
+        q.set_tasks(vec![t]);
+        let (narrow, wide) = (
+            Range {
+                weight: 0.5,
+                gain: 200.0,
+            },
+            Range {
+                weight: 2.0,
+                gain: 1000.0,
+            },
         );
-        // sem alvo de float, o piso não trava a vaga
-        q.set_tasks(vec![task("r:a", vec![(1, 1)], None)]);
-        assert!(!q.float_due());
+        q.set_ranges(HashMap::from([("r:a".to_string(), vec![narrow, wide])]));
+        let read = |q: &mut Queue, at: i64, fresh: u32| {
+            let picked = q.next(at).unwrap();
+            let seeds = q.focus(picked, at).seeds;
+            let found = Found {
+                fresh,
+                ..Found::default()
+            };
+            q.reward("r:a", at, found);
+            (seeds, q.take_reads().pop().unwrap().range.unwrap())
+        };
+        let now = 1_000_000;
+        // nada lido: a faixa larga e cara vale mais; a exposição é a da faixa (peso × janela) e a recompensa
+        // de toda leitura é anúncio novo × lucro da faixa
+        let (seeds, r) = read(&mut q, now, 3);
+        assert_eq!(seeds, vec![(5, 9)]);
+        assert_eq!(
+            r,
+            RangeRead {
+                gap: None,
+                weight: 2.0,
+                control: false,
+                worth: 3000
+            }
+        );
+        assert!((q.stats["r:a"].exposure - 2.0 * q.params.window).abs() < 1.0);
+        // 28 s depois o estoque da larga ainda não voltou: vez da estreita
+        assert_eq!(read(&mut q, now + 28, 0).0, vec![(1, 1)]);
+        // com o estoque de volta a larga ganha de novo, e o intervalo gravado é o dela, não o do alvo
+        let (seeds, r) = read(&mut q, now + 1000, 0);
+        assert_eq!((seeds, r.gap), (vec![(5, 9)], Some(1000)));
+        // vaga de controle: a faixa lida há mais tempo, mesmo valendo menos
+        q.explore = 1.0 - EXPLORE_SHARE;
+        let (seeds, r) = read(&mut q, now + 2000, 0);
+        assert!(q.last_exploring && r.control);
+        assert_eq!((seeds, r.gap), (vec![(1, 1)], Some(1972)));
+        // a consulta que não saiu devolve o estoque da faixa
+        let credit = (q.credit, q.explore, q.explore_turn, q.cursors.clone());
+        let picked = q.next(now + 2028).unwrap();
+        assert_eq!(q.focus(picked, now + 2028).seeds, vec![(5, 9)]);
+        q.undo_unsent("r:a", now + 2028, credit);
+        let (seeds, r) = read(&mut q, now + 2028, 0);
+        assert_eq!((seeds, r.gap), (vec![(5, 9)], Some(1028)));
     }
 
     #[test]
@@ -1664,7 +1887,7 @@ mod tests {
         t.seeds = vec![(1, 1), (9, 9)];
         let mut q = Queue::default();
         q.set_tasks(vec![t.clone()]);
-        assert_eq!(q.focus(t.clone()).seeds, vec![(1, 1)]);
+        assert_eq!(q.focus(t.clone(), 1).seeds, vec![(1, 1)]);
         let json = serde_json::to_string(&Progress {
             cursors: q.cursors.clone(),
             ..Progress::default()
@@ -1672,13 +1895,13 @@ mod tests {
         .unwrap();
         q.set_tasks(vec![]);
         q.set_tasks(vec![t.clone()]);
-        assert_eq!(q.focus(t.clone()).seeds, vec![(9, 9)]);
+        assert_eq!(q.focus(t.clone(), 2).seeds, vec![(9, 9)]);
         let mut restart = Queue {
             cursors: serde_json::from_str::<Progress>(&json).unwrap().cursors,
             ..Queue::default()
         };
         restart.set_tasks(vec![t.clone()]);
-        assert_eq!(restart.focus(t).seeds, vec![(9, 9)]);
+        assert_eq!(restart.focus(t, 3).seeds, vec![(9, 9)]);
     }
 
     #[test]
@@ -1844,7 +2067,14 @@ mod tests {
         assert_eq!((s.last_at, s.reward_at), (now + 20, 0));
         assert!((s.r - 100.0).abs() < 0.01);
         assert!(s.exposure > before + 1000.0 && s.exposure < before + 1820.0);
-        assert_eq!(q.take_reads(), vec![(now + 20, "a".to_string(), 0)]);
+        let read = Read {
+            at: now + 20,
+            arm: "a".to_string(),
+            fresh: 0,
+            gain: 0,
+            range: None,
+        };
+        assert_eq!(q.take_reads(), vec![read]);
         assert!(q.take_reads().is_empty());
     }
 
@@ -2041,7 +2271,11 @@ mod tests {
         let mut q = Queue::default();
         q.set_tasks(vec![t.clone()]);
         // rodízio: uma faixa por consulta, e o piso é guardado por faixa
-        let (a, b, c) = (q.focus(t.clone()), q.focus(t.clone()), q.focus(t.clone()));
+        let (a, b, c) = (
+            q.focus(t.clone(), 1),
+            q.focus(t.clone(), 2),
+            q.focus(t.clone(), 3),
+        );
         assert_eq!(a.filters(), vec![PropFilter::seed(58, 59)]);
         assert_eq!(b.filters(), vec![PropFilter::seed(66, 66)]);
         assert_eq!(c.seeds, vec![(58, 59)]);

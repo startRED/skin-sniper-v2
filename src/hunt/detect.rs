@@ -7,7 +7,7 @@ use super::scheduler::{Found, Task};
 use super::{Active, Hunt};
 use crate::notify::{Alert, NotifyError};
 use crate::pricing::brl;
-use crate::pricing::groups::{FLOAT_STEAM_MAX_MULTIPLE, group_of};
+use crate::pricing::groups::group_of;
 use crate::pricing::premium::{self, Seal};
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
 use crate::steam::client::Error as SteamError;
@@ -301,33 +301,17 @@ pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<Pri
     .await
 }
 
-/// Vendas de float pior que o do anúncio que entram no prêmio de float.
-const FLOAT_NEAR_SALES: usize = 8;
+/// Com menos vendas do grupo no mesmo nome que isto, valem as do grupo em todos os desgastes.
+const NEAR_SALES: usize = 8;
 
-/// Múltiplos de um grupo raro entre as vendas guardadas `(nome, float, múltiplo, grupo)`.
-/// - Float: as `FLOAT_NEAR_SALES` vendas do mesmo nome com float igual ou pior que o do anúncio, as mais próximas
-///   primeiro, cada uma limitada a `FLOAT_STEAM_MAX_MULTIPLE`. Float melhor nunca é pago por menos, então o
-///   preço não passa do que float pior já pagou.
-/// - Tabela: as vendas do grupo no mesmo nome; com menos de `FLOAT_NEAR_SALES`, as do grupo em todos os desgastes.
+/// Múltiplos de um grupo raro entre as vendas guardadas `(nome, float, múltiplo, grupo)`: as do grupo no mesmo
+/// nome; com menos de `NEAR_SALES`, as do grupo em todos os desgastes. Só é usado para skin ainda sem medida
+/// (`patterns`): o seed que paga traz a própria prova.
 fn rare_multiples(
     rows: &[(String, Option<f64>, f64, Option<String>)],
     name: &str,
     group_key: &str,
-    float: Option<f64>,
 ) -> Vec<f64> {
-    if let Some(f) = float.filter(|_| group_key.starts_with("float:")) {
-        let mut worse: Vec<(f64, f64)> = rows
-            .iter()
-            .filter(|r| r.0 == name)
-            .filter_map(|r| Some((r.1.filter(|x| *x >= f)?, r.2)))
-            .collect();
-        worse.sort_by(|a, b| a.0.total_cmp(&b.0));
-        return worse
-            .into_iter()
-            .take(FLOAT_NEAR_SALES)
-            .map(|s| s.1.min(FLOAT_STEAM_MAX_MULTIPLE))
-            .collect();
-    }
     let of_group = |same_name: bool| -> Vec<f64> {
         rows.iter()
             .filter(|r| r.3.as_deref() == Some(group_key) && (!same_name || r.0 == name))
@@ -335,7 +319,7 @@ fn rare_multiples(
             .collect()
     };
     let same = of_group(true);
-    if same.len() >= FLOAT_NEAR_SALES {
+    if same.len() >= NEAR_SALES {
         same
     } else {
         of_group(false)
@@ -345,12 +329,7 @@ fn rare_multiples(
 /// Múltiplos `price / base_price` das vendas do CSFloat do mesmo grupo: todas as guardadas (`csfloat_sales`),
 /// depois de garantir que a leitura do nome tem menos de 6 h. Só com a última leitura (40 vendas do nome) o grupo
 /// tinha 5 vendas onde o banco guardava 39, e um Center Star a 1,2× o preço comum foi recusado (10/11/2026).
-async fn rare_evidence(
-    h: &Hunt,
-    name: &str,
-    group_key: &str,
-    float: Option<f64>,
-) -> Result<RareEvidence> {
+async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvidence> {
     let now = h.now();
     let fresh = h
         .lock()
@@ -383,22 +362,17 @@ async fn rare_evidence(
         })
         .await?;
     Ok(RareEvidence {
-        multiples: rare_multiples(&rows, name, group_key, float),
+        multiples: rare_multiples(&rows, name, group_key),
     })
 }
 
 /// Múltiplos fechados na própria Steam: anúncios do mesmo nome e grupo que sumiram em até 48 h sem relistagem,
 /// preço ÷ `base_cents`. O prêmio do CSFloat erra para os dois lados (medido em 11/11/2026): Center Star FT
 /// previsto a 1,6× fechou a 2,0–2,6× na Steam; High Beam T1 previsto a 2,9× fechou a 1,4×.
-/// Grupo de float fica de fora: quase todo anúncio da faixa é pedido a preço comum e some como comum (205
-/// fechamentos de Red Quartz a 0,99×), então a mediana dos sumiços não mede o prêmio.
 // shortcut: sumir não é vender com certeza (retirada sem relistagem conta como venda) e anúncio barato some
 // primeiro, o que puxa a mediana para baixo; se um aviso com esta prova não fechar na venda, exigir mais de
 // `RARE_MIN_SALES` fechamentos ou medir a taxa de sumiço por faixa de preço.
 async fn steam_closed(h: &Hunt, name: &str, group_key: &str, base_cents: i64) -> Result<Vec<f64>> {
-    if group_key.starts_with("float:") {
-        return Ok(vec![]);
-    }
     let (name, grp) = (name.to_string(), group_key.to_string());
     let prices: Vec<i64> =
         h.db.call(move |c| {
@@ -567,11 +541,8 @@ fn why(
         "phase" => format!(
             "Fase {label}: a cor desta faca/arma Doppler ou Gamma é mais rara que as fases comuns."
         ),
-        "float" | "highfloat" => format!(
-            "Float {float} ({label}): o desgaste é dos mais raros desta condição, e há quem pague mais por ele."
-        ),
         "learned" => format!(
-            "{label}: não é um padrão com nome conhecido. O app aprendeu o seed {seed} porque ele vendeu no CSFloat bem acima do preço comum; confira a estampa antes de pagar mais."
+            "{label}: o seed {seed} entrou porque as vendas do CSFloat dele (ou de seeds iguais ou piores) saíram bem acima do preço comum desta skin; confira a estampa antes de pagar mais."
         ),
         _ => format!("{label} (seed {seed}, float {float})."),
     }
@@ -706,7 +677,7 @@ async fn evaluate_one(
     let mut rare = match (&group, learned) {
         // pattern aprendido: o prêmio são as vendas que ensinaram (todos os desgastes), não as desta página
         (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
-        (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key, l.float).await?),
+        (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
         (None, _) => None,
     };
     // Vende-se na Steam: com fechamentos suficientes lá, o prêmio é o que a Steam pagou, não o do CSFloat.
@@ -1010,19 +981,11 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         }
         // Concorrência = outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns): um comum
         // barato não segura a venda de um T1. Inclui as outras faixas do mesmo raro.
-        // No float só concorre quem tem float igual ou melhor: um float pior mais barato não segura a venda.
         let mine = key(l);
-        let by_float = mine.as_deref().is_some_and(|k| k.starts_with("float:"));
         let others_min = page
             .listings
             .iter()
             .filter(|o| o.name == l.name && o.listing_id != l.listing_id && key(o) == mine)
-            .filter(|o| {
-                !by_float
-                    || o.float
-                        .zip(l.float)
-                        .is_some_and(|(theirs, ours)| theirs <= ours)
-            })
             .map(|o| o.price_cents)
             .chain(elsewhere.get(&(l.name.clone(), mine.clone())).copied())
             .min();
@@ -1386,14 +1349,15 @@ mod tests {
             label: label.into(),
         };
         assert!(super::why(None, Some(1), Some(0.2)).starts_with("Desconto"));
-        let learned = g("learned:Desert Eagle | Serpent Strike:804", "Pattern #804");
+        let learned = g(
+            "learned:Desert Eagle | Serpent Strike:804",
+            "Max Orange #804",
+        );
         let w = super::why(Some(&learned), Some(804), Some(0.21));
         assert!(
-            w.contains("não é um padrão com nome conhecido") && w.contains("804"),
+            w.starts_with("Max Orange #804: o seed 804") && w.contains("CSFloat"),
             "{w}"
         );
-        let f = g("float:AK-47 | Redline:FT", "Float ≤ 0.155");
-        assert!(super::why(Some(&f), None, Some(0.15)).contains("Float 0,1500"));
         let cs = g("cs:Glock-18 | Moonrise:t1", "T1 Center Star");
         assert!(
             super::why(Some(&cs), Some(694), None).contains("Pattern de tabela (T1 Center Star)")
@@ -1401,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn rare_premium_uses_worse_floats_for_float_and_the_whole_group_for_tables() {
+    fn rare_premium_uses_the_whole_group_when_the_name_has_few_sales() {
         let row = |name: &str, float: f64, multiple: f64, grp: Option<&str>| {
             (
                 name.to_string(),
@@ -1411,33 +1375,14 @@ mod tests {
             )
         };
         let (ft, mw) = ("Skin (Field-Tested)", "Skin (Minimal Wear)");
-        let mut rows: Vec<_> = (0..12)
-            .map(|i| {
-                row(
-                    ft,
-                    0.15 + 0.01 * f64::from(i),
-                    3.0 - 0.2 * f64::from(i),
-                    None,
-                )
-            })
-            .collect();
-        // float: só o mesmo nome, só float igual ou pior que o do anúncio, as 8 mais próximas
-        rows.push(row(mw, 0.20, 9.0, None));
-        let m = rare_multiples(&rows, ft, "float:Skin:Field-Tested", Some(0.165));
-        // de 2,6× a 1,2×: o que passa do teto da Steam vale o teto
-        let want = [2.0, 2.0, 2.0, 2.0, 1.8, 1.6, 1.4, 1.2];
-        assert!(
-            m.len() == 8 && m.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-9),
-            "{m:?}"
-        );
+        // venda sem grupo (float baixo ou não) não entra em prêmio nenhum
+        let mut rows = vec![row(ft, 0.15, 3.0, None), row(mw, 0.07, 9.0, None)];
+        assert!(rare_multiples(&rows, ft, "float:Skin:Field-Tested").is_empty());
         // tabela: 2 vendas no nome são poucas, valem as 3 do grupo em todos os desgastes
         rows.push(row(ft, 0.3, 1.5, Some("cs:Skin:t1")));
         rows.push(row(ft, 0.3, 1.7, Some("cs:Skin:t1")));
         rows.push(row(mw, 0.1, 2.0, Some("cs:Skin:t1")));
         rows.push(row(mw, 0.1, 5.0, Some("cs:Skin:t2")));
-        assert_eq!(
-            rare_multiples(&rows, ft, "cs:Skin:t1", Some(0.3)),
-            vec![1.5, 1.7, 2.0]
-        );
+        assert_eq!(rare_multiples(&rows, ft, "cs:Skin:t1"), vec![1.5, 1.7, 2.0]);
     }
 }

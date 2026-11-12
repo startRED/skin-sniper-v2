@@ -9,7 +9,8 @@ Tabelas originais copiadas de `skin-sniper/internal/patterns/data/` (projeto ant
 | `phases.json` | ByMykel/CSGO-API | MIT, conferida no repositório em 08/11/2026 |
 | `floats.json` | ByMykel/CSGO-API (`min_float`, `max_float`), atualizado da base pública em 08/11/2026 | MIT |
 | `cspatterns.json` | guias CSPatterns de Hartwich (Steam Workshop), coletados em 31/08/2026 | (sem licença declarada; dado factual de guia público) |
-| `researched.json` | seleção manual de 12 números de seed e rótulos, com fonte individual em cs2pattern-prices.com | fatos selecionados; não inclui tabelas de preços nem cópia do banco do operador |
+| `named.json` | seleção manual de 28 grupos nomeados em 22 skins (números de seed e rótulos), cada grupo com a página de origem em cs2pattern-prices.com; substitui `researched.json` em 12/11/2026 | fatos selecionados; não inclui tabelas de preços nem cópia do banco do operador |
+| `blue.json` | chescos/csgo-blue-gem-calculator (`gen/result.json`): % de azul da face visível por seed, 5 skins | **MIT** |
 
 Metadados de `../catalog/curated.json`: [ByMykel/CSGO-API, MIT](https://github.com/ByMykel/CSGO-API/blob/main/LICENSE).
 Referências de preço: [feed público CSGO Trader](https://csgotrader.app/prices/), com origem e data no arquivo.

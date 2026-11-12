@@ -143,7 +143,15 @@ export type ValueInfo = {
   predicted: number;
   actual: number;
   tuned_at: number;
+  policy: ArmScore;
+  control: ArmScore;
+  catalog_skins: number;
+  catalog_seeds: number;
+  backtest_n: number;
+  backtest_paid: number | null;
+  backtest_ratio: number | null;
 };
+export type ArmScore = { reads: number; fresh: number; worth_cents: number; gain_cents: number };
 export type LearningWeek = {
   queries: number;
   finds: number;

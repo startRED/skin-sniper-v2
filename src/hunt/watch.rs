@@ -93,18 +93,13 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
             let seen = catalog::observed(&floors, &t.id, now);
             let (floor, at) = (seen.floor, seen.at);
             let rare = t.rare();
-            let group = t
-                .seeds
-                .first()
-                .and_then(|&(lo, _)| group_of(&t.name, Some(u32::from(lo)), None, None))
-                .or_else(|| {
-                    t.float
-                        .and_then(|(lo, _)| group_of(&t.name, None, None, Some(lo)))
-                })
-                .or_else(|| {
-                    let seed = t.seeds.first().map(|r| r.0);
-                    super::patterns::group(&h.lock().learned, &t.name, seed).map(|(g, _)| g)
-                });
+            // o seed que paga traz a própria prova (`patterns`); sem medida, vale o grupo da tabela
+            let seed = t.seeds.first().map(|r| r.0);
+            let learned = super::patterns::group(&h.lock().learned, &t.name, seed);
+            let group = learned
+                .as_ref()
+                .map(|(g, _)| g.clone())
+                .or_else(|| group_of(&t.name, seed.map(u32::from), None, None));
             let (icon, spd, mut pts) = match f {
                 Some((_, i, s, p)) => (i, s, p),
                 None => (String::new(), 0.0, vec![]),
@@ -113,9 +108,11 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
             // Raro: o teto vem do prêmio do grupo (vendas do CSFloat já em cache); com menos de
             // `RARE_MIN_SALES` vendas não há teto honesto.
             let evidence = if rare {
-                let multiples = group
-                    .as_ref()
-                    .map_or(vec![], |g| rare_multiples(h, &t.name, &g.key));
+                let multiples = match (learned, &group) {
+                    (Some((_, proof)), _) => proof,
+                    (None, Some(g)) => rare_multiples(h, &t.name, &g.key),
+                    (None, None) => vec![],
+                };
                 (multiples.len() >= RARE_MIN_SALES).then_some(RareEvidence { multiples })
             } else {
                 None
