@@ -1736,6 +1736,17 @@ impl SteamClient {
             body.extend_from_slice(&chunk);
         }
         let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
+        // `{"data":null}` com 200 costuma ser recusa daquela consulta (filtro de seed a frio): conta uma vez por
+        // consulta, só na repetição, e o disjuntor abre com 3 consultas nulas seguidas. Antes a 1ª tentativa e a
+        // repetição contavam as duas; em 12/11/2026, ~10 por hora pausavam toda a leitura de seed/float.
+        let null_data = bad_envelope.is_some()
+            && status == StatusCode::OK
+            && serde_json::from_slice::<Value>(&body)
+                .ok()
+                .is_some_and(|v| {
+                    v.as_object().is_some_and(|o| o.len() == 1)
+                        && v.get("data") == Some(&Value::Null)
+                });
         {
             let mut g = self.inner.lock().unwrap();
             let i = if via_alt {
@@ -1751,9 +1762,13 @@ impl SteamClient {
             } else {
                 g.bucket(ep).on_ok(now);
             }
-            if status.is_server_error() || status == StatusCode::FORBIDDEN || bad_envelope.is_some()
+            if status.is_server_error()
+                || status == StatusCode::FORBIDDEN
+                || (bad_envelope.is_some() && !null_data)
+                || (null_data && !reset_on_success)
             {
                 g.breakers[ep.idx()].on_fail(now);
+            } else if null_data {
             } else if reset_on_success {
                 g.breakers[ep.idx()].on_ok();
             }
@@ -1765,14 +1780,7 @@ impl SteamClient {
             });
         }
         if let Some(diag) = bad_envelope {
-            if status == StatusCode::OK
-                && serde_json::from_slice::<Value>(&body)
-                    .ok()
-                    .is_some_and(|v| {
-                        v.as_object().is_some_and(|o| o.len() == 1)
-                            && v.get("data") == Some(&Value::Null)
-                    })
-            {
+            if null_data {
                 return Err(Error::ActionUnavailable { endpoint: ep });
             }
             return Err(Error::Parse(format!("resposta sem `data` ({diag})")));
@@ -2242,7 +2250,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_wait_does_not_delay_other_endpoints_and_alternating_failures_open_breaker() {
+    async fn retry_wait_does_not_delay_other_endpoints_and_alternating_null_data_never_opens_breaker()
+     {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -2286,12 +2295,14 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert!(matches!(
+        // data nula é recusa da consulta, não do servidor: alternar com sucesso nunca abre o disjuntor
+        assert!(
             c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
-                .await,
-            Err(Error::BreakerOpen { .. })
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 5);
+                .await
+                .is_ok()
+        );
+        assert!(c.breaker_open_until(Endpoint::Listings).is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
     }
 
     #[tokio::test]
@@ -2316,11 +2327,18 @@ mod tests {
             Err(Error::ActionUnavailable { .. })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // uma falha por consulta nula: abre na 3ª seguida
+        for _ in 0..2 {
+            assert!(matches!(
+                c.action(Endpoint::Listings, "Query", &qp).await,
+                Err(Error::ActionUnavailable { .. })
+            ));
+        }
         assert!(matches!(
             c.action(Endpoint::Listings, "Query", &qp).await,
             Err(Error::BreakerOpen { .. })
         ));
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
         assert!(c.breaker_open_until(Endpoint::History).is_none());
     }
 
