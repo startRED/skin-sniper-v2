@@ -56,6 +56,10 @@ const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
 // Erick, não um número medido como seguro. 12/11: com o Chrome (#107), 24 h a ~75 anúncios/h + histórico tiveram
 // só 2 rajadas curtas de 429; o Erick pediu 28 s. Se voltar bloqueio de horas, é o primeiro número a desfazer.
 const LISTINGS_REST_SECS: i64 = 28;
+/// Piso do float: no máximo esta quantidade de leituras raras seguidas sem float (`Queue::float_due`).
+// shortcut: 1 = pelo menos metade das vagas raras; pedido do Erick em 12/11/2026 depois de a agenda livre mandar
+// 66 leituras de seed para 6 de float numa hora. Trocar pela medida quando o float tiver achados.
+const RARE_WITHOUT_FLOAT_MAX: u32 = 1;
 
 /// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
 // Medido em 12/11/2026 (24 h): MP7 | Amberline (seed) falhou 287 de 464 tentativas e Serpent Strike (seed) 129 de
@@ -223,6 +227,8 @@ pub struct Queue {
     pub last_exploring: bool,
     /// Hora da última leitura de anúncios (`LISTINGS_REST_SECS`).
     listed_at: i64,
+    /// Leituras raras seguidas sem float (`float_due`).
+    since_float: u32,
     cursors: HashMap<String, usize>,
     selection_revision: u64,
     query_revisions: HashMap<String, u64>,
@@ -397,6 +403,12 @@ impl Queue {
         self.entries.values().any(|e| e.task.rare())
     }
 
+    /// A vez é do float: já houve `RARE_WITHOUT_FLOAT_MAX` leituras raras seguidas sem ele e há alvo de float.
+    pub fn float_due(&self) -> bool {
+        self.since_float >= RARE_WITHOUT_FLOAT_MAX
+            && self.entries.values().any(|e| e.task.mode() == Mode::Float)
+    }
+
     /// Centavos esperados de ler o alvo agora (`value`): nunca visto vale infinito.
     fn value(&self, pool: &value::Pool, id: &str, now: i64) -> f64 {
         let Some(s) = self.stats.get(id).filter(|s| s.seen() > 0) else {
@@ -495,6 +507,11 @@ impl Queue {
         };
         let pick = pick?;
         let id = pick.task.id.clone();
+        match pick.task.mode() {
+            Mode::Float => self.since_float = 0,
+            Mode::Seed => self.since_float += 1,
+            Mode::Cheap => {}
+        }
         if exploring {
             self.explore -= 1.0;
         }
@@ -793,9 +810,12 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             // alvo de seed ou float: é a leitura escassa e é onde está o anúncio mal precificado.
             let no_listings = listings_blocked || s.queue.resting(now);
             let rare = !no_listings && s.queue.has_rare();
+            let float = rare && s.queue.float_due();
             (
                 s.queue.next_matching(now, |t| {
-                    if rare {
+                    if float {
+                        t.mode() == Mode::Float
+                    } else if rare {
                         t.rare()
                     } else {
                         !t.rare() && !recent.contains(&t.id)
@@ -1501,6 +1521,47 @@ mod tests {
         // nunca lidos valem infinito: a agenda passa pelos três raros, sem vez fixa e sem o barato
         picked.sort();
         assert_eq!(picked, ["f:a", "f:b", "r:a"]);
+    }
+
+    #[test]
+    fn float_gets_at_least_every_other_rare_slot() {
+        let task = |id: &str, seeds: Vec<(u16, u16)>, float: Option<(f64, f64)>| Task {
+            id: id.into(),
+            name: id.into(),
+            code: "G1".into(),
+            wear: None,
+            seeds,
+            float,
+            score: 1.0,
+        };
+        let mut q = Queue::default();
+        q.set_tasks(vec![
+            task("r:a", vec![(1, 1)], None),
+            task("r:b", vec![(2, 2)], None),
+            task("f:a", vec![], Some((0.0, 0.01))),
+        ]);
+        let mut modes = Vec::new();
+        for now in 1..=8 {
+            let float = q.float_due();
+            let t = q
+                .next_matching(now, |t| {
+                    if float {
+                        t.mode() == Mode::Float
+                    } else {
+                        t.rare()
+                    }
+                })
+                .unwrap();
+            modes.push(t.mode());
+        }
+        // nunca duas leituras raras seguidas sem float
+        assert!(
+            modes.windows(2).all(|w| w.contains(&Mode::Float)),
+            "{modes:?}"
+        );
+        // sem alvo de float, o piso não trava a vaga
+        q.set_tasks(vec![task("r:a", vec![(1, 1)], None)]);
+        assert!(!q.float_due());
     }
 
     #[test]
