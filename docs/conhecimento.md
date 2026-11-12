@@ -125,6 +125,14 @@ O atraso vale para o limitador global: outras consultas também aguardam esses 5
 O limitador global e o breaker por endpoint continuam valendo; nunca se converte nulo
 em lista vazia, para preservar dados anteriores. Formato desconhecido continua erro.
 
+**Medido em 12/11/2026 (`research_attempts`, 24 h): o nulo é por consulta, não do endpoint.** MP7 | Amberline
+com filtro de seed falhou 287 de 464 tentativas e Desert Eagle | Serpent Strike com filtro de seed 129 de 366;
+Sawed-Off | Analog Input FN com filtro de float, 12 de 17. No mesmo período outros alvos de seed deram 0 de 102
+e 0 de 55. A repetição de 5 s falhou junto ~9 em 10 vezes. Nas últimas 4 h foram 150 de 415 tentativas de
+anúncios. Por isso o alvo que volta nulo descansa (`FAIL_REST_SECS` no `scheduler`: 5 min, dobrando até 1 h) em
+vez de repetir. **Não medido:** por que essas consultas falham (item com muitos anúncios é hipótese) nem se o
+filtro de desgaste as alivia; as sondas por curl voltaram 429 nesse dia.
+
 ### 1.4 Moeda
 
 - `eCurrency: 7` = BRL. As listagens do fixture real vêm em `eCurrency:7` com `strSubtotal "R$202.80"`.

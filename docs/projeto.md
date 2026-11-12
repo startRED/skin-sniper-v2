@@ -297,7 +297,10 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
    (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
    de ligar não tem com o que comparar. **Descanso da leitura de anúncios (10/11):** alvo raro ou de float só é
-   escolhido 28 s depois da última leitura de anúncios (era 24 s, depois 36 s e 42 s). **Foco em seed e float (11/11):**
+   escolhido 28 s depois da última leitura de anúncios (era 24 s, depois 36 s e 42 s). **Descanso do alvo que
+   falha (12/11):** alvo cuja consulta volta `data` nula descansa 5 min, dobrando a cada falha seguida até 1 h, e
+   volta ao normal na primeira leitura que der certo; antes era escolhido de novo ~80 s depois e dois alvos
+   gastavam 36 % das tentativas de anúncios falhando (`conhecimento.md` 1.3.1). **Foco em seed e float (11/11):**
    passado o descanso, a vaga é sempre de um alvo de seed ou de float, e entre eles decide a agenda (valor da
    leitura). De 11/11 a 12/11 foram duas de seed para cada uma de float, fixo: 950 leituras de seed deram 29
    anúncios novos em 24 h, contra 200 em 850 de float. **Caça no CSFloat (12/11): removida no mesmo dia.** O feed dos anúncios mais novos do CSFloat foi lido por
