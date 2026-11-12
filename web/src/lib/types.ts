@@ -214,19 +214,3 @@ export type Learning = {
   experiment?: LearningExperiment | null;
   adjustments?: { at: number; old: number | null; new: number | null; why: string }[];
 };
-
-// Achado do feed do CSFloat. Centavos de USD, não BRL.
-export type CsfloatDeal = {
-  id: string;
-  at: number;
-  name: string;
-  price_cents: number;
-  sell_cents: number;
-  profit_cents: number;
-  kind: 'pattern' | 'price';
-  evidence: string;
-  float: number | null;
-  seed: number | null;
-  state: string | null;
-  gone_at: number | null;
-};

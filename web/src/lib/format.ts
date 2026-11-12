@@ -1,6 +1,5 @@
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 export const money = (c: number) => brl.format(c / 100);
-export const usd = (c: number) => 'US$ ' + (c / 100).toFixed(2).replace('.', ',');
 export const signed = (c: number) => (c > 0 ? '+' : c < 0 ? '−' : '') + money(Math.abs(c));
 export const pct = (n: number) => n.toFixed(1).replace('.', ',') + '%';
 export const floatTxt = (f: number) => f.toFixed(4).replace('.', ',');

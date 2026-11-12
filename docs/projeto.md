@@ -74,7 +74,6 @@ POST /api/purchases/:id/sold {sold_cents: int}      -> Purchase (valor pago pelo
 GET  /api/calibration      -> Calibration
 GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
 GET  /api/learning         -> Learning              (placar do aprendizado, 60 dias de Brasília)
-GET  /api/csfloat/deals    -> CsfloatDeal[]         (100 achados mais novos do feed do CSFloat; centavos de **USD**)
 GET  /api/settings         -> Settings              (chaves mascaradas)
 PUT  /api/settings         Partial<SettingsInput>   -> Settings   (campo null apaga; steam_login_secure não nulo → 400)
 GET  /api/events           SSE: "opportunity" Opportunity | "gone" {id, at, reason} | "state" State | "purchase" Purchase
@@ -159,10 +158,6 @@ LearningDay = { day: "AAAA-MM-DD", queries, books, new_listings, aged, age_media
 Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram_token: string|null,
              telegram_chat_id: string|null, panel_url: string|null, sound: boolean,
              notify_min_profit_cents: number }      // segredos chegam mascarados: "••••gLO9"; steam_login_secure é sempre null
-CsfloatDeal = { id, at, name, price_cents, sell_cents, profit_cents,   // centavos de USD; lucro já sem os 2 % do CSFloat
-                kind: "pattern" | "price", evidence: string, float: number|null, seed: number|null,
-                state: string|null,          // última conferência: "listed", "sold", "gone"…; null antes da primeira
-                gone_at: number|null }       // conferência em que já não estava à venda (teto, não a hora exata)
 ```
 
 ## Acesso ao painel
@@ -305,16 +300,11 @@ CsfloatDeal = { id, at, name, price_cents, sell_cents, profit_cents,   // centav
    escolhido 28 s depois da última leitura de anúncios (era 24 s, depois 36 s e 42 s). **Foco em seed e float (11/11):**
    passado o descanso, a vaga é sempre de um alvo de seed ou de float, e entre eles decide a agenda (valor da
    leitura). De 11/11 a 12/11 foram duas de seed para cada uma de float, fixo: 950 leituras de seed deram 29
-   anúncios novos em 24 h, contra 200 em 850 de float. **Caça no CSFloat (12/11):** `csfloat_feed` lê os 50
-   anúncios mais novos do CSFloat a cada 20 s, avisa e grava em `csfloat_deals` e `csfloat_feed`; não compra.
-   A API entrega o anúncio ~60 s depois de criado e os 3 achados da primeira régua (só abaixo do
-   `predicted_price`) seguiam à venda 40 min depois (`pesquisa-web.md` 5.1), então o achado exige prova:
-   `pattern` = seed de grupo raro com 3+ vendas em `csfloat_sales`, abaixo do quartil de baixo dos múltiplos do
-   grupo × o preço-base (a referência do CSFloat não tem fator de pattern); `price` = abaixo do previsto e da
-   mediana das 5 vendas reais de float mais próximo (30 dias; uma leitura de `/history` só para o candidato).
-   Cada achado é conferido em 1 min, 10 min, 1 h, 6 h e 24 h até sair do ar (`state`, `checks`, `gone_at`): mede
-   se alguém comprou e quanto tempo deu para comprar na mão. Painel: aba CSFloat. Limites (5 vendas, 30 dias,
-   quartil, US$ 0,50 / 10 %) são hipótese; a base de prova de pattern tinha 15 grupos com prêmio em 12/11.
+   anúncios novos em 24 h, contra 200 em 850 de float. **Caça no CSFloat (12/11): removida no mesmo dia.** O feed dos anúncios mais novos do CSFloat foi lido por
+   algumas horas e não deu achado que se confirmasse: a API entrega o anúncio ~60 s depois de criado, o próprio
+   site já mostra o preço previsto a quem anuncia e comprar lá exige dinheiro depositado (`pesquisa-web.md` 5.1).
+   Erick decidiu não gastar consulta nisso. As tabelas `csfloat_deals` e `csfloat_feed` ficam no banco, sem uso;
+   as vendas do CSFloat (`csfloat_sales`) seguem como referência de preço do raro na Steam.
    Antes a vaga livre disputava com os alvos baratos pelo valor da leitura e, em 12 h, foram 1 869 leituras de
    barato, 531 de seed e 87 de float, sem achado. O crédito de descoberta caiu de 0,25 para 0,125 por consulta
    (≈ 11 % das vagas): eram 42 históricos de catálogo por hora no mesmo balde dos anúncios.
