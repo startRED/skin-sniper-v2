@@ -57,6 +57,14 @@ const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
 // só 2 rajadas curtas de 429; o Erick pediu 28 s. Se voltar bloqueio de horas, é o primeiro número a desfazer.
 const LISTINGS_REST_SECS: i64 = 28;
 
+/// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
+// Medido em 12/11/2026 (24 h): MP7 | Amberline (seed) falhou 287 de 464 tentativas e Serpent Strike (seed) 129 de
+// 366; cada falha são 2 requisições (a repetição de 5 s falha junto ~9 em 10 vezes) e o alvo voltava a ser
+// escolhido ~80 s depois. Nas últimas 4 h foram 150 de 415 tentativas de anúncios. Outros alvos de seed: 0 de 102.
+// shortcut: 5 min e 1 h são hipótese; conferir por `research_attempts` com `outcome='error'` por alvo.
+const FAIL_REST_SECS: i64 = 300;
+const FAIL_REST_MAX_SECS: i64 = 3600;
+
 /// Intervalo de conferência do achado: 60 s enquanto é novo, depois um décimo da idade, até 30 min. Em 10/11 um
 /// achado parado há 5 h gastava 40 leituras de anúncios por hora (20 % do balde) só para dizer que seguia lá.
 fn recheck_secs(age: i64) -> i64 {
@@ -218,6 +226,8 @@ pub struct Queue {
     cursors: HashMap<String, usize>,
     selection_revision: u64,
     query_revisions: HashMap<String, u64>,
+    /// Alvos em descanso por `data` nula: falhas seguidas e até quando (`FAIL_REST_SECS`).
+    failing: HashMap<String, (u32, i64)>,
 }
 
 impl Queue {
@@ -406,7 +416,15 @@ impl Queue {
     /// `next` só entre os alvos que `keep` aceita (sem os raros enquanto a leitura de anúncios está barrada).
     pub fn next_matching(&mut self, now: i64, keep: impl Fn(&Task) -> bool) -> Option<Task> {
         let external_id = self.external.clone();
-        let eligible = |t: &Task| keep(t) && external_id.as_ref() != Some(&t.id);
+        let failing: HashSet<&str> = self
+            .failing
+            .iter()
+            .filter(|(_, (_, until))| now < *until)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let eligible = |t: &Task| {
+            keep(t) && external_id.as_ref() != Some(&t.id) && !failing.contains(t.id.as_str())
+        };
         if !self.entries.values().any(|e| eligible(&e.task)) {
             return None;
         }
@@ -513,9 +531,20 @@ impl Queue {
         }
     }
 
+    /// A consulta do alvo voltou `data` nula: ele descansa (`FAIL_REST_SECS`) em vez de repetir a falha na
+    /// vaga dos outros. A primeira leitura que der certo (`reward`) zera a conta. Devolve o descanso em segundos.
+    pub fn failed(&mut self, id: &str, now: i64) -> i64 {
+        let (n, until) = self.failing.entry(id.to_string()).or_insert((0, 0));
+        *n += 1;
+        let rest = (FAIL_REST_SECS << (*n - 1).min(8)).min(FAIL_REST_MAX_SECS);
+        *until = now + rest;
+        rest
+    }
+
     /// Resultado de uma olhada no alvo: anúncios novos dentro do saldo e o lucro esperado das oportunidades novas
     /// (centavos). Olhada sem nada novo também conta: soma exposição e zera o estoque.
     pub fn reward(&mut self, id: &str, now: i64, found: Found) {
+        self.failing.remove(id);
         let Some(s) = self.stats.get_mut(id) else {
             return;
         };
@@ -818,7 +847,15 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         {
             h.lock().queue.external_ready = false;
         }
-        Err(e) => backoff(h, &e).await,
+        Err(e) => {
+            if e.downcast_ref::<SteamError>()
+                .is_some_and(|e| matches!(e, SteamError::ActionUnavailable { .. }))
+            {
+                let rest = h.lock().queue.failed(&task.id, h.now());
+                tracing::warn!(alvo = %task.id, descanso_s = rest, "data nula: o alvo descansa");
+            }
+            backoff(h, &e).await;
+        }
     }
     // nada saiu para a Steam (ex.: anúncios barrados e o livro sem teto): o laço descansa em vez de girar em falso
     if attempts == 0 {
@@ -1464,6 +1501,41 @@ mod tests {
         // nunca lidos valem infinito: a agenda passa pelos três raros, sem vez fixa e sem o barato
         picked.sort();
         assert_eq!(picked, ["f:a", "f:b", "r:a"]);
+    }
+
+    #[test]
+    fn target_with_null_data_rests_longer_each_time_until_a_read_works() {
+        let task = |id: &str| Task {
+            id: id.into(),
+            name: id.into(),
+            code: "G1".into(),
+            wear: None,
+            seeds: vec![(1, 1)],
+            float: None,
+            score: 1.0,
+        };
+        let mut q = Queue::default();
+        q.set_tasks(vec![task("r:a"), task("r:b")]);
+        assert_eq!(q.failed("r:a", 1_000), FAIL_REST_SECS);
+        // no descanso a vaga é sempre do outro alvo; sem outro, ninguém é escolhido
+        for now in [1_001, 1_100, 1_000 + FAIL_REST_SECS - 1] {
+            assert_eq!(q.next_matching(now, Task::rare).unwrap().id, "r:b");
+            assert!(q.next_matching(now, |t| t.id == "r:a").is_none());
+        }
+        assert!(
+            q.next_matching(1_000 + FAIL_REST_SECS, |t| t.id == "r:a")
+                .is_some()
+        );
+        // falha seguida dobra, até o teto
+        assert_eq!(q.failed("r:a", 2_000), 2 * FAIL_REST_SECS);
+        for _ in 0..20 {
+            q.failed("r:a", 2_000);
+        }
+        assert_eq!(q.failed("r:a", 2_000), FAIL_REST_MAX_SECS);
+        // leitura que deu certo zera a conta
+        q.reward("r:a", 3_000, Found::default());
+        assert!(q.next_matching(3_001, |t| t.id == "r:a").is_some());
+        assert_eq!(q.failed("r:a", 4_000), FAIL_REST_SECS);
     }
 
     #[test]
