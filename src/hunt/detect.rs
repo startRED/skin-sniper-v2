@@ -59,6 +59,13 @@ pub(crate) struct Cycle {
     pub(crate) over_saldo: HashSet<String>,
 }
 
+/// Perda máxima, vendido como comum, para mostrar um raro cujo prêmio ainda não fechou na Steam.
+const UNPROVEN_MAX_LOSS_CENTS: i64 = 50;
+
+pub(super) fn unproven_loses_too_much(quick_profit_cents: i64) -> bool {
+    quick_profit_cents < -UNPROVEN_MAX_LOSS_CENTS
+}
+
 fn profit_text(c: i64) -> String {
     if c >= 0 {
         format!("{} de lucro", brl(c))
@@ -517,10 +524,16 @@ fn no_estimate_reason(e: &sell::NoEstimate) -> &'static str {
 
 /// O que faz o anúncio valer mais, para leigo; o tipo vem do prefixo da chave do grupo (`pricing::groups`).
 fn why(
+    name: &str,
     group: Option<&crate::pricing::groups::Group>,
     seed: Option<u16>,
     float: Option<f64>,
 ) -> String {
+    if let Some(w) = seed.and_then(|s| crate::pricing::groups::named_why(name, s))
+        && let Some(g) = group
+    {
+        return format!("{}: {w}", g.label);
+    }
     let Some(g) = group else {
         return "Desconto: anunciado abaixo do preço normal desta skin; o seed e o float não pesam no preço."
             .into();
@@ -535,8 +548,11 @@ fn why(
         "bluegem" => format!(
             "{label}: o seed {seed} deixa a arma com bastante azul (Case Hardened), o que colecionador paga mais."
         ),
-        "fade" => format!(
+        "fade" if label.ends_with("99%+") => format!(
             "{label}: o seed {seed} dá um degradê quase completo, a versão mais procurada do Fade."
+        ),
+        "fade" => format!(
+            "{label}: o seed {seed} tem esse % de degradê; as vendas do CSFloat de fades iguais ou melhores saíram acima do preço comum, mas não é Full Fade."
         ),
         "phase" => format!(
             "Fase {label}: a cor desta faca/arma Doppler ou Gamma é mais rara que as fases comuns."
@@ -778,9 +794,12 @@ async fn evaluate_one(
         )),
         None => None,
     };
-    // Raro sem nenhuma venda fechada que prove o prêmio só é oportunidade se dá lucro vendido como comum (11/11: Serpent
-    // Strike #804 a R$ 3,56 com prêmio de 3 vendas no CSFloat, 0 fechadas, −R$ 0,91 no rápido).
-    if seal.as_ref().is_some_and(|s| !s.proven && s.sales == 0) && ev.sell.quick.profit_cents <= 0 {
+    // Raro sem nenhuma venda fechada que prove o prêmio só é oportunidade se, vendido como comum, perde no máximo
+    // centavos (11/11: Serpent Strike #804 a R$ 3,56 com prêmio de 3 vendas no CSFloat, 0 fechadas, −R$ 0,91 no rápido;
+    // 13/11: MAC-10 Snow Splash #309 a R$ 0,34, 20–56× no CSFloat, recusado por −R$ 0,18).
+    if seal.as_ref().is_some_and(|s| !s.proven && s.sales == 0)
+        && unproven_loses_too_much(ev.sell.quick.profit_cents)
+    {
         return Ok(Judged {
             found: None,
             near,
@@ -799,7 +818,7 @@ async fn evaluate_one(
         float: l.float,
         seed: l.seed.map(i64::from),
         group: group.as_ref().map(|g| g.label.clone()),
-        why: Some(why(group.as_ref(), l.seed, l.float)),
+        why: Some(why(&l.name, group.as_ref(), l.seed, l.float)),
         kind: if group.is_some() {
             Kind::Raro
         } else {
@@ -1348,19 +1367,20 @@ mod tests {
             key: key.into(),
             label: label.into(),
         };
-        assert!(super::why(None, Some(1), Some(0.2)).starts_with("Desconto"));
+        assert!(super::why("", None, Some(1), Some(0.2)).starts_with("Desconto"));
         let learned = g(
             "learned:Desert Eagle | Serpent Strike:804",
             "Max Orange #804",
         );
-        let w = super::why(Some(&learned), Some(804), Some(0.21));
+        let w = super::why("", Some(&learned), Some(804), Some(0.21));
         assert!(
             w.starts_with("Max Orange #804: o seed 804") && w.contains("CSFloat"),
             "{w}"
         );
         let cs = g("cs:Glock-18 | Moonrise:t1", "T1 Center Star");
         assert!(
-            super::why(Some(&cs), Some(694), None).contains("Pattern de tabela (T1 Center Star)")
+            super::why("", Some(&cs), Some(694), None)
+                .contains("Pattern de tabela (T1 Center Star)")
         );
     }
 

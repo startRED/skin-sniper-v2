@@ -110,12 +110,22 @@ pub fn evidence_for(base: &str, seed: u16, comps: &[Comp], before: i64) -> Optio
     };
     let past = comps.iter().filter(|c| c.sold_at < before);
     if let Some(mine) = score(base, seed) {
-        let mut near: Vec<(f64, f64)> = past
-            .filter_map(|c| {
-                let s = score(base, c.seed)?;
-                (s <= mine).then_some((s, c.ratio))
-            })
+        let scored: Vec<(f64, f64)> = past
+            .clone()
+            .filter_map(|c| Some((score(base, c.seed)?, c.ratio)))
             .collect();
+        // Veto de cima: se as vendas de nota igual ou um pouco melhor não pagam, o seed também não paga, por mais
+        // que meia dúzia de vendas piores tenha saído cara (13/11: SSG Acid Fade #188, 81 % de fade, "provado" por
+        // 7 vendas de ~80 % com 2 fora da curva, enquanto 81–88 % vende a 1,02×).
+        let mut above: Vec<(f64, f64)> = scored.iter().copied().filter(|n| n.0 >= mine).collect();
+        above.sort_by(|a, b| a.0.total_cmp(&b.0));
+        above.truncate(NEAR);
+        if above.len() >= NEAR
+            && pays(above.iter().map(|n| n.1).collect(), PAY_MEDIAN, PAY_P25).is_none()
+        {
+            return None;
+        }
+        let mut near: Vec<(f64, f64)> = scored.into_iter().filter(|n| n.0 <= mine).collect();
         near.sort_by(|a, b| b.0.total_cmp(&a.0));
         near.truncate(NEAR);
         return pays(near.into_iter().map(|n| n.1).collect(), PAY_MEDIAN, PAY_P25);
@@ -540,6 +550,35 @@ mod tests {
         // uma 11ª venda no melhor seed já tinha as anteriores a favor: previsto 3×, real 2×
         r.push(sale(100, top[0], 2.0));
         assert_eq!(backtest(&comps(&r)).last(), Some(&(3.0, 2.0)));
+    }
+
+    #[test]
+    fn low_fade_with_expensive_outliers_below_is_vetoed_by_common_sales_above() {
+        const SSG: &str = "SSG 08 | Acid Fade (Factory New)";
+        let base = skin_base(SSG);
+        let mut by_score: Vec<u16> = (0..=1000).filter(|&s| score(base, s).is_some()).collect();
+        by_score.sort_by(|a, b| score(base, *a).partial_cmp(&score(base, *b)).unwrap());
+        let sale = |i: usize, seed: u16, m: f64| -> SaleRow {
+            (SSG.to_string(), Some(seed), m, Some(0.03), T + i as i64)
+        };
+        // 5 vendas caras nos fades mais baixos (fora da curva) e 8 comuns logo acima deles
+        let mut r: Vec<SaleRow> = by_score[..5]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| sale(i, *s, 3.0))
+            .collect();
+        r.extend(
+            by_score[20..28]
+                .iter()
+                .enumerate()
+                .map(|(i, s)| sale(10 + i, *s, 1.0)),
+        );
+        let target = by_score[10];
+        let c = comps(&r);
+        assert_eq!(evidence_for(base, target, &c[base], i64::MAX), None);
+        // com menos de 8 vendas acima, a prova de baixo continua valendo
+        let c = comps(&r[..12]);
+        assert!(evidence_for(base, target, &c[base], i64::MAX).is_some());
     }
 
     #[test]
