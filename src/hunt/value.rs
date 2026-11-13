@@ -1,12 +1,14 @@
 //! Valor de uma leitura: o único número que a agenda compara para decidir o que consultar agora.
 //!
 //! Alvo raro (o único que a caça lê hoje), por faixa de seed:
-//! `V = taxa × peso × L·(1 − e^(−Δ/L)) × lucro` (centavos esperados), onde
+//! `V = taxa × peso × W·(1 − e^(−Δ/W)) × lucro` (anúncios novos de seed pagante esperados × lucro por anúncio,
+//! em centavos; toda leitura custa uma consulta), onde
 //! - **taxa**: anúncios novos dentro do saldo por segundo e por peso, medida no alvo e encolhida para a taxa da
 //!   classe enquanto ele tem pouca medida, com otimismo de contagem (`Z·√a`) e teto por seca (`capped`);
-//! - **peso**: seeds da faixa × giro da skin (`scheduler::Range`): o que a faixa deve receber de anúncio novo;
-//! - **estoque**: o que se acumulou desde a última leitura **da faixa** (`Δ`), limitado pela vida `L`;
-//! - **lucro**: comprar no piso comum e vender pela mediana da prova do seed (`patterns`), em centavos.
+//! - **peso**: anúncios de seed pagante da faixa em 14 dias, vistos + prior de giro (`scheduler::Range`);
+//! - **estoque**: o que se acumulou desde a última leitura **da faixa** (`Δ`), na janela `W` da taxa (a que melhor
+//!   prevê as releituras; com a caça barata desligada, ajustada só nelas);
+//! - **lucro**: chance de compra da skin × (vender pela mediana da prova do seed − comprar no piso comum).
 //!
 //! O alvo `d:` (caça barata, desligada) segue a conta antiga: taxa do alvo × estoque do alvo × retorno medido.
 //!
@@ -431,6 +433,13 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
     let life = percentile25(&mut lives)
         .filter(|_| measured)
         .map_or(Params::default().life, |l| l.max(60.0));
+    let mut rows = rows;
+    // Caça barata desligada: a janela sai só das releituras de faixa. As leituras `d:` que restam nos 7 dias são
+    // de anúncio comum, que some em minutos; com elas a janela ficava em 1 800 s, e só nas releituras de faixa o
+    // melhor é 28 800 s (13/11, 1 827 releituras: 0,004 anúncio novo por leitura a < 5 min, 0,18 a 1–4 h).
+    if !h.cheap.load(std::sync::atomic::Ordering::Relaxed) {
+        rows.retain(|r| r.3.is_some());
+    }
     let (ids, reads) = merge(rows);
     let class_of: Vec<usize> = ids.iter().map(|id| class(id)).collect();
     let mut classes: Vec<ClassInfo> = CLASSES

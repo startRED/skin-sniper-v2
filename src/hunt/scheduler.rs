@@ -342,7 +342,11 @@ impl Queue {
     }
 
     /// A faixa do alvo que mais vale ler agora e quanto: peso × lucro × estoque acumulado desde a última leitura
-    /// dela (limitado pela vida de um anúncio barato). Empate fica com a primeira.
+    /// dela, na mesma janela com que a taxa aprende (`reward`). Vezes a taxa do alvo, são os anúncios novos de seed
+    /// pagante esperados × lucro por anúncio; toda leitura custa uma consulta de anúncios (medido em 13/11: 1,00 a
+    /// 1,03 por leitura), então dividir pelo custo não muda a ordem. Empate fica com a primeira.
+    // Era a vida do anúncio mais barato comum (`life`, 792 s): a faixa relida há 2 min valia 1/6 da parada há dias e
+    // a agenda relia as mesmas 2 faixas a cada 2–3 min (13/11: 1 294 de 2 073 leituras, 5 anúncios novos).
     fn best_range(&self, task: &Task, now: i64) -> Option<(usize, f64)> {
         task.seeds
             .iter()
@@ -355,7 +359,7 @@ impl Queue {
                     .map(|at| now - at);
                 (
                     i,
-                    range.weight * range.gain * value::exposure(gap, self.params.life),
+                    range.weight * range.gain * value::exposure(gap, self.params.window),
                 )
             })
             .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
@@ -1790,6 +1794,35 @@ mod tests {
         q.undo_unsent("r:a", now + 2028, credit);
         let (seeds, r) = read(&mut q, now + 2028, 0);
         assert_eq!((seeds, r.gap), (vec![(5, 9)], Some(1028)));
+    }
+
+    /// 13/11: com o estoque limitado pela vida do barato comum (792 s), a faixa que vale 10× mais relida há 150 s
+    /// ganhava da faixa parada há 2 h, e a agenda relia as mesmas faixas a cada 2–3 min sem achar nada.
+    #[test]
+    fn a_range_left_for_hours_beats_a_richer_one_read_minutes_ago() {
+        let mut t = task("r:a", 1.0);
+        t.seeds = vec![(1, 1), (5, 5)];
+        let mut q = Queue {
+            params: value::Params {
+                life: 792.0,
+                window: 28_800.0,
+                ..value::Params::default()
+            },
+            ..Queue::default()
+        };
+        q.set_tasks(vec![t.clone()]);
+        let range = |weight| Range { weight, gain: 1.0 };
+        q.set_ranges(HashMap::from([(
+            "r:a".to_string(),
+            vec![range(10.0), range(1.0)],
+        )]));
+        let now = 1_000_000;
+        q.range_seen.insert(range_key("r:a", (1, 1)), now - 150);
+        q.range_seen.insert(range_key("r:a", (5, 5)), now - 7200);
+        assert_eq!(q.best_range(&t, now).unwrap().0, 1);
+        // relida há 1 h a rica volta a valer mais
+        q.range_seen.insert(range_key("r:a", (1, 1)), now - 3600);
+        assert_eq!(q.best_range(&t, now).unwrap().0, 0);
     }
 
     #[test]
