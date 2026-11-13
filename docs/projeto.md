@@ -432,6 +432,10 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
      0 em 847 (quem anuncia seed de azul já pede preço de azul), Five-SeveN Heat Treated 0 em 339, Serpent Strike 5
      em 41, MP7 Amberline 4 em 81. Antes, a conta supunha todo anúncio novo comprado no piso comum e a agenda pôs
      82 % das leituras no Heat Treated. O prior 1/10 é hipótese.
+   - **Peso medido (13/11):** o `peso` de cada seed passa a ser os anúncios dele vistos em 14 dias + vendas/dia × 14 ÷
+     1 001 (prior de giro), no lugar de seeds × giro. Medido: Serpent Strike (2 seeds, ~450 vendas/dia) mostrou 41
+     anúncios em 6,6 dias e MP7 Amberline (5 seeds) 81; com seeds × giro a agenda pôs 90 de 123 leituras de uma hora
+     no Serpent Strike, sem nenhum anúncio novo.
    - **Teto por seca:** sem anúncio novo em `s` de exposição seguidos, a taxa não passa de `3 ÷ s`.
    - **Primeira leitura da faixa não ensina (12/11, depois de 2,5 h rodando):** tudo o que está à venda numa faixa
      nunca lida é "novo" para o app. Medido: 10 "novos" na 1ª leitura do Solitude e 0 nas 25 seguintes; os 4
