@@ -17,14 +17,15 @@
   {"label":"Max Orange","seeds":[129,363,425,564,698,775,783,944,949,965],"source":"https://cs2pattern-prices.com/weapons/desert-eagle/serpent-strike/max-orange-1"}
 ],
 "Five-SeveN | Kami":[
-  {"label":"Pussy","seeds":[590,662,909],"source":"https://cs2pattern-prices.com/weapons/five-seven/kami/pussy"}
+  {"label":"Tier 1","seeds":[590,662,909],"source":"https://cs2pattern-prices.com/weapons/five-seven/kami/pussy","why":"posição da estampa que os guias classificam como Tier 1, a mais rara e cara da Kami."},
+  {"label":"Tier 2","seeds":[376,403,439,537,887,906],"source":"https://skinscanner.gg/blog/five-seven-kami-pattern-guide","why":"posição da estampa que os guias classificam como Tier 2: paga menos que o Tier 1."}
 ],
 "Five-SeveN | Berries And Cherries":[
   {"label":"Max Red","seeds":[60,182,522,546,553,663,853],"source":"https://cs2pattern-prices.com/weapons/five-seven/berries-and-cherries/max-red"},
   {"label":"Max Blue","seeds":[73,80,236,278,336,382,449,511,961],"source":"https://cs2pattern-prices.com/weapons/five-seven/berries-and-cherries/max-blue"}
 ],
 "Galil AR | Sandstorm":[
-  {"label":"Max Purple","seeds":[583,761],"source":"https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple"},
+  {"label":"Max Purple","seeds":[178,583,739,761],"source":"https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-purple","why":"a areia da Galil fica quase toda roxa, a cor mais cara da família Sandstorm."},
   {"label":"Max Sand","seeds":[449,555],"source":"https://cs2pattern-prices.com/weapons/galil-ar/sandstorm/max-sand"}
 ],
 "Galil AR | Metallic Squeezer":[
@@ -71,5 +72,13 @@
 ],
 "XM1014 | Solitude":[
   {"label":"Yellow Mountains and Sun","seeds":[95,154,220,743,863,871],"source":"https://cs2pattern-prices.com/weapons/xm1014/solitude/yellow-mountains-and-sun"}
+],
+"AWP | Electric Hive":[
+  {"label":"Max Blue","seeds":[23,138,185,262,273,385,436,598,851,853,902],"source":"https://csgoskins.gg/blog/awp-electric-hive-blue-orange-hives-seed-patterns","why":"a colmeia da AWP fica quase toda azul; é a variação mais procurada da skin (o 273 é tido como o melhor azul)."},
+  {"label":"Max Orange","seeds":[42,54,96,117,143,253,354,376,384,540,611,697,767,835,894],"source":"https://csgoskins.gg/blog/awp-electric-hive-blue-orange-hives-seed-patterns","why":"a colmeia da AWP fica quase toda laranja; segunda variação mais procurada (o 253 é tido como o melhor laranja)."}
+],
+"Glock-18 | Grinder":[
+  {"label":"Full Black","seeds":[176,384,593,737,811,907,916,933],"source":"https://steamcommunity.com/sharedfiles/filedetails/?id=2985282795","why":"a lateral da Glock fica toda preta, sem o desenho cinza; procurada para combinar com adesivos."}
 ]
-}}
+}
+}
