@@ -263,8 +263,17 @@ pub struct Ctx<'a> {
     pub deals: &'a Deals,
 }
 
-/// Skin-base → (anúncios de seed pagante vistos, quantos o avaliador achou com lucro), últimos 14 dias.
-pub type Deals = HashMap<String, (u32, u32)>;
+/// Anúncios de seed pagante de uma skin que o avaliador viu nos últimos 14 dias.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SkinDeals {
+    pub seen: u32,
+    /// Os que deram lucro no preço médio ou viraram aviso.
+    pub good: u32,
+    pub by_seed: HashMap<u16, u32>,
+}
+
+/// Skin-base → anúncios de seed pagante vistos (`load_deals`).
+pub type Deals = HashMap<String, SkinDeals>;
 const DEALS_DAYS: i64 = 14;
 /// Prior da chance de compra: 1 bom em 10 vistos. Skin sem medida começa otimista e é testada.
 // shortcut: 1/10 é hipótese; em 12/11 a melhor skin medida (Serpent Strike) deu 5 em 41.
@@ -275,8 +284,22 @@ const DEAL_PRIOR: (f64, f64) = (1.0, 10.0);
 /// supunha todo anúncio novo comprado no piso comum e gastava 82 % das leituras no Heat Treated, onde quem anuncia
 /// seed de azul já pede preço de azul.
 fn deal_chance(deals: &Deals, base: &str) -> f64 {
-    let (seen, good) = deals.get(base).copied().unwrap_or((0, 0));
-    (f64::from(good) + DEAL_PRIOR.0) / (f64::from(seen) + DEAL_PRIOR.1)
+    let d = deals.get(base).cloned().unwrap_or_default();
+    (f64::from(d.good) + DEAL_PRIOR.0) / (f64::from(d.seen) + DEAL_PRIOR.1)
+}
+
+/// Anúncios de seed pagante esperados num seed em 14 dias: os vistos mais um prior de giro (vendas/dia × 14 dias,
+/// repartidas pelos 1 001 seeds). Medido em 13/11: o Serpent Strike (2 seeds, ~450 vendas/dia) mostrou 41 em 6,6
+/// dias e o MP7 Amberline (5 seeds, ~80/dia) 81, o contrário do que seeds × giro dizia; a agenda pôs 90 de 123
+/// leituras no Serpent Strike numa hora, sem nenhum anúncio novo.
+// shortcut: seed que a busca ainda não leu fica só com o prior; se a skin entrou no catálogo há poucos dias, os
+// vistos contam menos de 14 dias. Trocar por vistos ÷ dias lidos se isso distorcer a agenda.
+fn seed_weight(deals: Option<&SkinDeals>, seed: u16, spd: f64) -> f64 {
+    let seen = deals
+        .and_then(|d| d.by_seed.get(&seed))
+        .copied()
+        .unwrap_or(0);
+    f64::from(seen) + spd * DEALS_DAYS as f64 / 1001.0
 }
 
 /// Conta, por skin, os anúncios de seed pagante avaliados (inclusive os acima do saldo, que a auditoria grava) e
@@ -300,7 +323,9 @@ pub async fn load_deals(db: &Db, learned: &Learned, now: i64) -> Result<Deals> {
         let base = skin_base(&name);
         if learned.get(base).is_some_and(|m| m.contains_key(&seed)) {
             let e = out.entry(base.to_string()).or_default();
-            *e = (e.0 + seen, e.1 + good);
+            e.seen += seen;
+            e.good += good;
+            *e.by_seed.entry(seed).or_default() += seen;
         }
     }
     Ok(out)
@@ -399,6 +424,7 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                 // seed − comprar no piso comum). Sem prova (tabela, instalação nova) cada seed vale 1 centavo.
                 let proof = c.learned.get(skin_base(name));
                 let chance = deal_chance(c.deals, skin_base(name));
+                let measured = c.deals.get(skin_base(name));
                 let ranges: Vec<Range> = seeds
                     .iter()
                     .map(|&(lo, hi)| {
@@ -412,7 +438,7 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                             })
                             .sum();
                         Range {
-                            weight: n * spd,
+                            weight: (lo..=hi).map(|s| seed_weight(measured, s, spd)).sum(),
                             gain: chance * gain / n,
                         }
                     })
@@ -1434,12 +1460,23 @@ mod tests {
         assert!((m.weight + a.weight - 2.0).abs() < 1e-9, "{m:?} {a:?}");
         assert!(m.gain > 1.0 && a.gain > 1.0, "{m:?} {a:?}");
         // a Moonrise mostrou 90 anúncios de seed pagante sem nenhuma compra: o lucro esperado cai 10×
-        let deals = Deals::from([("Glock-18 | Moonrise".to_string(), (90, 0))]);
+        let moon_deals = SkinDeals {
+            seen: 90,
+            good: 0,
+            by_seed: HashMap::from([(500, 90)]),
+        };
+        let deals = Deals::from([("Glock-18 | Moonrise".to_string(), moon_deals)]);
         let (_, measured) = select_ranges(&items, &Ctx { deals: &deals, ..c });
         let m2 = measured[&moon.id][0];
         assert!(
             (m2.gain * 10.0 - m.gain).abs() < 1e-6 * m.gain,
             "{m:?} {m2:?}"
+        );
+        // e o peso segue os anúncios vistos: com 90 no seed 500, a faixa da Moonrise pesa mais que a do AWP
+        let a2 = measured[&awp.id][0];
+        assert!(
+            m2.weight > m.weight && m2.weight > a2.weight,
+            "{m2:?} {a2:?}"
         );
         assert!(
             select(&items, &ctx(saldo, &boost, &floors))
