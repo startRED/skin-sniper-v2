@@ -89,6 +89,7 @@ async fn eligible_candidate_outside_top_forty_and_persisted_rotation() {
         boost: &boost,
         floors: &floors,
         learned: &learned,
+        deals: &catalog::Deals::new(),
     };
     let normal = catalog::select(&pool, &ctx);
     assert_eq!(normal.len(), 40);
@@ -162,6 +163,7 @@ async fn active_task_survives_control_even_when_all_slots_are_protected() {
         boost: &boost,
         floors: &floors,
         learned: &learned,
+        deals: &catalog::Deals::new(),
     };
     let normal = catalog::select(&pool, &ctx);
     let missing = catalog::common_candidates(&pool, &ctx)[40].clone();
