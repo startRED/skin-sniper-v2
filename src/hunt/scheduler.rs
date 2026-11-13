@@ -695,33 +695,33 @@ impl Queue {
         s.decay(now, self.params.half_life);
         // Raro: a exposição é a da faixa lida (peso × o que se acumulou desde a leitura anterior dela), não a do
         // alvo. Com a exposição do alvo, quem tem mais faixas pareceria render mais só por ser lido mais vezes.
-        let (exposure, range) = match self.focused.get_mut(id) {
+        // A primeira leitura da faixa não ensina: tudo o que está à venda nela é "novo" para o app (12/11: 10
+        // "novos" de uma vez no Solitude e 0 nas 25 leituras seguintes), e isso é estoque de dias, não taxa.
+        let (exposure, credit, range) = match self.focused.get_mut(id) {
             Some(f) => {
                 let gap = f.prev.map(|at| now - at);
                 f.prev = Some(now);
+                let credit = if gap.is_some() { found.fresh } else { 0 };
                 (
-                    f.range.weight * value::exposure(gap, self.params.window),
+                    value::range_exposure(gap, f.range.weight, self.params.window),
+                    credit,
                     Some(RangeRead {
                         gap,
                         weight: f.range.weight,
                         control: f.control,
-                        worth: (f64::from(found.fresh) * f.range.gain).round() as i64,
+                        worth: (f64::from(credit) * f.range.gain).round() as i64,
                     }),
                 )
             }
             None => {
                 let gap = (s.last_at > 0).then(|| now - s.last_at);
-                (value::exposure(gap, self.params.window), None)
+                (value::exposure(gap, self.params.window), found.fresh, None)
             }
         };
         s.exposure += exposure;
-        s.dry = if found.fresh > 0 {
-            0.0
-        } else {
-            s.dry + exposure
-        };
+        s.dry = if credit > 0 { 0.0 } else { s.dry + exposure };
         s.last_at = now;
-        s.r += f64::from(found.fresh);
+        s.r += f64::from(credit);
         s.fresh += u64::from(found.fresh);
         s.finds += found.finds;
         s.gain_cents += found.gain_cents.max(0);
@@ -1754,8 +1754,8 @@ mod tests {
             (seeds, q.take_reads().pop().unwrap().range.unwrap())
         };
         let now = 1_000_000;
-        // nada lido: a faixa larga e cara vale mais; a exposição é a da faixa (peso × janela) e a recompensa
-        // de toda leitura é anúncio novo × lucro da faixa
+        // nada lido: a faixa larga e cara vale mais; a 1ª leitura dela só conhece o estoque (sem exposição, sem
+        // recompensa), as seguintes rendem anúncio novo × lucro da faixa
         let (seeds, r) = read(&mut q, now, 3);
         assert_eq!(seeds, vec![(5, 9)]);
         assert_eq!(
@@ -1764,10 +1764,10 @@ mod tests {
                 gap: None,
                 weight: 2.0,
                 control: false,
-                worth: 3000
+                worth: 0
             }
         );
-        assert!((q.stats["r:a"].exposure - 2.0 * q.params.window).abs() < 1.0);
+        assert_eq!((q.stats["r:a"].exposure, q.stats["r:a"].r), (0.0, 0.0));
         // 28 s depois o estoque da larga ainda não voltou: vez da estreita
         assert_eq!(read(&mut q, now + 28, 0).0, vec![(1, 1)]);
         // com o estoque de volta a larga ganha de novo, e o intervalo gravado é o dela, não o do alvo

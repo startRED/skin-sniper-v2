@@ -427,6 +427,10 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
        da classe, onde o alvo novo começa; `√a` é o otimismo de contagem, que some com medida; `r` e exposição
        pesam metade a cada `H`.
    - **Teto por seca:** sem anúncio novo em `s` de exposição seguidos, a taxa não passa de `3 ÷ s`.
+   - **Primeira leitura da faixa não ensina (12/11, depois de 2,5 h rodando):** tudo o que está à venda numa faixa
+     nunca lida é "novo" para o app. Medido: 10 "novos" na 1ª leitura do Solitude e 0 nas 25 seguintes; os 4
+     "novos" do rodízio cego eram todos 1ª leitura, e por isso ele parecia render 3× a agenda. Agora essa leitura
+     tem exposição e recompensa zero, e a repetição e o placar a pulam (`value::range_exposure`).
    - **Seleção:** até 24 alvos raros, ordenados por Σ `peso × lucro` das faixas.
    - **Três conferências contra placebo**, gravadas de hora em hora em `settings.value_info` e mostradas na seção
      "Aprendizado" do painel:

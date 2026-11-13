@@ -197,6 +197,9 @@ const MIGRATIONS: &[&str] = &[
     DELETE FROM arm_stats WHERE id LIKE 'f:%' OR id LIKE 'h:%';
     UPDATE arm_stats SET r = 0, exposure = 0 WHERE id LIKE 'r:%';
     "#,
+    // 1ª leitura de faixa deixou de ensinar (12/11): r/exposição dos raros vinham inflados por estoque contado
+    // como anúncio novo. As leituras ficam; a repetição e o placar já as pulam.
+    "UPDATE arm_stats SET r = 0, exposure = 0 WHERE id LIKE 'r:%';",
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.

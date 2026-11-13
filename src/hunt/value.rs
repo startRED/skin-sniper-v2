@@ -89,6 +89,12 @@ pub fn exposure(gap: Option<i64>, window: f64) -> f64 {
     }
 }
 
+/// Exposição da leitura de uma faixa de seed: peso × o que se acumulou desde a leitura anterior dela. A primeira
+/// leitura da faixa vale zero: ela só conhece o estoque (`Queue::reward`).
+pub fn range_exposure(gap: Option<i64>, weight: f64, window: f64) -> f64 {
+    gap.map_or(0.0, |g| weight * exposure(Some(g), window))
+}
+
 /// Zero anúncio novo em `dry` segundos de exposição seguidos: a taxa não passa de 3 ÷ `dry`. É o que faz o alvo que
 /// secou perder espaço em horas e não em dias; o primeiro anúncio novo zera `dry` e a taxa medida volta inteira.
 /// No histórico da produção (10/11) o teto não piora a previsão (0,3551 × 0,3563 sem ele).
@@ -193,6 +199,10 @@ pub fn replay(reads: &[Obs], class_of: &[usize], p: &Params) -> Replay {
     let mut base = [(0.0_f64, 0.0_f64); 2];
     let decay = |dt: i64| 0.5_f64.powf(dt.max(0) as f64 / p.half_life);
     for &(at, arm, f, range) in reads {
+        // 1ª leitura da faixa: estoque, não taxa; não prevê nem ensina (como na agenda)
+        if matches!(range, Some((None, _))) {
+            continue;
+        }
         let c = class_of[arm];
         let a = &mut out.arms[arm];
         let (cr, ce, cat) = &mut pool[c];
@@ -203,7 +213,7 @@ pub fn replay(reads: &[Obs], class_of: &[usize], p: &Params) -> Replay {
         *ce *= fc;
         *cat = at;
         let e = match range {
-            Some((gap, weight)) => weight * exposure(gap, p.window),
+            Some((gap, weight)) => range_exposure(gap, weight, p.window),
             None => exposure((a.at > 0).then(|| at - a.at), p.window),
         };
         if a.at > 0 && *ce > 0.0 {
@@ -399,7 +409,7 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
             let scores: Vec<(bool, ArmScore)> = c
                 .prepare(
                     "SELECT control, COUNT(*), SUM(fresh), SUM(worth), SUM(gain) FROM reads
-                     WHERE at >= ?1 AND weight IS NOT NULL GROUP BY control",
+                     WHERE at >= ?1 AND weight IS NOT NULL AND gap IS NOT NULL GROUP BY control",
                 )?
                 .query_map([since], |r| {
                     Ok((
@@ -686,6 +696,20 @@ mod tests {
             weighed.loss,
             by_arm.loss
         );
+    }
+
+    #[test]
+    fn first_read_of_a_range_is_stock_and_neither_scores_nor_teaches() {
+        let p = Params::default();
+        let reads = [
+            (1_000, 0, 5.0, None),
+            (2_000, 0, 9.0, Some((None, 2.0))), // 1ª leitura da faixa: 9 "novos" que já estavam lá
+            (3_000, 0, 1.0, None),
+        ];
+        let r = replay(&reads, &[1], &p);
+        assert_eq!((r.scored, r.actual), (1, 1.0));
+        assert_eq!(r.arms[0].r, 5.0 * 0.5_f64.powf(2_000.0 / p.half_life) + 1.0);
+        assert_eq!(range_exposure(None, 2.0, p.window), 0.0);
     }
 
     #[test]
