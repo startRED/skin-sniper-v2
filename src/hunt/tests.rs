@@ -3029,3 +3029,13 @@ async fn book_snapshot_only_on_change() {
     assert_eq!(rows[1].0, NOW + 120);
     assert!(rows[1].1.starts_with("[[167,1],[170,1]"), "{}", rows[1].1);
 }
+
+#[test]
+fn unproven_rare_is_shown_only_when_selling_as_common_loses_cents() {
+    use super::detect::unproven_loses_too_much as refused;
+    assert!(!refused(100));
+    assert!(!refused(-18)); // MAC-10 Snow Splash #309, 13/11
+    assert!(!refused(-50));
+    assert!(refused(-51));
+    assert!(refused(-91)); // Serpent Strike #804, 11/11
+}

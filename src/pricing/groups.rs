@@ -68,6 +68,9 @@ struct NamedFile {
 struct NamedGroup {
     label: String,
     seeds: Vec<u16>,
+    /// O que se vê na arma e quem paga por isso, para leigo.
+    #[serde(default)]
+    why: Option<String>,
 }
 #[derive(Deserialize)]
 struct BluePctFile {
@@ -308,19 +311,33 @@ fn pattern_group(
             label: format!("Blue Gem T{tier}"),
         });
     }
-    if let Some(table) = t.fade.finishes.get(pattern).and_then(|f| f.get(weapon))
+    let named = t.named.skins.get(base).into_iter().flatten();
+    let in_named = named.clone().any(|g| g.seeds.contains(&seed));
+    let fade = t.fade.finishes.get(pattern).and_then(|f| f.get(weapon));
+    if let Some(table) = fade
+        && !in_named
         && (proven || fade_top(table, seed.into()))
     {
-        return Some(Group {
-            key: format!("fade:{pattern}:{weapon}"),
-            label: format!("{pattern} 99%+"),
+        // Um grupo por ponto de %: 13/11 o #188 (81 %, "Black Pearl") e o #172 (98,9 %) saíam juntos como
+        // "99%+", e o anúncio mais barato de um derrubava o preço de revenda do outro.
+        let band = score(base, seed).map_or(99, |p| (p.floor() as u32).min(99));
+        return Some(if band >= 99 {
+            Group {
+                key: format!("fade:{pattern}:{weapon}"),
+                label: format!("{pattern} 99%+"),
+            }
+        } else {
+            Group {
+                key: format!("fade:{pattern}:{weapon}:{band}"),
+                label: format!("{pattern} {band}%"),
+            }
         });
     }
-    let named = t.named.skins.get(base).into_iter().flatten();
     let label = match named.clone().find(|g| g.seeds.contains(&seed)) {
         Some(g) => format!("{} #{seed}", g.label),
         None if !proven => return None,
         None => match score(base, seed) {
+            Some(pct) if fade.is_some() => format!("{pattern} {pct:.0}% #{seed}"),
             Some(pct) => format!("Blue {pct:.0}% #{seed}"),
             None => format!("Pattern #{seed}"),
         },
@@ -329,6 +346,19 @@ fn pattern_group(
         key: format!("learned:{base}:{seed}"),
         label,
     })
+}
+
+/// Explicação do grupo nomeado do seed (`named.json`), se a pesquisa escreveu uma.
+pub fn named_why(market_hash_name: &str, seed: u16) -> Option<&'static str> {
+    let base = skin_base(market_hash_name);
+    tables()
+        .named
+        .skins
+        .get(base)?
+        .iter()
+        .find(|g| g.seeds.contains(&seed))?
+        .why
+        .as_deref()
 }
 
 /// Seeds de tabela que valem caçar enquanto a skin não tem medida (tier 1 do guia, blue gem tier 1, topo do
@@ -472,10 +502,10 @@ mod tests {
             "SSG 08 | Acid Fade".to_string(),
             BTreeSet::from([872]),
         )]));
-        assert_eq!(
-            group_of(ssg, Some(872), None, None).unwrap().key,
-            "fade:Acid Fade:SSG 08"
-        );
+        // 872 tem 98,85 %: grupo e rótulo do próprio ponto de %, não "99%+"
+        let g = group_of(ssg, Some(872), None, None).unwrap();
+        assert_eq!(g.key, "fade:Acid Fade:SSG 08:98");
+        assert_eq!(g.label, "Acid Fade 98%");
         assert_eq!(group_of(ssg, Some(576), None, None), None);
     }
 
