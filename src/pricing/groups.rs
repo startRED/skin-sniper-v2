@@ -171,6 +171,21 @@ fn wear_range(market_hash_name: &str) -> Option<(&'static str, f64, f64)> {
     .find(|(w, _, _)| market_hash_name.ends_with(&format!("({w})")))
 }
 
+/// Desgaste do nome como número (0 = Factory New … 4 = Battle-Scarred). Nome sem desgaste conta como o melhor.
+pub fn wear_index(market_hash_name: &str) -> u8 {
+    const WEARS: [&str; 5] = [
+        "(Factory New)",
+        "(Minimal Wear)",
+        "(Field-Tested)",
+        "(Well-Worn)",
+        "(Battle-Scarred)",
+    ];
+    WEARS
+        .iter()
+        .position(|w| market_hash_name.ends_with(w))
+        .unwrap_or(0) as u8
+}
+
 /// Faixa de float de elite `(de, até)` do nome: os `FLOAT_ELITE_SHARE` melhores do desgaste, a partir do menor
 /// float que a skin tem. `None` sem desgaste no nome, sem tabela de float ou se a skin não chega no desgaste.
 pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
@@ -180,8 +195,9 @@ pub fn float_band(market_hash_name: &str) -> Option<(f64, f64)> {
     (lo < hi).then_some((lo, lo + (hi - lo) * FLOAT_ELITE_SHARE))
 }
 
-/// Seeds que as vendas provaram pagar prêmio, por skin (`hunt::patterns::load`). Skin ausente = sem medida.
-type Paying = HashMap<String, BTreeSet<u16>>;
+/// `(seed, desgaste)` que as vendas provaram pagar prêmio, por skin (`hunt::patterns::load`). Skin ausente = sem
+/// medida.
+type Paying = HashMap<String, BTreeSet<(u16, u8)>>;
 #[cfg(not(test))]
 static PAYING: RwLock<Option<Paying>> = RwLock::new(None);
 // Em teste a tabela é por thread: cada teste roda na sua e não vaza para os vizinhos.
@@ -204,8 +220,8 @@ pub fn set_paying(paying: Paying) {
 }
 
 /// `Some(paga?)` se as vendas da skin já foram medidas; `None` = sem medida, vale a tabela.
-fn paying(base: &str, seed: u16) -> Option<bool> {
-    with_paying(|p| Some(p.read().ok()?.as_ref()?.get(base)?.contains(&seed)))
+fn paying(base: &str, seed: u16, wear: u8) -> Option<bool> {
+    with_paying(|p| Some(p.read().ok()?.as_ref()?.get(base)?.contains(&(seed, wear))))
 }
 
 /// Nota do seed na skin, maior = mais raro: % de azul (`blue.json`) ou % do fade. `None` = skin sem nota.
@@ -292,7 +308,7 @@ fn pattern_group(
     }
 
     let seed = u16::try_from(seed?).ok()?;
-    let proven = paying(base, seed);
+    let proven = paying(base, seed, wear_index(market_hash_name));
     if proven == Some(false) {
         return None;
     }
@@ -481,7 +497,7 @@ mod tests {
         assert_eq!(group_of(name, Some(7), None, None), None);
         set_paying(HashMap::from([(
             base.to_string(),
-            BTreeSet::from([7, 511]),
+            BTreeSet::from([(7, 0), (511, 0)]),
         )]));
         // medida: o T1 que não paga some, o seed fora da tabela que paga entra, o T1 que paga fica
         assert_eq!(group_of(name, Some(302), None, None), None);
@@ -494,13 +510,17 @@ mod tests {
             group_of(name, Some(511), None, None).unwrap().label,
             "T1 Full Beam"
         );
+        // o seed provado só no Factory New não é raro no Battle-Scarred
+        let worn = "Glock-18 | High Beam (Battle-Scarred)";
+        assert_eq!(group_of(worn, Some(7), None, None), None);
+        assert_eq!((wear_index(worn), wear_index("Sealed Terminal")), (4, 0));
         // outra skin continua sem medida: vale a tabela
         assert!(group_of(MOON, Some(59), None, None).is_some());
         // skin com nota: fade fora do topo entra quando paga, e o topo que não paga sai
         let ssg = "SSG 08 | Acid Fade (Factory New)";
         set_paying(HashMap::from([(
             "SSG 08 | Acid Fade".to_string(),
-            BTreeSet::from([872]),
+            BTreeSet::from([(872, 0)]),
         )]));
         // 872 tem 98,85 %: grupo e rótulo do próprio ponto de %, não "99%+"
         let g = group_of(ssg, Some(872), None, None).unwrap();

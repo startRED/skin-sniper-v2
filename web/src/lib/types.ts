@@ -67,7 +67,13 @@ export type Purchase = {
   tradable_at: number | null;
   kind?: 'desconto' | 'raro' | null;
   sold_cents?: number | null;
+  wear?: string | null;
+  float?: number | null;
+  seed?: number | null;
+  group?: string | null;
   sell: Sell;
+  /** Quanto vale hoje, pela mesma conta da caça; ausente sem estimativa. */
+  now?: Sell | null;
 };
 export type History = { points: [number, number, number][]; sell: Sell };
 export type Settings = {

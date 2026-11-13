@@ -8,6 +8,11 @@
 //! 3. é seed de catálogo com menos de 3 vendas: as vendas do grupo dele passam no teste mais duro (`POOL_P25`);
 //! 4. não está em catálogo nenhum: 3+ vendas próprias, com o quartil de baixo a `MIN_RATIO` × ou mais.
 //!
+//! Nas regras 2 a 4 (skin sem nota) a prova vale por desgaste: só contam vendas no desgaste do anúncio ou num pior.
+//! Medido em 13/11/2026 nas vendas guardadas, em pares do mesmo seed que pagava ≥ 1,5× no desgaste melhor: sem nota,
+//! só 44 de 221 ainda pagavam ≥ 1,5× no pior (o prêmio caía para 0,53× do que era); com nota, 126 de 150. O caso que
+//! mostrou: MAC-10 Snow Splash #309 Battle-Scarred previsto a R$ 11,84 (56× o comum) por três vendas Factory New.
+//!
 //! Em 12/11/2026 (45 759 vendas guardadas) a regra deixou 15 skins e 231 seeds (eram 15 grupos): a Desert Eagle
 //! Heat Treated foi de 43 para 104 seeds, e saíram seeds de tier 1 que vendem a preço comum (Solitude 95/112/154,
 //! Trace Lock 309/390). Prevendo cada venda só com as anteriores (`backtest`): 336 vendas de seed pagante, 97 %
@@ -19,7 +24,8 @@
 use super::Hunt;
 use super::catalog::{self, Item};
 use crate::pricing::groups::{
-    Group, catalog_seeds, float_band, group_of, score, set_paying, siblings, skin_base, table_skins,
+    Group, catalog_seeds, float_band, group_of, score, set_paying, siblings, skin_base,
+    table_skins, wear_index,
 };
 use crate::pricing::sell::{MAX_RARE_MULTIPLE, RARE_MIN_SALES};
 use anyhow::Result;
@@ -46,14 +52,19 @@ const PAY_P25: f64 = 1.2;
 /// Prova emprestada do grupo de catálogo: mais dura, o seed ainda não vendeu.
 const POOL_P25: f64 = 1.5;
 
-/// Skin-base → seed que paga → razões (preço ÷ preço comum do nome) das vendas que provam, em ordem crescente.
-/// Skin medida sem seed pagante fica com o mapa vazio.
-pub type Learned = HashMap<String, BTreeMap<u16, Vec<f64>>>;
+/// Desgastes de `wear_index`.
+const WEARS: u8 = 5;
+
+/// Skin-base → (seed, desgaste) que paga → razões (preço ÷ preço comum do nome) das vendas que provam, em ordem
+/// crescente. Skin medida sem seed pagante fica com o mapa vazio.
+pub type Learned = HashMap<String, BTreeMap<(u16, u8), Vec<f64>>>;
 
 /// Venda limpa com seed, relativa ao preço comum do nome.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Comp {
     pub seed: u16,
+    /// Desgaste do nome vendido (`wear_index`).
+    pub wear: u8,
     pub ratio: f64,
     pub sold_at: i64,
 }
@@ -90,6 +101,7 @@ pub fn comps(rows: &[SaleRow]) -> HashMap<String, Vec<Comp>> {
             {
                 of_base.push(Comp {
                     seed,
+                    wear: wear_index(name),
                     ratio,
                     sold_at: *sold_at,
                 });
@@ -99,9 +111,15 @@ pub fn comps(rows: &[SaleRow]) -> HashMap<String, Vec<Comp>> {
     out
 }
 
-/// As razões que provam que o seed paga, só com vendas anteriores a `before`; `None` se não paga (regra no
-/// topo do arquivo).
-pub fn evidence_for(base: &str, seed: u16, comps: &[Comp], before: i64) -> Option<Vec<f64>> {
+/// As razões que provam que o seed paga num anúncio de desgaste `wear`, só com vendas anteriores a `before`;
+/// `None` se não paga (regra no topo do arquivo).
+pub fn evidence_for(
+    base: &str,
+    seed: u16,
+    wear: u8,
+    comps: &[Comp],
+    before: i64,
+) -> Option<Vec<f64>> {
     let pays = |mut v: Vec<f64>, median: f64, p25: f64| {
         v.sort_by(f64::total_cmp);
         // quartil de baixo arredondado para baixo: com 3 ou 4 vendas é a pior delas
@@ -130,6 +148,8 @@ pub fn evidence_for(base: &str, seed: u16, comps: &[Comp], before: i64) -> Optio
         near.truncate(NEAR);
         return pays(near.into_iter().map(|n| n.1).collect(), PAY_MEDIAN, PAY_P25);
     }
+    // sem nota, venda em desgaste melhor não prova o pior
+    let past = past.filter(|c| c.wear >= wear);
     let own: Vec<f64> = past
         .clone()
         .filter(|c| c.seed == seed)
@@ -164,7 +184,18 @@ pub fn learn(comps: &HashMap<String, Vec<Comp>>) -> Learned {
             };
             let paying = seeds
                 .into_iter()
-                .filter_map(|s| Some((s, evidence_for(base, s, v, i64::MAX)?)))
+                .flat_map(|s| {
+                    // com nota a prova não depende do desgaste: mede uma vez
+                    let scored = score(base, s)
+                        .is_some()
+                        .then(|| evidence_for(base, s, 0, v, i64::MAX));
+                    (0..WEARS).filter_map(move |w| {
+                        let e = scored
+                            .clone()
+                            .unwrap_or_else(|| evidence_for(base, s, w, v, i64::MAX));
+                        Some(((s, w), e?))
+                    })
+                })
                 .collect();
             (base.clone(), paying)
         })
@@ -177,7 +208,7 @@ pub fn backtest(comps: &HashMap<String, Vec<Comp>>) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
     for (base, v) in comps {
         for c in v {
-            if let Some(e) = evidence_for(base, c.seed, v, c.sold_at) {
+            if let Some(e) = evidence_for(base, c.seed, c.wear, v, c.sold_at) {
                 out.push((e[e.len() / 2], c.ratio));
             }
         }
@@ -222,16 +253,19 @@ fn catalog_names(items: &[Item]) -> Vec<String> {
     v.into_iter().map(|i| i.name.clone()).collect()
 }
 
-/// Seeds que pagam na skin.
-pub fn active(l: &Learned, base: &str) -> Vec<u16> {
-    l.get(base).map_or(vec![], |m| m.keys().copied().collect())
+/// Seeds que pagam no nome (skin e desgaste).
+pub fn active(l: &Learned, name: &str) -> Vec<u16> {
+    let wear = wear_index(name);
+    l.get(skin_base(name)).map_or(vec![], |m| {
+        m.keys().filter(|k| k.1 == wear).map(|k| k.0).collect()
+    })
 }
 
 /// Grupo do seed que paga e a prova dele.
 pub fn group(l: &Learned, name: &str, seed: Option<u16>) -> Option<(Group, Vec<f64>)> {
     let base = skin_base(name);
     let seed = seed?;
-    let v = l.get(base)?.get(&seed)?;
+    let v = l.get(base)?.get(&(seed, wear_index(name)))?;
     // `group_of` lê a mesma medida (`set_paying`); o reserva cobre a tabela montada à mão em teste
     let g = group_of(name, Some(seed.into()), None, None).unwrap_or_else(|| Group {
         key: format!("learned:{base}:{seed}"),
@@ -244,7 +278,9 @@ pub fn group(l: &Learned, name: &str, seed: Option<u16>) -> Option<(Group, Vec<f
 pub fn size(l: &Learned) -> (usize, usize) {
     (
         l.values().filter(|m| !m.is_empty()).count(),
-        l.values().map(BTreeMap::len).sum(),
+        l.values()
+            .map(|m| m.keys().map(|k| k.0).collect::<BTreeSet<_>>().len())
+            .sum(),
     )
 }
 
@@ -398,11 +434,11 @@ pub async fn maybe_step(h: &Hunt) {
         Err(e) => return tracing::warn!("patterns: CSFloat falhou para {name}: {e}"),
     };
     cache_sales(h, &name, &sales).await;
-    let before = active(&h.lock().learned, skin_base(&name)).len();
+    let before = active(&h.lock().learned, &name).len();
     if let Err(e) = load(h).await {
         return tracing::warn!("patterns: reler falhou: {e}");
     }
-    let now_active = active(&h.lock().learned, skin_base(&name));
+    let now_active = active(&h.lock().learned, &name);
     if now_active.len() > before {
         tracing::info!(skin = skin_base(&name), seeds = ?now_active, "pattern provado");
         // a seleção põe o seed novo na agenda na próxima volta
@@ -457,7 +493,7 @@ mod tests {
     }
 
     fn paying(name: &str, extra: &[(u16, f64)]) -> Vec<u16> {
-        active(&learn(&comps(&rows(name, extra))), skin_base(name))
+        active(&learn(&comps(&rows(name, extra))), name)
     }
 
     #[test]
@@ -518,6 +554,11 @@ mod tests {
         assert!(g.label.ends_with("#350"), "{}", g.label);
         assert_eq!(e, [1.5, 1.6, 2.0]);
         assert_eq!(group(&l, PAW, Some(1)), None);
+        // as vendas são Field-Tested: provam o Factory New, não o Battle-Scarred (13/11: Snow Splash #309)
+        assert!(group(&l, "AWP | PAW (Factory New)", Some(41)).is_some());
+        assert_eq!(group(&l, "AWP | PAW (Battle-Scarred)", Some(41)), None);
+        assert_eq!(active(&l, "AWP | PAW (Well-Worn)"), Vec::<u16>::new());
+        assert_eq!(size(&l), (1, 2));
         assert_eq!(group(&l, PAW, None), None);
     }
 
@@ -546,7 +587,7 @@ mod tests {
             pay.len()
         );
         // a prova só olha para trás: antes da primeira venda cara ninguém pagava
-        assert_eq!(evidence_for(base, top[0], &c[base], T + 12), None);
+        assert_eq!(evidence_for(base, top[0], 0, &c[base], T + 12), None);
         // uma 11ª venda no melhor seed já tinha as anteriores a favor: previsto 3×, real 2×
         r.push(sale(100, top[0], 2.0));
         assert_eq!(backtest(&comps(&r)).last(), Some(&(3.0, 2.0)));
@@ -575,10 +616,10 @@ mod tests {
         );
         let target = by_score[10];
         let c = comps(&r);
-        assert_eq!(evidence_for(base, target, &c[base], i64::MAX), None);
+        assert_eq!(evidence_for(base, target, 0, &c[base], i64::MAX), None);
         // com menos de 8 vendas acima, a prova de baixo continua valendo
         let c = comps(&r[..12]);
-        assert!(evidence_for(base, target, &c[base], i64::MAX).is_some());
+        assert!(evidence_for(base, target, 0, &c[base], i64::MAX).is_some());
     }
 
     #[test]
@@ -605,11 +646,13 @@ mod tests {
         let mut skins: Vec<_> = l.iter().filter(|(_, m)| !m.is_empty()).collect();
         skins.sort_by_key(|(base, _)| floor.get(*base).copied().unwrap_or(i64::MAX));
         for (base, m) in skins {
+            let seeds: BTreeSet<u16> = m.keys().map(|k| k.0).collect();
             let mut mid: Vec<f64> = m.values().map(|e| e[e.len() / 2]).collect();
             mid.sort_by(f64::total_cmp);
             println!(
-                "piso US$ {:>7.2} | {base}: {} seeds, prova mediana {:.2}x ({:.2}x a {:.2}x)",
+                "piso US$ {:>7.2} | {base}: {} seeds ({} com desgaste), prova mediana {:.2}x ({:.2}x a {:.2}x)",
                 floor.get(base).copied().unwrap_or(0) as f64 / 100.0,
+                seeds.len(),
                 m.len(),
                 mid[mid.len() / 2],
                 mid[0],

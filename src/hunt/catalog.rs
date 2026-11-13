@@ -17,7 +17,7 @@ use super::scheduler::{Range, Task};
 use super::{Hunt, detect};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
-use crate::pricing::groups::{ranges, seed_ranges, skin_base, table_skins};
+use crate::pricing::groups::{ranges, seed_ranges, skin_base, table_skins, wear_index};
 use crate::pricing::sell::{
     MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
 };
@@ -239,7 +239,7 @@ fn rare_ranges(name: &str, learned: &Learned) -> Vec<(u16, u16)> {
     if learned.is_empty() {
         seed_ranges(name)
     } else {
-        ranges(patterns::active(learned, skin_base(name)))
+        ranges(patterns::active(learned, name))
     }
 }
 
@@ -321,7 +321,10 @@ pub async fn load_deals(db: &Db, learned: &Learned, now: i64) -> Result<Deals> {
     let mut out = Deals::new();
     for (name, seed, seen, good) in rows {
         let base = skin_base(&name);
-        if learned.get(base).is_some_and(|m| m.contains_key(&seed)) {
+        if learned
+            .get(base)
+            .is_some_and(|m| m.contains_key(&(seed, wear_index(&name))))
+        {
             let e = out.entry(base.to_string()).or_default();
             e.seen += seen;
             e.good += good;
@@ -422,7 +425,7 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                 // Por faixa: seeds × giro (anúncios novos esperados, a menos de uma constante que a agenda aprende)
                 // e o lucro esperado de um anúncio novo: chance de ser compra × (vender pela mediana da prova do
                 // seed − comprar no piso comum). Sem prova (tabela, instalação nova) cada seed vale 1 centavo.
-                let proof = c.learned.get(skin_base(name));
+                let (proof, wear) = (c.learned.get(skin_base(name)), wear_index(name));
                 let chance = deal_chance(c.deals, skin_base(name));
                 let measured = c.deals.get(skin_base(name));
                 let ranges: Vec<Range> = seeds
@@ -431,7 +434,7 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                         let n = f64::from(hi - lo + 1);
                         let gain: f64 = (lo..=hi)
                             .map(|s| {
-                                proof.and_then(|p| p.get(&s)).map_or(1.0, |e| {
+                                proof.and_then(|p| p.get(&(s, wear))).map_or(1.0, |e| {
                                     let sale = (f as f64 * e[e.len() / 2]) as i64;
                                     (seller_gets(sale) - f).max(1) as f64
                                 })
@@ -1427,7 +1430,7 @@ mod tests {
         learned
             .entry("Glock-18 | Moonrise".into())
             .or_default()
-            .insert(500, vec![3.0, 4.0, 5.0]);
+            .extend((0..5).map(|w| ((500, w), vec![3.0, 4.0, 5.0])));
         // skin comum sem tabela ganha busca rara pelo seed que paga
         let plain = items
             .iter()
@@ -1436,7 +1439,7 @@ mod tests {
         learned
             .entry("AWP | Duality".into())
             .or_default()
-            .insert(77, vec![2.2, 2.5, 3.0]);
+            .extend((0..5).map(|w| ((77, w), vec![2.2, 2.5, 3.0])));
         let c = Ctx {
             learned: &learned,
             ..ctx(saldo, &boost, &floors)

@@ -69,7 +69,9 @@ GET  /api/opportunities    -> Opportunity[]         (ativas e todas as perdidas 
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
 POST /api/buy              -> 410 (compra só na Steam; nada sai pela rede)
 GET|POST /api/steam/login/* -> 410 (sem login)
-GET  /api/purchases        -> Purchase[]
+POST /api/opportunities/:id/bought -> Purchase     ("Comprei" na Steam; ativa ou perdida; a ativa sai com reason "bought")
+GET  /api/purchases        -> Purchase[]            (comprada e não vendida traz `now`: quanto vale hoje, sem consulta nova)
+DELETE /api/purchases/:id  -> null                  ("Não comprei"; 404 se já tem venda informada)
 POST /api/purchases/:id/sold {sold_cents: int}      -> Purchase (valor pago pelo comprador, com taxas)
 GET  /api/calibration      -> Calibration
 GET  /api/watch            -> WatchRow[]            (o que a caça vigia; mais perto de compensar primeiro)
@@ -137,7 +139,9 @@ Sell = { high: Tier, mid: Tier, quick: Tier }
 Tier = { price_cents: number, net_cents: number, profit_cents: number, eta_hours: number | null }
 Purchase = { id, name, icon_url, price_cents, status: "pending" | "need_confirmation" | "bought" | "failed",
              message: string | null, bought_at: number | null, tradable_at: number | null, sell: Sell,
-             kind: "desconto" | "raro" | null, sold_cents: number | null }
+             kind: "desconto" | "raro" | null, sold_cents: number | null,
+             wear, float, seed, group,                   // copiados da oportunidade
+             now?: Sell }                                // valor de hoje (`hunt::detect::value_now`), nunca guardado
 Calibration = { families: [{ family: string, kind: "desconto" | "raro", n: number,
                               mean_error_pct: number, bias_pct: number }],
                 hours: [{ hour: 0..23, listings: number, opportunities: number }] }
@@ -544,6 +548,21 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   4. não está em tabela nenhuma: 3+ vendas próprias com o quartil de baixo a ≥ 2×.
   O quartil de baixo arredonda para baixo: com 3 ou 4 vendas é a pior delas. O seed pagante sem grupo de tabela
   vira `learned:<skin>:<seed>` ("Pattern #seed"); o prêmio são as razões da prova.
+  - **Prova por desgaste (13/11).** Nas regras 2 a 4 (skin sem nota) só contam vendas no desgaste do anúncio ou num
+    pior: o seed pode ser raro no Factory New e comum no Battle-Scarred. Medido nas vendas guardadas, em 371 pares
+    do mesmo seed que pagava ≥ 1,5× no desgaste melhor: sem nota, 44 de 221 ainda pagavam ≥ 1,5× no pior; com nota,
+    126 de 150 (por isso a regra 1 continua valendo em todos os desgastes). O caso que mostrou: MAC-10 Snow Splash
+    #309 Battle-Scarred a R$ 0,34 previsto a R$ 11,84 por três vendas Factory New, com 19 anúncios do mesmo seed em
+    desgaste melhor parados a partir de R$ 0,75. Segunda trava, para todo raro: o preço rápido e o médio não passam
+    do menor anúncio vivo do mesmo grupo num desgaste melhor do mesmo item (o desgaste pior saiu mais barato ou
+    igual em 363 dos 371 pares). No banco de 13/11 a prova retroativa foi de 369 para 353 vendas (98,4 % → 98,6 %
+    pagando). Ressalva: os pares têm viés de seleção (só entra quem pagou bem no desgaste melhor).
+  - **Compra até a venda (13/11).** "Comprei" na linha da oportunidade (ou "Fui eu que comprei" numa perdida)
+    grava a compra com a previsão daquele momento; a aba Compras mostra a trava, o valor de hoje (a mesma conta da
+    caça só com o banco: histórico guardado, prova por desgaste e anúncios vivos do registro), o gráfico de 30 dias
+    e, depois da trava, o campo "Vendi por". A oportunidade comprada não é apagada pela limpeza de 7 dias. A data
+    da trava é estimada (7 dias arredondados para a hora cheia, regra tirada de uma compra só); confirmação pelo
+    inventário não existe, porque o app não tem login.
   - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo
     lentas ou caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo); cada skin no máximo 1×/24 h,
     sem gastar consulta da Steam. A

@@ -1638,6 +1638,56 @@ async fn rare_premium_comes_from_what_closed_on_steam_when_there_is_enough() {
 }
 
 #[tokio::test]
+async fn rare_never_sells_above_the_same_pattern_listed_in_a_better_wear() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    // um Center Star Minimal Wear parado a R$ 17,00 (sem ele o preço médio era R$ 17,76); o Well-Worn do mesmo grupo não entra na conta
+    db.call(|c| {
+        for (id, wear, price) in [("mw", "Minimal Wear", 1700), ("ww", "Well-Worn", 900)] {
+            c.execute(
+                "INSERT INTO observations(listing_id, name, query, grp, price_cents, first_seen, last_seen, cheapest)
+                 VALUES (?1, ?2, 'q', 'cs:Glock-18 | Moonrise:t1', ?3, ?4, ?4, 0)",
+                rusqlite::params![id, format!("Glock-18 | Moonrise ({wear})"), price, NOW - 60],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let found = run_until_two(&h, &mut rx).await;
+    let t1 = found.iter().find(|o| o.id == ID_T1).unwrap();
+    assert_eq!(t1.sell.mid.price_cents, 1699, "{}", t1.evidence);
+    assert!(
+        t1.evidence
+            .contains("desgaste melhor está anunciado a R$ 17,00"),
+        "{}",
+        t1.evidence
+    );
+}
+
+#[tokio::test]
+async fn a_bought_listing_is_revalued_from_the_database_alone() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let found = run_until_two(&h, &mut rx).await;
+    let t1 = found.iter().find(|o| o.id == ID_T1).unwrap();
+    let asked = bodies.history_queries.load(Ordering::SeqCst);
+    let now = detect::value_now(&h, ID_T1, t1.price_cents)
+        .await
+        .unwrap()
+        .unwrap();
+    // mesma conta do aviso, sem nenhuma consulta nova
+    assert_eq!(now.mid.price_cents, t1.sell.mid.price_cents);
+    assert_eq!(bodies.history_queries.load(Ordering::SeqCst), asked);
+    assert!(detect::value_now(&h, "nada", 100).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn cheap_hunt_off_keeps_only_seed_and_float_targets() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();

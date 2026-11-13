@@ -7,7 +7,7 @@ use super::scheduler::{Found, Task};
 use super::{Active, Hunt};
 use crate::notify::{Alert, NotifyError};
 use crate::pricing::brl;
-use crate::pricing::groups::group_of;
+use crate::pricing::groups::{Group, group_of, wear_index};
 use crate::pricing::premium::{self, Seal};
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
 use crate::steam::client::Error as SteamError;
@@ -291,6 +291,11 @@ pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<Pri
             Err(e) => return Err(e),
         }
     }
+    stored_points(h, name, now).await
+}
+
+/// Pontos dos últimos 30 dias do nome que já estão no banco.
+async fn stored_points(h: &Hunt, name: &str, now: i64) -> Result<Vec<PricePoint>> {
     let n = name.to_string();
     h.db.call(move |c| {
         c.prepare(
@@ -395,6 +400,30 @@ async fn steam_closed(h: &Hunt, name: &str, group_key: &str, base_cents: i64) ->
         .into_iter()
         .map(|p| p as f64 / base_cents as f64)
         .collect())
+}
+
+/// Menor anúncio vivo (visto há menos de `FLOOR_TTL`) do mesmo grupo raro num desgaste melhor do mesmo item.
+/// Ninguém paga mais pelo desgaste pior do que pelo melhor já à venda: nas vendas do CSFloat guardadas em 13/11/2026,
+/// o mesmo seed saiu mais barato (ou igual) no desgaste pior em 363 de 371 pares.
+async fn better_wear_ask(h: &Hunt, name: &str, group_key: &str, now: i64) -> Result<Option<i64>> {
+    let (name, grp) = (name.to_string(), group_key.to_string());
+    let asks: Vec<(String, i64)> =
+        h.db.call(move |c| {
+            c.prepare(
+                "SELECT name, price_cents FROM observations WHERE grp = ?1 AND gone_at IS NULL AND last_seen >= ?2",
+            )?
+            .query_map(params![grp, now - FLOOR_TTL], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+        })
+        .await?;
+    // mesmo item = mesmo nome sem o desgaste (StatTrak e Souvenir não se misturam com o normal)
+    let item = |n: &str| n.rsplit_once(" (").map(|(i, _)| i.to_string());
+    let (mine, wear) = (item(&name), wear_index(&name));
+    Ok(asks
+        .into_iter()
+        .filter(|(n, _)| item(n) == mine && wear_index(n) < wear)
+        .map(|(_, p)| p)
+        .min())
 }
 
 fn api_confidence(c: SellConfidence) -> Confidence {
@@ -668,21 +697,30 @@ async fn charm_gain(h: &Hunt, l: &Listing, now: i64) -> Result<Option<(i64, Stri
     Ok((total > 0).then_some((total, text)))
 }
 
-/// Avalia um anúncio. `Ok` sem `found`: sem estimativa ou sem lucro (conclusivo). `Err`: falha de rede
-/// ao buscar histórico — o anúncio não é marcado como visto e volta a ser avaliado na próxima consulta.
-async fn evaluate_one(
-    h: &Hunt,
-    task: &Task,
-    l: &Listing,
-    others_min: Option<i64>,
-    notify_min: i64,
-) -> Result<Judged> {
-    let now = h.now();
-    let mut points = points_for(h, &l.name, now).await?;
-    let hist_age = history_at(h, &l.name).await?.map_or(0, |t| now - t);
+/// Grupo raro do anúncio (tabela ou seed aprendido) e, quando aprendido, as razões que o provam.
+fn rare_group(h: &Hunt, l: &Listing) -> (Option<Group>, Option<(Group, Vec<f64>)>) {
     let learned = super::patterns::group(&h.lock().learned, &l.name, l.seed);
     let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index, l.float)
         .or_else(|| learned.as_ref().map(|(g, _)| g.clone()));
+    (group, learned)
+}
+
+/// O que o anúncio vale com os pontos de preço dados: grupo raro, preço comum e a estimativa de venda.
+struct Appraisal {
+    group: Option<Group>,
+    correction: f64,
+    base_cents: Option<i64>,
+    est: std::result::Result<sell::SellEstimate, sell::NoEstimate>,
+}
+
+async fn appraise(
+    h: &Hunt,
+    l: &Listing,
+    mut points: Vec<PricePoint>,
+    others_min: Option<i64>,
+    now: i64,
+) -> Result<Appraisal> {
+    let (group, learned) = rare_group(h, l);
     let correction = h.correction(group.is_some());
     sell::discount(&mut points, correction);
     // raro: preço médio comum da mesma skin, sem o prêmio do grupo (base do múltiplo e do selo)
@@ -691,7 +729,7 @@ async fn evaluate_one(
         .and_then(|_| sell::estimate(&points, now, None, None).ok())
         .map(|e| e.mid.price_cents);
     let mut rare = match (&group, learned) {
-        // pattern aprendido: o prêmio são as vendas que ensinaram (todos os desgastes), não as desta página
+        // pattern aprendido: o prêmio são as vendas que ensinaram (no desgaste do anúncio ou pior), não as da página
         (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
         (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
         (None, _) => None,
@@ -704,7 +742,90 @@ async fn evaluate_one(
             (r.multiples, on_steam) = (closed, true);
         }
     }
-    let mut est = match sell::estimate(&points, now, others_min, rare) {
+    let better = match &group {
+        Some(g) => better_wear_ask(h, &l.name, &g.key, now).await?,
+        None => None,
+    };
+    let better = better.filter(|b| others_min.is_none_or(|o| *b < o));
+    let mut est = sell::estimate(&points, now, better.or(others_min), rare);
+    if let Ok(est) = &mut est {
+        if let Some(b) = better {
+            est.evidence += &format!(
+                " · o mesmo pattern num desgaste melhor está anunciado a {}",
+                brl(b)
+            );
+        }
+        if on_steam {
+            est.evidence +=
+                " · prêmio medido na Steam: anúncios do grupo que sumiram em até 48 h sem voltar";
+        }
+    }
+    Ok(Appraisal {
+        group,
+        correction,
+        base_cents,
+        est,
+    })
+}
+
+/// Quanto um anúncio já comprado vale hoje para quem pagou `price_cents`: a mesma conta da caça, só com o que já
+/// está no banco (nenhuma consulta à Steam). `None` sem o anúncio guardado ou sem estimativa.
+pub(crate) async fn value_now(h: &Hunt, id: &str, price_cents: i64) -> Result<Option<Sell>> {
+    let now = h.now();
+    let key = id.to_string();
+    let json: Option<String> =
+        h.db.call(move |c| {
+            c.query_row(
+                "SELECT listing_json FROM opportunities WHERE id = ?1",
+                [key],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+        })
+        .await?;
+    let Some(l) = json.and_then(|j| serde_json::from_str::<Listing>(&j).ok()) else {
+        return Ok(None);
+    };
+    let grp = rare_group(h, &l).0.map(|g| g.key);
+    let (name, own) = (l.name.clone(), l.listing_id.clone());
+    // concorrente: o menor anúncio vivo do mesmo nome e grupo, visto há menos de `FLOOR_TTL`
+    let others_min: Option<i64> =
+        h.db.call(move |c| {
+            c.query_row(
+                "SELECT min(price_cents) FROM observations WHERE name = ?1 AND grp IS ?2 AND listing_id != ?3
+                 AND gone_at IS NULL AND last_seen >= ?4",
+                params![name, grp, own, now - FLOOR_TTL],
+                |r| r.get(0),
+            )
+        })
+        .await?;
+    let points = stored_points(h, &l.name, now).await?;
+    let a = appraise(h, &l, points, others_min, now).await?;
+    Ok(a.est
+        .ok()
+        .map(|est| api_sell(&sell::evaluate(price_cents, &est, 0).sell, a.correction)))
+}
+
+/// Avalia um anúncio. `Ok` sem `found`: sem estimativa ou sem lucro (conclusivo). `Err`: falha de rede
+/// ao buscar histórico — o anúncio não é marcado como visto e volta a ser avaliado na próxima consulta.
+async fn evaluate_one(
+    h: &Hunt,
+    task: &Task,
+    l: &Listing,
+    others_min: Option<i64>,
+    notify_min: i64,
+) -> Result<Judged> {
+    let now = h.now();
+    let points = points_for(h, &l.name, now).await?;
+    let hist_age = history_at(h, &l.name).await?.map_or(0, |t| now - t);
+    let Appraisal {
+        group,
+        correction,
+        base_cents,
+        est,
+    } = appraise(h, l, points, others_min, now).await?;
+    let mut est = match est {
         Ok(est) => est,
         Err(e) => {
             return Ok(Judged {
@@ -716,10 +837,6 @@ async fn evaluate_one(
             });
         }
     };
-    if on_steam {
-        est.evidence +=
-            " · prêmio medido na Steam: anúncios do grupo que sumiram em até 48 h sem voltar";
-    }
     if hist_age >= HISTORY_TTL {
         est.evidence += &format!(
             " · histórico de preços de {} h atrás, a Steam não deixou atualizar",

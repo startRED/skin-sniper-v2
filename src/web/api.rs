@@ -185,6 +185,17 @@ pub struct Purchase {
     pub kind: Option<Kind>,
     #[serde(default)]
     pub sold_cents: Option<i64>,
+    #[serde(default)]
+    pub wear: Option<String>,
+    #[serde(default)]
+    pub float: Option<f64>,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Quanto vale hoje (`hunt::detect::value_now`); só em `GET /api/purchases`, nunca guardado.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<Sell>,
 }
 
 /// Resposta de `GET /api/opportunities/:id/history`.
@@ -430,17 +441,26 @@ pub async fn list_purchases(AxState(app): AxState<AppState>) -> ApiResult<Vec<Pu
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()
     }).await?;
-    Ok(Json(
-        rows.into_iter()
-            .flat_map(|(json, sold)| {
-                let mut purchases: Vec<Purchase> = parse_rows("compra", vec![json]);
-                for p in &mut purchases {
-                    p.sold_cents = sold;
-                }
-                purchases
-            })
-            .collect(),
-    ))
+    let mut list: Vec<Purchase> = rows
+        .into_iter()
+        .flat_map(|(json, sold)| {
+            let mut purchases: Vec<Purchase> = parse_rows("compra", vec![json]);
+            for p in &mut purchases {
+                p.sold_cents = sold;
+            }
+            purchases
+        })
+        .collect();
+    if let Some(rt) = &app.rt {
+        let held = |p: &&mut Purchase| p.status == PurchaseStatus::Bought && p.sold_cents.is_none();
+        for p in list.iter_mut().filter(held) {
+            p.now = crate::hunt::detect::value_now(&rt.hunt, &p.id, p.price_cents)
+                .await
+                .ok()
+                .flatten();
+        }
+    }
+    Ok(Json(list))
 }
 
 pub async fn get_settings(AxState(app): AxState<AppState>) -> ApiResult<Settings> {

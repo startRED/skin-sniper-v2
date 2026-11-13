@@ -14,7 +14,7 @@ use api::{Combo, Event, Hunt, KeyStatus, Keys, SaldoSource, State};
 use axum::Router;
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{any, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use rust_embed::RustEmbed;
 use tokio::sync::broadcast;
 
@@ -102,9 +102,11 @@ pub fn router(app: AppState) -> Router {
             "/api/opportunities/{id}/history",
             get(api::opportunity_history),
         )
+        .route("/api/opportunities/{id}/bought", post(calibration::bought))
         .route("/api/watch", get(api::watch))
         .route("/api/buy", post(api::buy))
         .route("/api/purchases", get(api::list_purchases))
+        .route("/api/purchases/{id}", delete(calibration::unbuy))
         .route("/api/purchases/{id}/sold", post(calibration::sold))
         .route("/api/calibration", get(calibration::get))
         .route("/api/learning", get(learning::get))
