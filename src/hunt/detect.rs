@@ -7,7 +7,7 @@ use super::scheduler::{Found, Task};
 use super::{Active, Hunt};
 use crate::notify::{Alert, NotifyError};
 use crate::pricing::brl;
-use crate::pricing::groups::{Group, group_of, wear_index};
+use crate::pricing::groups::{Group, group_of, score, skin_base, wear_index};
 use crate::pricing::premium::{self, Seal};
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
 use crate::steam::client::Error as SteamError;
@@ -384,22 +384,41 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
 // shortcut: sumir não é vender com certeza (retirada sem relistagem conta como venda) e anúncio barato some
 // primeiro, o que puxa a mediana para baixo; se um aviso com esta prova não fechar na venda, exigir mais de
 // `RARE_MIN_SALES` fechamentos ou medir a taxa de sumiço por faixa de preço.
-async fn steam_closed(h: &Hunt, name: &str, group_key: &str, base_cents: i64) -> Result<Vec<f64>> {
-    let (name, grp) = (name.to_string(), group_key.to_string());
-    let prices: Vec<i64> =
-        h.db.call(move |c| {
-            c.prepare(
-                "SELECT price_cents FROM observations WHERE grp = ?1 AND name = ?2 AND relisted = 0
-                 AND gone_at IS NOT NULL AND gone_at - first_seen <= ?3",
-            )?
-            .query_map(params![grp, name, super::teacher::FAST], |r| r.get(0))?
-            .collect()
-        })
-        .await?;
-    Ok(prices
+async fn steam_closed(h: &Hunt, l: &Listing, group_key: &str, base_cents: i64) -> Result<Vec<f64>> {
+    let (name, grp) = (l.name.clone(), group_key.to_string());
+    let gone = h.db.call(move |c| vanished(c, &grp, &name)).await?;
+    let proves = proves(&l.name, l.seed);
+    Ok(gone
         .into_iter()
-        .map(|p| p as f64 / base_cents as f64)
+        .filter(|(seed, _)| proves(*seed))
+        .map(|(_, p)| p as f64 / base_cents as f64)
         .collect())
+}
+
+/// `(seed, preço)` dos anúncios do nome e grupo que sumiram em até 48 h sem relistagem e sem um mais barato do
+/// mesmo seed à venda (`NO_CHEAPER_TWIN`).
+fn vanished(
+    c: &rusqlite::Connection,
+    grp: &str,
+    name: &str,
+) -> rusqlite::Result<Vec<(Option<u16>, i64)>> {
+    use super::teacher::{FAST, NO_CHEAPER_TWIN};
+    c.prepare(&format!(
+        "SELECT seed, price_cents FROM observations a WHERE grp = ?1 AND name = ?2 AND relisted = 0
+         AND gone_at IS NOT NULL AND gone_at - first_seen <= ?3 AND {NO_CHEAPER_TWIN}"
+    ))?
+    .query_map(params![grp, name, FAST], |r| Ok((r.get(0)?, r.get(1)?)))?
+    .collect()
+}
+
+/// A venda de um seed prova o preço de outro? Em skin com nota (% de azul, % do fade), só a de nota igual ou pior:
+/// dentro do mesmo grupo o prêmio cai com a nota. SSG 08 Acid Fade 99%+ no CSFloat em 13/11/2026: rank 1 a 27× o
+/// comum, rank 2 a 10,6×, ranks 9 a 17 a ~3×; o #690 (rank 14) saiu previsto a R$ 47,04 pelos sumiços dos ranks
+/// 2 a 5. Skin sem nota ou anúncio sem seed: toda venda do grupo vale.
+fn proves(name: &str, seed: Option<u16>) -> impl Fn(Option<u16>) -> bool + use<> {
+    let base = skin_base(name).to_string();
+    let mine = seed.and_then(|s| score(&base, s));
+    move |sold| mine.is_none_or(|m| sold.and_then(|s| score(&base, s)).is_some_and(|n| n <= m))
 }
 
 /// Menor anúncio vivo (visto há menos de `FLOOR_TTL`) do mesmo grupo raro num desgaste melhor do mesmo item.
@@ -605,6 +624,7 @@ async fn seal_for(
     now: i64,
 ) -> Seal {
     const FAST: i64 = super::teacher::FAST;
+    let proves = proves(name, seed);
     let (name, grp) = (name.to_string(), grp.to_string());
     let r = h
         .db
@@ -614,15 +634,10 @@ async fn seal_for(
                 .query_map([&grp], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             if let Some(b) = base_cents.filter(|&b| b > 0) {
-                let gone: Vec<(Option<u16>, i64)> = c
-                    .prepare(
-                        "SELECT seed, price_cents FROM observations WHERE grp = ?1 AND name = ?2 AND relisted = 0
-                         AND gone_at IS NOT NULL AND gone_at - first_seen <= ?3",
-                    )?
-                    .query_map(params![grp, name, FAST], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<rusqlite::Result<_>>()?;
+                let gone = vanished(c, &grp, &name)?;
                 sales.extend(gone.into_iter().map(|(s, p)| (s, p as f64 / b as f64)));
             }
+            sales.retain(|(s, _)| proves(*s));
             // ainda visto nas últimas 6 h: o registro não marca sumiço de consulta que deixou de rodar
             let parked: u32 = c.query_row(
                 "SELECT count(*) FROM observations WHERE grp = ?1 AND gone_at IS NULL AND first_seen <= ?2
@@ -737,7 +752,7 @@ async fn appraise(
     // Vende-se na Steam: com fechamentos suficientes lá, o prêmio é o que a Steam pagou, não o do CSFloat.
     let mut on_steam = false;
     if let (Some(g), Some(b), Some(r)) = (&group, base_cents.filter(|b| *b > 0), rare.as_mut()) {
-        let closed = steam_closed(h, &l.name, &g.key, b).await?;
+        let closed = steam_closed(h, l, &g.key, b).await?;
         if closed.len() >= sell::RARE_MIN_SALES {
             (r.multiples, on_steam) = (closed, true);
         }
@@ -1475,7 +1490,19 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>, reserved_a
 
 #[cfg(test)]
 mod tests {
-    use super::rare_multiples;
+    use super::{proves, rare_multiples};
+
+    #[test]
+    fn a_better_seed_does_not_prove_a_worse_one() {
+        // SSG 08 Acid Fade: #690 tem 99,15 % de fade (rank 14), #236 99,14 % (rank 15), #575 99,97 % (rank 2)
+        let p = proves("SSG 08 | Acid Fade (Factory New)", Some(690));
+        assert!(p(Some(690)) && p(Some(236)));
+        assert!(!p(Some(575)) && !p(None));
+        // skin sem nota: o grupo inteiro prova
+        assert!(proves("Glock-18 | Moonrise (Field-Tested)", Some(59))(
+            Some(1)
+        ));
+    }
 
     #[test]
     fn why_names_the_reason_for_each_kind() {

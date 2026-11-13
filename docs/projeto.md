@@ -405,7 +405,9 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    - Prazos e régua são hipóteses de calibração. Tudo fica 60 dias.
 5. **Selo do raro (`pricing/premium.rs`).** Todo raro que vira aviso leva um selo; a regra do aviso não muda.
    - Vendas fechadas do grupo: as do CSFloat guardadas (`csfloat_sales`) e os anúncios da mesma skin no grupo que
-     sumiram em até 48 h sem relistagem (múltiplo = preço ÷ preço médio comum da skin, sem prêmio).
+     sumiram em até 48 h sem relistagem (múltiplo = preço ÷ preço médio comum da skin, sem prêmio). Valem os mesmos
+     dois filtros da prova da Steam (13/11, abaixo): seed de nota melhor não prova o pior, e sumiço com anúncio mais
+     barato do mesmo seed à venda não é venda.
    - Prêmio = média geométrica encolhida seed → grupo → 1× com 5 vendas fictícias por nível; p25/p75 das vendas da
      seed quando ela tem ≥ 10, senão das do grupo.
    - "Comprovado" = ≥ 10 vendas fechadas e vender a `base × p25` ainda dá o lucro e a margem mínimos do aviso
@@ -598,6 +600,18 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   float fica de fora: os anúncios da faixa são pedidos a preço comum e somem como comum (205 fechamentos de Red
   Quartz a 0,99×), a mediana não mede o prêmio. Limites: sumir não é vender com certeza e anúncio barato some
   primeiro (a mediana tende para baixo); 3 fechamentos e 48 h são hipóteses.
+  **Dois filtros no sumiço (13/11):** o caso foi o SSG 08 Acid Fade #690 a R$ 19,46 previsto a R$ 47,04 (10,6× o
+  comum) por 8 sumiços do grupo "Acid Fade 99%+", todos de outros seeds.
+  (1) Em skin com nota (% de azul, % do fade) o sumiço e a venda do selo só provam seed de nota igual ou melhor
+  que a do seed vendido (`detect::proves`): dentro do grupo o prêmio cai com a nota. Vendas do CSFloat do Acid Fade:
+  rank 1 a 27× o comum, rank 2 a 10,6×, ranks 3 e 4 a 5,4–6,6×, ranks 9 a 17 a ~3×; o #690 é o rank 14 e as duas
+  vendas dele saíram a 2,3× e 3,4×. Os 8 sumiços eram dos ranks 2 a 5.
+  (2) Sumiço não conta quando um anúncio mais barato do mesmo nome e seed estava à venda junto e continuou depois
+  (`teacher::NO_CHEAPER_TWIN`, também no rótulo das compras virtuais): quem compra leva o mais barato. No banco de
+  13/11, 19 dos 75 sumiços em grupo de pattern eram assim (R$ 163,08 "vendido" com o mesmo seed parado a
+  R$ 59,88); no Acid Fade 99%+ sobram 2 dos 8, e 5 dos 14 pares nome+grupo com 3 ou mais sumiços ficam com menos
+  de 3 e voltam para a prova do CSFloat. Ressalva: o `grp` gravado em `observations` é o da hora em que o anúncio
+  foi visto; sumiço antigo guardado com outra chave de grupo não entra na prova nova.
 - Prazo `eta_hours` = 24 / (vendas/dia × fração do peso com mediana ≥ preço), depois da trava.
 - Confiança: alta (≥ 20 vendas/dia e ≥ 100 pontos em 7 dias; raro com n ≥ 8), média (≥ 5/dia; raro n ≥ 3),
   baixa no resto.

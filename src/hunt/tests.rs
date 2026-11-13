@@ -1638,6 +1638,41 @@ async fn rare_premium_comes_from_what_closed_on_steam_when_there_is_enough() {
 }
 
 #[tokio::test]
+async fn a_listing_that_vanished_above_a_cheaper_one_of_the_same_seed_is_not_a_sale() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    // os mesmos três sumiços a R$ 34,71, mas o seed 59 estava à venda a R$ 20,00 antes e continuou depois
+    db.call(|c| {
+        for (id, price, last, gone) in [
+            ("gone0", 3471, NOW - 86_400, Some(NOW - 82_800)),
+            ("gone1", 3471, NOW - 86_400, Some(NOW - 82_800)),
+            ("gone2", 3471, NOW - 86_400, Some(NOW - 82_800)),
+            ("twin", 2000, NOW - 60, None),
+        ] {
+            c.execute(
+                "INSERT INTO observations(listing_id, name, query, grp, price_cents, seed, first_seen, last_seen,
+                    cheapest, gone_at)
+                 VALUES (?1, ?2, 'q', 'cs:Glock-18 | Moonrise:t1', ?3, 59, ?4, ?5, 0, ?6)",
+                rusqlite::params![id, MOON, price, NOW - 90_000, last, gone],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let found = run_until_two(&h, &mut rx).await;
+    let t1 = found.iter().find(|o| o.id == ID_T1).unwrap();
+    assert!(
+        !t1.evidence.contains("prêmio medido na Steam"),
+        "{}",
+        t1.evidence
+    );
+}
+
+#[tokio::test]
 async fn rare_never_sells_above_the_same_pattern_listed_in_a_better_wear() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();
