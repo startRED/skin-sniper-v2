@@ -426,6 +426,12 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
        `peso × W·(1 − e^(−Δ/W))` da faixa lida, gravada com a leitura (`reads.gap`, `reads.weight`); `λ` é a taxa
        da classe, onde o alvo novo começa; `√a` é o otimismo de contagem, que some com medida; `r` e exposição
        pesam metade a cada `H`.
+   - **Chance de compra por skin (13/11):** o `lucro` da faixa é multiplicado por (bons + 1) ÷ (vistos + 10): vistos =
+     anúncios de seed pagante da skin avaliados em 14 dias (inclusive acima do saldo), bons = os que deram lucro no
+     preço médio ou viraram aviso (`catalog::load_deals`). Medido em 12/11 (6,6 dias): Heat Treated da Desert Eagle
+     0 em 847 (quem anuncia seed de azul já pede preço de azul), Five-SeveN Heat Treated 0 em 339, Serpent Strike 5
+     em 41, MP7 Amberline 4 em 81. Antes, a conta supunha todo anúncio novo comprado no piso comum e a agenda pôs
+     82 % das leituras no Heat Treated. O prior 1/10 é hipótese.
    - **Teto por seca:** sem anúncio novo em `s` de exposição seguidos, a taxa não passa de `3 ÷ s`.
    - **Primeira leitura da faixa não ensina (12/11, depois de 2,5 h rodando):** tudo o que está à venda numa faixa
      nunca lida é "novo" para o app. Medido: 10 "novos" na 1ª leitura do Solitude e 0 nas 25 seguintes; os 4

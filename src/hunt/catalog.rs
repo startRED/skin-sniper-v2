@@ -259,6 +259,51 @@ pub struct Ctx<'a> {
     pub floors: &'a HashMap<String, (Option<i64>, i64)>,
     /// Patterns aprendidos: seeds com prova entram na busca rara da skin junto com os da tabela.
     pub learned: &'a Learned,
+    /// Quantos anúncios de seed pagante de cada skin o avaliador já viu e quantos davam lucro (`load_deals`).
+    pub deals: &'a Deals,
+}
+
+/// Skin-base → (anúncios de seed pagante vistos, quantos o avaliador achou com lucro), últimos 14 dias.
+pub type Deals = HashMap<String, (u32, u32)>;
+const DEALS_DAYS: i64 = 14;
+/// Prior da chance de compra: 1 bom em 10 vistos. Skin sem medida começa otimista e é testada.
+// shortcut: 1/10 é hipótese; em 12/11 a melhor skin medida (Serpent Strike) deu 5 em 41.
+const DEAL_PRIOR: (f64, f64) = (1.0, 10.0);
+
+/// Chance de um anúncio de seed pagante da skin ser compra (lucro no preço médio pelo avaliador).
+/// Medido em 12/11 (6,6 dias): Heat Treated da Desert Eagle 0 em 847, Serpent Strike 5 em 41. Sem isso a agenda
+/// supunha todo anúncio novo comprado no piso comum e gastava 82 % das leituras no Heat Treated, onde quem anuncia
+/// seed de azul já pede preço de azul.
+fn deal_chance(deals: &Deals, base: &str) -> f64 {
+    let (seen, good) = deals.get(base).copied().unwrap_or((0, 0));
+    (f64::from(good) + DEAL_PRIOR.0) / (f64::from(seen) + DEAL_PRIOR.1)
+}
+
+/// Conta, por skin, os anúncios de seed pagante avaliados (inclusive os acima do saldo, que a auditoria grava) e
+/// os que deram lucro no preço médio ou viraram aviso.
+pub async fn load_deals(db: &Db, learned: &Learned, now: i64) -> Result<Deals> {
+    let rows: Vec<(String, u16, u32, u32)> = db
+        .call(move |c| {
+            c.prepare(
+                "SELECT name, seed, COUNT(DISTINCT listing_id),
+                        COUNT(DISTINCT CASE WHEN reason = 'aprovada' OR mid_profit_cents >= 0 THEN listing_id END)
+                 FROM evaluations WHERE seed IS NOT NULL AND at >= ?1 GROUP BY name, seed",
+            )?
+            .query_map([now - DEALS_DAYS * 86_400], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect()
+        })
+        .await?;
+    let mut out = Deals::new();
+    for (name, seed, seen, good) in rows {
+        let base = skin_base(&name);
+        if learned.get(base).is_some_and(|m| m.contains_key(&seed)) {
+            let e = out.entry(base.to_string()).or_default();
+            *e = (e.0 + seen, e.1 + good);
+        }
+    }
+    Ok(out)
 }
 
 /// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 1 venda/dia e lucro possível ≥ mínimo, por nota
@@ -350,9 +395,10 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                 && seen.floor.is_some_and(|f| f > c.saldo);
             (!out).then(|| {
                 // Por faixa: seeds × giro (anúncios novos esperados, a menos de uma constante que a agenda aprende)
-                // e o lucro de comprar no piso comum e vender pela mediana da prova do seed. Sem prova (tabela,
-                // instalação nova) cada seed vale 1 centavo: a agenda só reveza.
+                // e o lucro esperado de um anúncio novo: chance de ser compra × (vender pela mediana da prova do
+                // seed − comprar no piso comum). Sem prova (tabela, instalação nova) cada seed vale 1 centavo.
                 let proof = c.learned.get(skin_base(name));
+                let chance = deal_chance(c.deals, skin_base(name));
                 let ranges: Vec<Range> = seeds
                     .iter()
                     .map(|&(lo, hi)| {
@@ -367,7 +413,7 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                             .sum();
                         Range {
                             weight: n * spd,
-                            gain: gain / n,
+                            gain: chance * gain / n,
                         }
                     })
                     .collect();
@@ -979,6 +1025,7 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         return Ok(());
     };
     let items = load_items(&h.db).await?;
+    let deals = load_deals(&h.db, &learned, now).await?;
     let boost = h.lock().queue.boosts(now);
     let ctx = Ctx {
         ratio,
@@ -987,6 +1034,7 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         boost: &boost,
         floors: &floors,
         learned: &learned,
+        deals: &deals,
     };
     let (mut tasks, ranges) = select_ranges(&items, &ctx);
     if h.cheap.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1171,6 +1219,7 @@ mod tests {
                     boost: &HashMap::new(),
                     floors: &HashMap::new(),
                     learned: &Learned::new(),
+                    deals: &Deals::new(),
                 }
             )
             .is_empty(),
@@ -1335,10 +1384,12 @@ mod tests {
             boost,
             floors,
             learned: &NO_LEARNED,
+            deals: &NO_DEALS,
         }
     }
 
     static NO_LEARNED: std::sync::LazyLock<Learned> = std::sync::LazyLock::new(Learned::new);
+    static NO_DEALS: std::sync::LazyLock<Deals> = std::sync::LazyLock::new(Deals::new);
 
     #[test]
     fn measured_skins_hunt_only_their_paying_seeds_and_each_range_carries_weight_and_gain() {
@@ -1382,6 +1433,14 @@ mod tests {
         let (m, a) = (ranges[&moon.id][0], ranges[&awp.id][0]);
         assert!((m.weight + a.weight - 2.0).abs() < 1e-9, "{m:?} {a:?}");
         assert!(m.gain > 1.0 && a.gain > 1.0, "{m:?} {a:?}");
+        // a Moonrise mostrou 90 anúncios de seed pagante sem nenhuma compra: o lucro esperado cai 10×
+        let deals = Deals::from([("Glock-18 | Moonrise".to_string(), (90, 0))]);
+        let (_, measured) = select_ranges(&items, &Ctx { deals: &deals, ..c });
+        let m2 = measured[&moon.id][0];
+        assert!(
+            (m2.gain * 10.0 - m.gain).abs() < 1e-6 * m.gain,
+            "{m:?} {m2:?}"
+        );
         assert!(
             select(&items, &ctx(saldo, &boost, &floors))
                 .iter()
