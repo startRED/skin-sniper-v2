@@ -419,12 +419,19 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    `docs/superpowers/specs/2026-11-12-so-pattern-design.md` (o de 10/11,
    `2026-11-10-aprendizado-unificado-design.md`, descreve a conta por alvo que esta substitui).
    - **Unidade = faixa de seed.** Uma consulta de anúncios filtra uma faixa de seeds de uma skin × desgaste. A
-     agenda compara faixas: `V = taxa × peso × L·(1 − e^(−Δ/L)) × lucro`, em centavos esperados.
+     agenda compara faixas: `V = taxa × peso × W·(1 − e^(−Δ/W)) × lucro`, em centavos esperados: anúncios novos de
+     seed pagante esperados desde a última leitura da faixa × lucro por anúncio. Toda leitura custa uma consulta de
+     anúncios (medido em 13/11: 1,00 a 1,03 por leitura), então dividir pelo custo não muda a ordem.
      - `peso` = seeds pagantes da faixa × vendas/dia da skin, normalizado para média 1 entre as faixas
        selecionadas: quanto de anúncio novo a faixa deve receber;
-     - `Δ` = segundos desde a última leitura **da faixa** (`progress.seen`, sobrevive a reinício); `L` = percentil
-       25 da vida dos anúncios mais baratos que sumiram sem relistagem (7 dias, ≥ 20 medidas, piso 60 s), senão
-       900 s;
+     - `Δ` = segundos desde a última leitura **da faixa** (`progress.seen`, sobrevive a reinício); `W` = a janela
+       da `taxa` (abaixo). **Estoque da faixa (13/11):** era `L` = percentil 25 da vida dos anúncios mais baratos
+       (792 s), que vale para anúncio comum. Medido em 20 h de leituras de faixa: anúncio novo ≤ saldo por leitura
+       foi 0,004 com a faixa relida a < 5 min e 0,18 a 1–4 h, e a agenda relia as mesmas 2 faixas a cada 2–3 min
+       (1 294 de 2 073 leituras, 5 anúncios novos). Com a caça barata desligada, o ajuste de `W` usa só as
+       releituras de faixa (escolheu 28 800 s, o topo da grade). Simulação de 7 dias × 10 sorteios
+       (`hunt/agenda_sim.rs`, premissas lá): anúncios novos por leitura iguais ou maiores que a conta antiga em 6
+       cenários (vida 15 min a 12 h × mercado observado/giro), de 0 a +54 %;
      - `lucro` = líquido de vender pelo piso comum × mediana da prova dos seeds da faixa − o piso comum, em
        centavos (mínimo 1);
      - `taxa` = anúncios novos dentro do saldo por segundo e por peso, medida no alvo (skin × desgaste):
@@ -462,7 +469,7 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    - **Migração:** a exposição mudou de unidade, então `r`/exposição dos alvos raros e as leituras antigas de raro
      foram zerados; os alvos de float saíram. O ajuste de parâmetros só volta a trocar depois de ≥ 1 000 leituras
      novas (~8 h de caça).
-   - **Hipóteses, não medidas:** `L` = 900 s para anúncio raro; `W` = 2 h, `m` = 1, `H` = 72 h (medidos em 10/11
+   - **Hipóteses, não medidas:** a vida do anúncio raro barato (9 sumiços em 215 vistos); `W` = 2 h, `m` = 1, `H` = 72 h (medidos em 10/11
      na conta antiga, por alvo); `Z` = 1; o teto de 3; `worth` como sinal de lucro (o app teve 5 oportunidades em
      toda a vida, então lucro realizado não dá para comparar braços); o lucro usa razão do CSFloat.
    - **Vieses conhecidos do placar:** o rodízio lê faixas com mais tempo parado, então acha mais estoque por
