@@ -55,7 +55,7 @@ const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
 // o ritmo não explica a duração. 42 s (86/h + ~11/h de descoberta + avaliação ≈ 100/h) é o teto pedido pelo
 // Erick, não um número medido como seguro. 12/11: com o Chrome (#107), 24 h a ~75 anúncios/h + histórico tiveram
 // só 2 rajadas curtas de 429; o Erick pediu 28 s. Se voltar bloqueio de horas, é o primeiro número a desfazer.
-const LISTINGS_REST_SECS: i64 = 28;
+pub(super) const LISTINGS_REST_SECS: i64 = 28;
 /// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
 // Medido em 12/11/2026 (24 h): MP7 | Amberline (seed) falhou 287 de 464 tentativas e Serpent Strike (seed) 129 de
 // 366; cada falha são 2 requisições (a repetição de 5 s falha junto ~9 em 10 vezes) e o alvo voltava a ser
@@ -1695,6 +1695,10 @@ pub async fn run(h: Arc<Hunt>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "agenda_sim.rs"]
+mod agenda_sim;
 
 #[cfg(test)]
 mod tests {
