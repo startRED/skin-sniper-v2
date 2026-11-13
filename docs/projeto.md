@@ -41,6 +41,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo (o chaveiro entra 
 | `pricing/fees.rs` | taxa em centavos inteiros e inverso por busca binária |
 | `pricing/sell.rs` | três preços de venda, prazo, confiança |
 | `pricing/premium.rs` | prêmio do raro que fecha (seed → grupo → 1×) e o selo "comprovado" |
+| `pricing/rarity.rs` | valor esperado do seed com limite inferior (encolhimento em cadeia), corte de saída, tendência, teto de exploração |
 | `pricing/groups.rs` | grupo raro de um anúncio (tier de pattern, fase Doppler, faixa de fade) a partir das tabelas |
 | `pricing/combo.rs` | melhor combinação de anúncios que cabe no saldo (mochila em centavos) |
 | `hunt/catalog.rs` | descoberta e seleção do que vigiar dado o saldo |
@@ -542,18 +543,32 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   `named.json` com 28 grupos nomeados em 22 skins, `blue.json` com o % de azul por seed de 5 skins) só indicam
   candidatos. Quem decide se um seed é raro são as vendas guardadas do CSFloat (`csfloat_sales`, sem adesivo nem
   chaveiro). Cada venda vira uma razão sobre o preço comum do nome (a mediana das vendas dele, com ≥ 10 vendas
-  limpas). O seed paga quando:
-  1. a skin tem nota por seed (% de azul ou % do fade): as 8 vendas de nota igual ou pior mais próximas da dele
-     têm mediana ≥ 1,5× e quartil de baixo ≥ 1,2×. Seed melhor herda a prova do pior;
-  2. é seed de tabela com 3+ vendas próprias: as vendas dele passam no mesmo teste;
-  3. é seed de tabela com menos de 3 vendas: as vendas do grupo dele passam com quartil de baixo ≥ 1,5×;
-  4. não está em tabela nenhuma: 3+ vendas próprias com o quartil de baixo a ≥ 2×.
-  O quartil de baixo arredonda para baixo: com 3 ou 4 vendas é a pior delas. O seed pagante sem grupo de tabela
-  vira `learned:<skin>:<seed>` ("Pattern #seed"); o prêmio são as razões da prova.
-  - **Prova por desgaste (13/11).** Nas regras 2 a 4 (skin sem nota) só contam vendas no desgaste do anúncio ou num
+  limpas). Desde 13/11 não há "provado ou não": cada seed tem um **valor esperado com limite inferior**
+  (`pricing::rarity`). O prêmio (log da razão) é encolhido em cadeia, do geral ao específico: neutro (1×) → resto
+  da skin → tabela externa (`hunt::external`, se o arquivo existir) → seeds do mesmo grupo (irmãos de tabela, ou as
+  8 notas vizinhas e piores em skin com nota, com o veto de cima das 8 notas iguais ou melhores) → vendas do
+  próprio seed. Cada nível pesa `k` = 5 vendas fictícias do nível de cima e dá média e variância (σ = 0,35 no log);
+  com pouca prova a média fica perto do pai e o limite inferior (média − 1,64 desvio) cai. Sai um trio
+  `[inferior, esperado, de cima]` com o corte de saída: o prêmio (o que passa de 1×) perde 15 % (a revenda mediana
+  fica 8,3 % abaixo da venda anterior) e mais até 30 % se a média geométrica do grupo nos últimos 15 dias caiu contra
+  a dos 15 anteriores. O seed entra no catálogo (`Learned`, alvo da agenda) quando o esperado, comprando no piso
+  comum, rende a margem mínima de lista (10 %) e há 3+ vendas dele e do grupo. O seed sem tabela vira
+  `learned:<skin>:<seed>` ("Pattern #seed"). **Catálogo dos dados:** `k` cai (até 1) na skin onde o seed pesa no
+  preço de forma significativa (teste de permutação sobre os seeds com 2+ vendas, p < 5 %, `rarity::seed_k`); é
+  assim que uma skin fora das tabelas entra sozinha. As listas (`named`, `blue`, IA) só decidem quem é irmão de
+  quem. **Dupla fonte:** se a tabela externa (`research/cs2pattern-prices.json`, formato em `hunt/external.rs`)
+  mostra menos da metade do prêmio que as vendas daqui, o seed é pulado; arquivo ausente = sem segunda fonte.
+  - **Compra (`detect::verdict`).** Prêmio com lucro líquido positivo também no limite inferior: compra, e o preço
+    não passa do saldo × (limite inferior − 1) ÷ (esperado − 1) (tamanho proporcional à confiança). Senão, se só o
+    limite inferior barrou, o esperado paga a régua de lista e vendido como comum o anúncio perde ≤ R$ 0,50: **compra
+    de exploração** (piso seguro, gera dado), marcada `explore`, limitada ao teto de 12 % do capital (saldo +
+    compras sem venda informada) contado em `purchases`; a chave `explore_cap_pct` de `settings` troca, 0 desliga.
+    O tempo de venda do preço médio vem da fila: anúncios vivos do mesmo seed por esse preço ou menos ÷ (giro do nome
+    × parte das vendas guardadas que é desse seed).
+  - **Prova por desgaste (13/11).** Em skin sem nota só contam vendas no desgaste do anúncio ou num
     pior: o seed pode ser raro no Factory New e comum no Battle-Scarred. Medido nas vendas guardadas, em 371 pares
     do mesmo seed que pagava ≥ 1,5× no desgaste melhor: sem nota, 44 de 221 ainda pagavam ≥ 1,5× no pior; com nota,
-    126 de 150 (por isso a regra 1 continua valendo em todos os desgastes). O caso que mostrou: MAC-10 Snow Splash
+    126 de 150 (por isso a prova por nota vale em todos os desgastes). O caso que mostrou: MAC-10 Snow Splash
     #309 Battle-Scarred a R$ 0,34 previsto a R$ 11,84 por três vendas Factory New, com 19 anúncios do mesmo seed em
     desgaste melhor parados a partir de R$ 0,75. Segunda trava, para todo raro: o preço rápido e o médio não passam
     do menor anúncio vivo do mesmo grupo num desgaste melhor do mesmo item (o desgaste pior saiu mais barato ou
@@ -579,8 +594,15 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
     Exothermic (1). Saíram seeds de tier 1 que vendem a preço comum (Solitude 95/112/154, Trace Lock 309/390).
   - **Prova retroativa (`patterns::backtest`):** cada venda é prevista só com as vendas anteriores a ela. Em 12/11:
     336 vendas de seed que já pagava; 97 % saíram a ≥ 1,15× o comum; real ÷ previsto 1,12 (mediana). Os limites
-    (1,5 / 1,2 / 2,0, 8 vizinhas, 3 vendas) foram escolhidos olhando esse mesmo retrato, então o número é
+    (1,5 / 1,2 / 2,0, 8 vizinhas, 3 vendas, regra de antes de 13/11) foram escolhidos olhando esse mesmo retrato, então o número é
     otimista; o placar refaz a conta a cada hora com as vendas novas, que a regra não viu.
+  - **Valor esperado, medido em 13/11** (48 411 vendas, cópia do banco, `catalog_on_a_real_db`): candidatos de 18
+    skins e 239 seeds para 24 skins e 372 seeds (442 skins medidas, 24 com efeito de seed significativo). Fora da
+    amostra (`k` das vendas até a mediana do tempo, previsão das seguintes só com as anteriores a cada uma): 325
+    vendas, 94,8 % a ≥ 1,15× o comum, real ÷ esperado 1,26 (mediana; o corte de 15 % deixa o esperado abaixo do real) e
+    6,5 % abaixo do limite inferior (5 % nominais). Dos 11 790 anúncios com seed já observados, 2 421 são de seed
+    candidato, mas só 4 têm lucro no preço médio e 1 passa a régua: o anúncio de seed raro já vem pedido pelo prêmio,
+    então mais candidatos quase não geram aviso (antes da regra: 1). Compra de exploração: 0 anúncios observados.
   - **Limites:** razão do CSFloat não é preço da Steam (medido em 11/11: Center Star 1,6× lá × 2,0–2,6× aqui;
     High Beam T1 2,9× × 1,4×); skin com menos de 10 vendas limpas por nome não é medida e não é caçada; facas e
     luvas ficam fora; a tabela `learned_sales` fica no banco, sem uso.

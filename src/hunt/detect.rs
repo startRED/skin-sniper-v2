@@ -9,6 +9,7 @@ use crate::notify::{Alert, NotifyError};
 use crate::pricing::brl;
 use crate::pricing::groups::{Group, group_of, score, skin_base, wear_index};
 use crate::pricing::premium::{self, Seal};
+use crate::pricing::rarity;
 use crate::pricing::sell::{self, Confidence as SellConfidence, PricePoint, RareEvidence};
 use crate::steam::client::Error as SteamError;
 use crate::steam::history;
@@ -64,6 +65,74 @@ const UNPROVEN_MAX_LOSS_CENTS: i64 = 50;
 
 pub(super) fn unproven_loses_too_much(quick_profit_cents: i64) -> bool {
     quick_profit_cents < -UNPROVEN_MAX_LOSS_CENTS
+}
+
+/// O que fazer com um anúncio avaliado. Prêmio que se sustenta no limite inferior (lucro líquido positivo lá,
+/// `listable`): compra, com o preço limitado a uma fração do saldo igual à parte do prêmio esperado que o limite
+/// inferior mantém (`rarity::stake_cap`: o tamanho acompanha a confiança). Senão, se só o limite inferior barrou
+/// e vendido como comum perde no máximo centavos (piso seguro): exploração, que gera dado, dentro do teto em banco.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    Buy,
+    Explore,
+    Refuse(&'static str),
+}
+
+fn verdict(
+    ev: &sell::Evaluation,
+    premium: Option<[f64; 3]>,
+    saldo: i64,
+    price_cents: i64,
+) -> Verdict {
+    if ev.listable {
+        return match premium {
+            Some(t) if price_cents > rarity::stake_cap(saldo, &t) => {
+                Verdict::Refuse("acima_da_confianca")
+            }
+            _ => Verdict::Buy,
+        };
+    }
+    match ev.lower_profit_cents {
+        Some(_) if ev.mid_ok && unproven_loses_too_much(ev.sell.quick.profit_cents) => {
+            Verdict::Refuse("raro_nao_comprovado")
+        }
+        Some(_) if ev.mid_ok => Verdict::Explore,
+        _ => Verdict::Refuse("sem_lucro"),
+    }
+}
+
+/// Teto de exploração em % do capital (saldo + o que está comprado e não vendido); a chave `explore_cap_pct` de
+/// `settings` troca. 12 % do pedido (10–15 %): com saldo de R$ 36 são ~R$ 4,30 abertos em compra de exploração.
+const EXPLORE_CAP_KEY: &str = "explore_cap_pct";
+const EXPLORE_CAP_PCT: i64 = 12;
+
+/// `(aberto em exploração, aberto no total)`: preço das compras registradas ainda sem venda informada.
+fn open_purchases(c: &rusqlite::Connection) -> rusqlite::Result<(i64, i64)> {
+    c.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN json_extract(p.json, '$.explore') = 1 THEN json_extract(p.json, '$.price_cents') END), 0),
+                COALESCE(SUM(json_extract(p.json, '$.price_cents')), 0)
+         FROM purchases p WHERE NOT EXISTS (SELECT 1 FROM outcomes o WHERE o.purchase_id = p.id)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
+/// A compra de exploração de `price_cents` cabe no teto, contando o que já está aberto no banco?
+pub(super) async fn explore_fits(h: &Hunt, price_cents: i64) -> Result<bool> {
+    let pct = h
+        .settings
+        .get(EXPLORE_CAP_KEY)
+        .await?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(EXPLORE_CAP_PCT);
+    let (open_explore, open_all) = h.db.call(|c| open_purchases(c)).await?;
+    Ok(rarity::explore_allows(
+        price_cents,
+        open_explore,
+        open_all,
+        h.saldo(),
+        pct,
+    ))
 }
 
 fn profit_text(c: i64) -> String {
@@ -375,6 +444,7 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
         .await?;
     Ok(RareEvidence {
         multiples: rare_multiples(&rows, name, group_key),
+        ..Default::default()
     })
 }
 
@@ -726,6 +796,8 @@ struct Appraisal {
     correction: f64,
     base_cents: Option<i64>,
     est: std::result::Result<sell::SellEstimate, sell::NoEstimate>,
+    /// `[limite inferior, esperado, limite de cima]` do prêmio do seed aprendido (`patterns`), se o preço dele vem daí.
+    premium: Option<[f64; 3]>,
 }
 
 async fn appraise(
@@ -743,9 +815,17 @@ async fn appraise(
         .as_ref()
         .and_then(|_| sell::estimate(&points, now, None, None).ok())
         .map(|e| e.mid.price_cents);
+    let mut premium = None;
     let mut rare = match (&group, learned) {
-        // pattern aprendido: o prêmio são as vendas que ensinaram (no desgaste do anúncio ou pior), não as da página
-        (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
+        // pattern aprendido: o prêmio é o esperado das vendas que ensinaram (no desgaste do anúncio ou pior), com o
+        // limite inferior que barra a compra, não as vendas da página
+        (Some(g), Some((lg, multiples))) if g.key == lg.key => {
+            premium = <[f64; 3]>::try_from(multiples.as_slice()).ok();
+            Some(RareEvidence {
+                multiples,
+                posterior: true,
+            })
+        }
         (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
         (None, _) => None,
     };
@@ -754,7 +834,8 @@ async fn appraise(
     if let (Some(g), Some(b), Some(r)) = (&group, base_cents.filter(|b| *b > 0), rare.as_mut()) {
         let closed = steam_closed(h, l, &g.key, b).await?;
         if closed.len() >= sell::RARE_MIN_SALES {
-            (r.multiples, on_steam) = (closed, true);
+            (r.multiples, r.posterior, on_steam) = (closed, false, true);
+            premium = None;
         }
     }
     let better = match &group {
@@ -774,12 +855,40 @@ async fn appraise(
             est.evidence +=
                 " · prêmio medido na Steam: anúncios do grupo que sumiram em até 48 h sem voltar";
         }
+        // tempo de venda pela fila do seed: anúncios dele já à venda por esse preço ou menos
+        if let (Some(_), Some(seed)) = (premium, l.seed) {
+            let (name, own, price) = (l.name.clone(), l.listing_id.clone(), est.mid.price_cents);
+            let (ahead, seed_sales, name_sales): (i64, i64, i64) =
+                h.db.call(move |c| {
+                    let ahead = c.query_row(
+                        "SELECT count(*) FROM observations WHERE name = ?1 AND seed = ?2 AND listing_id != ?3
+                         AND gone_at IS NULL AND last_seen >= ?4 AND price_cents <= ?5",
+                        params![name, seed, own, now - FLOOR_TTL, price],
+                        |r| r.get(0),
+                    )?;
+                    let (s, n) = c.query_row(
+                        "SELECT COALESCE(SUM(seed = ?2), 0), count(*) FROM csfloat_sales WHERE name = ?1",
+                        params![name, seed],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    Ok((ahead, s, n))
+                })
+                .await?;
+            if name_sales > 0 {
+                est.mid.eta_hours = rarity::queue_eta_hours(
+                    ahead as usize,
+                    est.sales_per_day,
+                    seed_sales as f64 / name_sales as f64,
+                );
+            }
+        }
     }
     Ok(Appraisal {
         group,
         correction,
         base_cents,
         est,
+        premium,
     })
 }
 
@@ -839,6 +948,7 @@ async fn evaluate_one(
         correction,
         base_cents,
         est,
+        premium,
     } = appraise(h, l, points, others_min, now).await?;
     let mut est = match est {
         Ok(est) => est,
@@ -888,6 +998,9 @@ async fn evaluate_one(
     for t in [&mut ev.sell.high, &mut ev.sell.mid, &mut ev.sell.quick] {
         t.profit_cents += extra;
     }
+    if let Some(p) = &mut ev.lower_profit_cents {
+        *p += extra;
+    }
     if gain > 0 {
         // a margem é sobre o que sai do saldo, não sobre o custo abatido
         ev.margin_pct = ev.sell.mid.profit_cents as f64 * 100.0 / l.price_cents as f64;
@@ -898,6 +1011,25 @@ async fn evaluate_one(
         mid_cents: ev.sell.mid.profit_cents,
         quick_cents: ev.sell.quick.profit_cents,
     });
+    // Raro com prêmio estimado: compra de dois tipos (`verdict`). Exploração: o teto vem do banco.
+    let mut explore = false;
+    let mut refused = None;
+    match verdict(&ev, premium, h.saldo(), l.price_cents) {
+        Verdict::Buy => {}
+        Verdict::Refuse(reason) => refused = Some(reason),
+        Verdict::Explore if !explore_fits(h, l.price_cents).await? => {
+            refused = Some("teto_de_exploracao");
+        }
+        Verdict::Explore => {
+            explore = true;
+            (ev.listable, ev.notify) = (true, ev.mid_notify);
+            est.evidence += &format!(
+                " · exploração (piso seguro): o prêmio ainda não se sustenta no limite inferior ({}), mas vendido como comum perde no máximo {}",
+                brl(ev.lower_profit_cents.unwrap_or(0)),
+                brl(ev.sell.quick.profit_cents.min(0).abs())
+            );
+        }
+    }
     // Com chaveiro o professor não aprende: o lucro não vem só da venda da arma.
     let ghost_worthy =
         charm.is_none() && super::teacher::ghost_worthy(l.price_cents, ev.sell.mid.profit_cents);
@@ -909,13 +1041,13 @@ async fn evaluate_one(
         mid_price_cents: ev.sell.mid.price_cents,
         mid_net_cents: ev.sell.mid.net_cents,
         base_cents,
-        approved: ev.listable,
+        approved: ev.listable && refused.is_none(),
     });
-    if !ev.listable {
+    if let Some(reason) = refused {
         return Ok(Judged {
             found: None,
             near,
-            refused: Some("sem_lucro"),
+            refused: Some(reason),
             detail: Some(est.evidence),
             ghost,
         });
@@ -929,7 +1061,9 @@ async fn evaluate_one(
     // Raro sem nenhuma venda fechada que prove o prêmio só é oportunidade se, vendido como comum, perde no máximo
     // centavos (11/11: Serpent Strike #804 a R$ 3,56 com prêmio de 3 vendas no CSFloat, 0 fechadas, −R$ 0,91 no rápido;
     // 13/11: MAC-10 Snow Splash #309 a R$ 0,34, 20–56× no CSFloat, recusado por −R$ 0,18).
-    if seal.as_ref().is_some_and(|s| !s.proven && s.sales == 0)
+    // Com prêmio estimado (limite inferior) o corte acima já fez isso; esta é a regra de antes, para o raro sem ele.
+    if ev.lower_profit_cents.is_none()
+        && seal.as_ref().is_some_and(|s| !s.proven && s.sales == 0)
         && unproven_loses_too_much(ev.sell.quick.profit_cents)
     {
         return Ok(Judged {
@@ -975,6 +1109,7 @@ async fn evaluate_one(
         gone_at: None,
         gone_reason: None,
         seal,
+        explore,
     };
     let detail = Some(opp.evidence.clone());
     Ok(Judged {
@@ -1490,7 +1625,61 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>, reserved_a
 
 #[cfg(test)]
 mod tests {
-    use super::{proves, rare_multiples};
+    use super::{Verdict, proves, rare_multiples, verdict};
+    use crate::pricing::sell::{Evaluation, Sell, SellTier};
+
+    fn ev(listable: bool, mid_ok: bool, lower: Option<i64>, quick: i64) -> Evaluation {
+        let t = |profit_cents| SellTier {
+            price_cents: 0,
+            net_cents: 0,
+            profit_cents,
+            eta_hours: None,
+        };
+        Evaluation {
+            sell: Sell {
+                high: t(0),
+                mid: t(0),
+                quick: t(quick),
+            },
+            ev_profit_cents: None,
+            days_locked: None,
+            profit_per_day_cents: None,
+            margin_pct: 0.0,
+            safe: false,
+            listable,
+            notify: false,
+            lower_profit_cents: lower,
+            mid_ok,
+            mid_notify: false,
+        }
+    }
+
+    #[test]
+    fn two_kinds_of_buy_one_sized_by_confidence_and_one_by_the_safe_floor() {
+        // prêmio que se sustenta no limite inferior: compra; sem prêmio estimado não há tamanho a limitar
+        let listed = ev(true, true, Some(40), -900);
+        assert_eq!(verdict(&listed, None, 100, 99_999), Verdict::Buy);
+        // limite inferior mantém metade do prêmio esperado: no máximo metade do saldo
+        let half = Some([1.5, 2.0, 2.5]);
+        assert_eq!(verdict(&listed, half, 3600, 1800), Verdict::Buy);
+        assert_eq!(
+            verdict(&listed, half, 3600, 1801),
+            Verdict::Refuse("acima_da_confianca")
+        );
+        // só o limite inferior barrou e o pior caso perde centavos: exploração (o teto é do banco)
+        assert_eq!(
+            verdict(&ev(false, true, Some(-30), -50), half, 3600, 100),
+            Verdict::Explore
+        );
+        assert_eq!(
+            verdict(&ev(false, true, Some(-30), -51), half, 3600, 100),
+            Verdict::Refuse("raro_nao_comprovado")
+        );
+        // sem lucro nem no esperado, ou sem prêmio estimado para explorar: recusa de sempre
+        for e in [ev(false, false, Some(-30), 0), ev(false, true, None, 0)] {
+            assert_eq!(verdict(&e, half, 3600, 100), Verdict::Refuse("sem_lucro"));
+        }
+    }
 
     #[test]
     fn a_better_seed_does_not_prove_a_worse_one() {

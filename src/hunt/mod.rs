@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod detect;
 pub mod explore;
+pub mod external;
 pub mod ledger;
 pub mod orders;
 mod parallel;
