@@ -272,7 +272,9 @@ pub fn retain(conn: &Connection, now: i64) -> rusqlite::Result<Retained> {
             [now - 3 * DAY],
         )?,
         opportunities: conn.execute(
-            "DELETE FROM opportunities WHERE gone_at IS NOT NULL AND gone_at < ?1",
+            // a oportunidade comprada fica: é dela que saem o gráfico e o valor de hoje da compra
+            "DELETE FROM opportunities WHERE gone_at IS NOT NULL AND gone_at < ?1
+             AND id NOT IN (SELECT id FROM purchases)",
             [now - 7 * DAY],
         )?,
         arm_stats: conn.execute(

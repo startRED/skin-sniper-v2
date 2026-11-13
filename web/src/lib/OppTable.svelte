@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, loadHistory, lostRows, marginOf, purchaseOf, rows, setSort, setTier, toggleExpanded, unchecked, type SortKey } from './store.svelte';
+  import { app, loadHistory, lostRows, marginOf, markBought, purchaseOf, rows, setSort, setTier, toggleExpanded, unchecked, type SortKey } from './store.svelte';
   import { ago, eta, floatTxt, money, pct, signed } from './format';
   import Chart from './Chart.svelte';
   import type { GoneReason, Opportunity } from './types';
@@ -138,6 +138,9 @@
               <span class="pill ok">Você comprou</span>
             {:else}
               <span class="pill mute" title={o.gone_reason === 'unavailable' ? 'A Steam não devolveu mais este anúncio; não dá para distinguir venda de retirada.' : undefined}>{o.gone_reason ? STATUS[o.gone_reason] : 'Indisponível'}</span>
+              {#if !o.gone_reason || o.gone_reason === 'unavailable'}
+                <button class="btn mine" onclick={() => markBought(o.id)} title="Foi você que comprou? Registre para acompanhar o valor até a venda.">Fui eu que comprei</button>
+              {/if}
             {/if}
           </div>
         {:else}
@@ -149,7 +152,10 @@
               <small class="muted" title="Quando a Steam devolveu este anúncio pela última vez">conferido {ago(checked, app.now)}</small>
             {/if}
           </div>
-          <div class="c act" role="cell"><a class="btn" class:primary={!stale} href={o.steam_url} target="_blank" rel="noopener noreferrer" aria-label="Abrir {o.name} na Steam">Abrir na Steam</a></div>
+          <div class="c act" role="cell">
+            <a class="btn" class:primary={!stale} href={o.steam_url} target="_blank" rel="noopener noreferrer" aria-label="Abrir {o.name} na Steam">Abrir na Steam</a>
+            <button class="btn mine" onclick={() => markBought(o.id)} title="Comprou este anúncio na Steam? Registre para acompanhar o valor até a venda." aria-label="Comprei {o.name}">Comprei</button>
+          </div>
         {/if}
       </div>
 
@@ -270,6 +276,8 @@
   .small { font-size: 12px; }
   .links { display: flex; gap: 8px; flex-wrap: wrap; }
   .act .pill { width: fit-content; }
+  .c.act { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+  .btn.mine { min-height: 28px; font-size: 12px; }
   .more { margin-top: 10px; align-self: flex-start; }
 
   @media (max-width: 1279px) {

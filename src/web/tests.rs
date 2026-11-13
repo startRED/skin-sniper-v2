@@ -168,6 +168,68 @@ async fn sale_requires_confirmed_unlocked_purchase() {
 }
 
 #[tokio::test]
+async fn buying_on_steam_is_recorded_from_the_opportunity_and_can_be_undone() {
+    let s = start().await;
+    let o = opp_json("7").to_string();
+    s.app
+        .db
+        .call(move |c| {
+            c.execute(
+                "INSERT INTO opportunities(id, json, created_at, gone_at) VALUES ('7', ?1, 1, 1000)",
+                [&o],
+            )
+        })
+        .await
+        .unwrap();
+    let post = |path: &str| s.send("POST".parse().unwrap(), path, json!({})).send();
+    assert_eq!(
+        post("/api/opportunities/nada/bought")
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let p: Value = post("/api/opportunities/7/bought")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // comprada quando o anúncio sumiu (1000); destrava 7 dias depois, na hora cheia seguinte
+    assert_eq!(
+        (&p["status"], &p["bought_at"], &p["tradable_at"], &p["seed"]),
+        (&json!("bought"), &json!(1000), &json!(608_400), &json!(7))
+    );
+    // a oportunidade comprada sobrevive à limpeza: o gráfico e o valor de hoje saem dela
+    let kept: i64 = s
+        .app
+        .db
+        .call(|c| {
+            crate::db::retain(c, crate::db::now_unix())?;
+            c.query_row(
+                "SELECT count(*) FROM opportunities WHERE id = '7'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(kept, 1);
+    let list = || async {
+        let r = s.get("/api/purchases").send().await.unwrap();
+        r.json::<Vec<Value>>().await.unwrap().len()
+    };
+    assert_eq!(list().await, 1);
+    let undo = || {
+        s.send("DELETE".parse().unwrap(), "/api/purchases/7", json!({}))
+            .send()
+    };
+    assert_eq!(undo().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(undo().await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(list().await, 0);
+}
+
+#[tokio::test]
 async fn host_and_content_type_guard() {
     let s = start().await;
     let r = s

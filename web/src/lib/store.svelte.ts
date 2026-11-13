@@ -89,6 +89,20 @@ function upsertPurchase(p: Purchase) {
   }
 }
 
+// "Comprei" na Steam: a oportunidade vira uma compra acompanhada até a venda.
+export async function markBought(id: string) {
+  try {
+    upsertPurchase(await api<Purchase>(`/api/opportunities/${encodeURIComponent(id)}/bought`, 'POST'));
+  } catch (e) {
+    alert(e instanceof Error ? e.message : 'Não consegui registrar a compra.');
+  }
+}
+
+export async function unmarkBought(id: string) {
+  await api(`/api/purchases/${encodeURIComponent(id)}`, 'DELETE');
+  app.purchases = app.purchases.filter((p) => p.id !== id);
+}
+
 export async function loadHistory(id: string) {
   app.history[id] = 'loading';
   try {

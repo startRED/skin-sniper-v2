@@ -1,7 +1,7 @@
 //! Registro manual e números observados; com 5 vendas de um tipo, `correction` desconta a precificação.
 
 use super::AppState;
-use super::api::{ApiError, Kind, Opportunity, Purchase, PurchaseStatus};
+use super::api::{ApiError, Event, GoneReason, Kind, Opportunity, Purchase, PurchaseStatus};
 use crate::db::{Db, now_unix};
 use crate::pricing::sell::weighted_quantile;
 use axum::{
@@ -73,10 +73,109 @@ pub async fn sold(
             {
                 tracing::warn!("fator das vendas reais não atualizou: {e:#}");
             }
-            let _ = app.events.send(super::api::Event::Purchase(p.clone()));
+            let _ = app.events.send(Event::Purchase(p.clone()));
             Ok(Json(p))
         }
     }
+}
+
+/// Quando a Steam libera para venda o que foi comprado no mercado em `bought_at`.
+// shortcut: regra tirada de uma compra só (13/11/2026: o anúncio sumiu às 12:41 UTC e a Steam marcou a liberação
+// para 13:00 UTC de 20/11), 7 dias arredondados para a hora cheia seguinte; se outra compra destravar em hora
+// diferente, deixar o usuário corrigir a data.
+fn tradable_at(bought_at: i64) -> i64 {
+    (bought_at + 7 * 86_400 + 3599).div_euclid(3600) * 3600
+}
+
+/// "Comprei": registra a compra feita direto na Steam a partir da oportunidade, ativa ou já sumida.
+pub async fn bought(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Purchase>, ApiError> {
+    let now = now_unix();
+    let key = id.clone();
+    let found = app
+        .db
+        .call(move |c| {
+            let bad = |e: serde_json::Error| {
+                rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into())
+            };
+            let row: Option<(String, Option<i64>)> = c
+                .query_row(
+                    "SELECT json, gone_at FROM opportunities WHERE id = ?1",
+                    [&key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((json, gone_at)) = row else {
+                return Ok(None);
+            };
+            let o: Opportunity = serde_json::from_str(&json).map_err(bad)?;
+            // anúncio que já sumiu: a compra foi quando ele saiu da Steam, não quando o botão foi apertado
+            let at = gone_at.unwrap_or(now);
+            let p = Purchase {
+                id: o.id,
+                name: o.name,
+                icon_url: o.icon_url,
+                price_cents: o.price_cents,
+                status: PurchaseStatus::Bought,
+                message: None,
+                bought_at: Some(at),
+                tradable_at: Some(tradable_at(at)),
+                sell: o.sell,
+                kind: Some(o.kind),
+                sold_cents: None,
+                wear: o.wear,
+                float: o.float,
+                seed: o.seed,
+                group: o.group,
+                now: None,
+            };
+            c.execute(
+                "INSERT INTO purchases(id, json, created_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET json = excluded.json",
+                params![key, serde_json::to_string(&p).map_err(bad)?, now],
+            )?;
+            Ok(Some((p, gone_at.is_none())))
+        })
+        .await?;
+    let Some((p, active)) = found else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "Oportunidade não encontrada.",
+        ));
+    };
+    if active
+        && let Some(rt) = &app.rt
+        && let Err(e) = crate::hunt::detect::mark_gone(&rt.hunt, vec![id], GoneReason::Bought).await
+    {
+        tracing::warn!("oportunidade comprada continuou na lista: {e:#}");
+    }
+    let _ = app.events.send(Event::Purchase(p.clone()));
+    Ok(Json(p))
+}
+
+/// "Não comprei": desfaz um registro feito por engano. Compra com venda informada não sai.
+pub async fn unbuy(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<()>, ApiError> {
+    let removed = app
+        .db
+        .call(move |c| {
+            c.execute(
+                "DELETE FROM purchases WHERE id = ?1 AND id NOT IN (SELECT purchase_id FROM outcomes)",
+                [id],
+            )
+        })
+        .await?;
+    if removed == 0 {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "Compra não encontrada ou já vendida.",
+        ));
+    }
+    Ok(Json(()))
 }
 
 #[derive(Serialize)]
