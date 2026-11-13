@@ -185,6 +185,15 @@ fn share_at_or_above(
     Ok((all > 0).then(|| above as f64 / all as f64))
 }
 
+/// Condição SQL (`observations` com o alias `a`): nenhum anúncio mais barato do mesmo nome e seed estava à venda
+/// junto com este e continuou depois que ele sumiu. Quem compra leva o mais barato; sumir acima dele é retirada,
+/// não venda. No banco de 13/11/2026, 19 dos 75 sumiços em grupo de pattern eram assim (SSG 08 Acid Fade: R$ 163,08
+/// sumiu com o mesmo seed parado a R$ 59,88).
+pub(crate) const NO_CHEAPER_TWIN: &str =
+    "NOT EXISTS (SELECT 1 FROM observations o WHERE o.name = a.name
+    AND o.seed = a.seed AND o.listing_id != a.listing_id AND o.price_cents < a.price_cents
+    AND o.first_seen <= a.last_seen AND o.last_seen > a.last_seen)";
+
 /// Anúncios do mesmo nome (e do mesmo grupo, no raro) a ≥ `price` que sumiram sem relistagem em `[from, to]`.
 fn vanished_at_or_above(
     c: &Connection,
@@ -195,8 +204,10 @@ fn vanished_at_or_above(
     price: i64,
 ) -> rusqlite::Result<i64> {
     c.query_row(
-        "SELECT count(*) FROM observations WHERE name = ?1 AND grp IS ?2 AND relisted = 0
-         AND gone_at >= ?3 AND gone_at <= ?4 AND price_cents >= ?5",
+        &format!(
+            "SELECT count(*) FROM observations a WHERE name = ?1 AND grp IS ?2 AND relisted = 0
+             AND gone_at >= ?3 AND gone_at <= ?4 AND price_cents >= ?5 AND {NO_CHEAPER_TWIN}"
+        ),
         params![name, grp, from, to, price],
         |r| r.get(0),
     )
