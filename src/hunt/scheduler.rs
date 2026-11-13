@@ -1539,7 +1539,8 @@ pub async fn load_pace(h: &Hunt) -> anyhow::Result<()> {
 async fn backoff(h: &Hunt, e: &anyhow::Error) {
     let pause = match e.downcast_ref::<SteamError>() {
         Some(SteamError::RateLimited { .. }) => {
-            tracing::warn!("Steam respondeu 429; o limitador segura a próxima consulta");
+            // o cliente já avisou no 429 real; aqui o laço só bate na pausa local a cada ~2 s
+            tracing::debug!("Steam respondeu 429; o limitador segura a próxima consulta");
             return;
         }
         Some(SteamError::BreakerOpen { endpoint, .. }) => {
