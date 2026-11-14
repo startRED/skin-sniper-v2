@@ -85,6 +85,17 @@
     <details class="more">
       <summary>Diagnóstico da busca</summary>
       <div class="groups">
+        {#if data.candidates}
+          {@const c = data.candidates}
+          <div class="grp">
+            <h3 title="Anúncios distintos avaliados nas últimas {c.hours} h. Acima do saldo bom e virtual não são compra possível nem entram no placar.">Candidatos por hora ({c.hours} h)</h3>
+            <dl class="stats">
+              <div><dt>Aprovadas</dt><dd>{dec(c.approved / c.hours)}</dd><small>{c.approved} anúncios</small></div>
+              <div title="Passariam no lucro e no selo se coubessem no saldo; avisadas no Telegram com o que falta."><dt>Acima do saldo, boas</dt><dd>{dec(c.over_saldo / c.hours)}</dd><small>{c.over_saldo} anúncios</small></div>
+              <div title="Raros sem lucro com prejuízo estimado até R$ 1 e perda pequena vendidos como comum. Sem compra e sem aviso; sumir não prova venda."><dt>Virtuais (zona amarela)</dt><dd>{dec(c.yellow / c.hours)}</dd><small>{c.yellow} anúncios · {c.yellow_gone} sumiram ({c.yellow_fast} em até 48 h sem voltar) · {c.yellow_relisted} relistados</small></div>
+            </dl>
+          </div>
+        {/if}
         {#if t && t.ghosts}
           <div class="grp">
             <h3>Compras virtuais</h3>

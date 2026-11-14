@@ -82,6 +82,51 @@ pub struct Learning {
     /// Alterações efetivamente aplicadas ao preço dos comuns.
     #[serde(default)]
     pub adjustments: Vec<Adjustment>,
+    #[serde(default)]
+    pub candidates: Candidates,
+}
+
+/// Janela dos candidatos do painel.
+const CANDIDATES_HOURS: i64 = 24;
+
+/// Anúncios distintos avaliados nas últimas `hours` horas, por tipo de candidato. Os virtuais (raro da zona amarela,
+/// `detect::yellow_zone`) não são comprados nem avisados; o rótulo é só o que o registro já mostra: sumiu, sumiu em
+/// até 48 h sem relistagem, ou foi relistado.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Candidates {
+    pub hours: i64,
+    pub approved: i64,
+    pub over_saldo: i64,
+    pub yellow: i64,
+    pub yellow_gone: i64,
+    pub yellow_fast: i64,
+    pub yellow_relisted: i64,
+}
+
+pub(crate) fn candidates(c: &rusqlite::Connection, now: i64) -> rusqlite::Result<Candidates> {
+    c.query_row(
+        "SELECT COUNT(DISTINCT CASE WHEN e.reason = 'aprovada' THEN e.listing_id END),
+                COUNT(DISTINCT CASE WHEN e.reason = 'acima_do_saldo_boa' THEN e.listing_id END),
+                COUNT(DISTINCT CASE WHEN e.reason = 'zona_amarela' THEN e.listing_id END),
+                COUNT(DISTINCT CASE WHEN e.reason = 'zona_amarela' AND o.gone_at IS NOT NULL THEN e.listing_id END),
+                COUNT(DISTINCT CASE WHEN e.reason = 'zona_amarela' AND o.relisted = 0
+                    AND o.gone_at - o.first_seen <= ?2 THEN e.listing_id END),
+                COUNT(DISTINCT CASE WHEN e.reason = 'zona_amarela' AND o.relisted = 1 THEN e.listing_id END)
+         FROM evaluations e LEFT JOIN observations o ON o.listing_id = e.listing_id
+         WHERE e.reason IN ('aprovada', 'acima_do_saldo_boa', 'zona_amarela') AND e.at >= ?1",
+        params![now - CANDIDATES_HOURS * 3600, crate::hunt::teacher::FAST],
+        |r| {
+            Ok(Candidates {
+                hours: CANDIDATES_HOURS,
+                approved: r.get(0)?,
+                over_saldo: r.get(1)?,
+                yellow: r.get(2)?,
+                yellow_gone: r.get(3)?,
+                yellow_fast: r.get(4)?,
+                yellow_relisted: r.get(5)?,
+            })
+        },
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +302,7 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                 exploration: Some(crate::hunt::explore::info(c)?),
                 experiment: Some(crate::hunt::trial::report(c, now)?),
                 adjustments,
+                candidates: candidates(c, now)?,
             })
         })
         .await?;
@@ -266,6 +312,59 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn candidates_count_listings_once_and_label_yellow_ones_from_the_record() {
+        let (db, _dir) = crate::db::temp_db();
+        let now = 1_794_000_000;
+        db.call(move |c| {
+            for (id, reason, at) in [
+                ("a", "aprovada", now - 60),
+                ("a", "aprovada", now - 30),
+                ("b", "acima_do_saldo_boa", now - 60),
+                ("c", "acima_do_saldo", now - 60),
+                ("y1", "zona_amarela", now - 60),
+                ("y2", "zona_amarela", now - 60),
+                ("y3", "zona_amarela", now - 60),
+                ("old", "zona_amarela", now - 25 * 3600),
+            ] {
+                c.execute(
+                    "INSERT INTO evaluations(at, listing_id, name, price_cents, stickers_json, keychains_json,
+                        steam_url, reason) VALUES (?1, ?2, 'x', 100, '[]', '[]', '', ?3)",
+                    params![at, id, reason],
+                )?;
+            }
+            // y1 sumiu em 1 h, y2 sumiu em 3 dias e foi relistado, y3 segue à venda
+            for (id, gone, relisted) in [
+                ("y1", Some(now - 3600), 0),
+                ("y2", Some(now), 1),
+                ("y3", None, 0),
+            ] {
+                let first = gone.map_or(now - 7200, |g| g - if relisted == 1 { 3 * DAY } else { 3600 });
+                c.execute(
+                    "INSERT INTO observations(listing_id, name, query, price_cents, first_seen, last_seen, cheapest,
+                        gone_at, relisted) VALUES (?1, 'x', 'q', 100, ?2, ?2, 0, ?3, ?4)",
+                    params![id, first, gone, relisted],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let got = db.call(move |c| candidates(c, now)).await.unwrap();
+        assert_eq!(
+            got,
+            Candidates {
+                hours: 24,
+                approved: 1,
+                over_saldo: 1,
+                yellow: 3,
+                yellow_gone: 2,
+                yellow_fast: 1,
+                yellow_relisted: 1,
+            }
+        );
+    }
 
     #[test]
     fn learning_scorecard_counts_by_brasilia_day() {

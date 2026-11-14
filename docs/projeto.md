@@ -360,7 +360,12 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    anúncios), então preço sem degrau a 1 % é anúncio que saiu. Degrau presente não prova nada. A página do anúncio
    (`?detail=`) respondeu 429 sem login no mesmo bloqueio. O teto desses dois filtros não conta o menor anúncio do livro como
    concorrente: ele é o próprio candidato, e derrubaria o teto abaixo de si mesmo. Consultas de anúncios idênticas compartilham a página. O log de ciclo conta consultas de anúncios economizadas. Cada consulta devolve os anúncios mais baratos; `listingid` novo com preço ≤ saldo vai para
-   avaliação; anúncio que sumiu vira evento `gone`.
+   avaliação; anúncio que sumiu vira evento `gone`. Acima do saldo, o anúncio é avaliado uma vez por ciclo só com o que
+   já está no banco (nenhum histórico novo nem CSFloat); se seria aprovado, grava `acima_do_saldo_boa` e avisa no
+   Telegram com o que falta no saldo, sem virar oportunidade, compra, placar ou crédito da agenda. Raro recusado sem
+   lucro com prejuízo médio entre R$ 1 e zero e perda ≤ R$ 0,50 vendido como comum grava `zona_amarela`: candidato
+   virtual, sem compra nem aviso; o painel conta os três tipos por hora (24 h) e rotula os virtuais pelo registro
+   (sumiu, em até 48 h sem relistagem, relistado), o que não prova venda.
 
 ## Aprendizado (mina de ouro)
 
