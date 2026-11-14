@@ -199,6 +199,7 @@ async fn recheck_targets_the_active_seed_even_after_another_range_was_read() {
 async fn notification_can_qualify_later_and_survives_restart_without_duplicates() {
     let (base, _bodies) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     h.settings
@@ -1054,6 +1055,7 @@ async fn old_history_failure_cannot_delay_a_new_login() {
 async fn fixture_listing_becomes_opportunity_event_then_gone() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
 
@@ -1118,12 +1120,12 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
         cheap.evidence,
         "339 vendas/dia nos últimos 7 dias · preço em queda, descontado 2%"
     );
-    // a venda rápida não conta com o prêmio do CSFloat: sem ele o T1 a R$ 10,00 perde, então não é seguro
+    // a venda rápida não conta com o prêmio: sem ele o T1 a R$ 10,00 perde, então não é seguro
     assert_eq!(
         tiers(t1),
-        [(1124, 979, -21), (1776, 1545, 545), (1826, 1589, 589)]
+        [(1124, 979, -21), (1777, 1546, 546), (1817, 1580, 580)]
     );
-    assert!((t1.margin_pct - 54.5).abs() < 1e-3 && !t1.safe);
+    assert!((t1.margin_pct - 54.6).abs() < 1e-3 && !t1.safe);
     assert_eq!(t1.confidence, Confidence::Media);
     for o in &found {
         assert_eq!(o.name, MOON);
@@ -1241,6 +1243,26 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
 }
 
 /// Roda a caça até aparecerem as duas oportunidades da fixture.
+/// Três anúncios do grupo que sumiram em 1 h na Steam a `cents`: a prova de revenda que dá prêmio ao raro.
+async fn steam_closings(db: &Db, grp: &'static str, cents: i64) {
+    db.call(move |c| {
+        for i in 0..3 {
+            c.execute(
+                "INSERT INTO observations(listing_id, name, query, grp, price_cents, first_seen, last_seen,
+                    cheapest, gone_at)
+                 VALUES (?1, ?2, 'q', ?3, ?4, ?5, ?5, 0, ?5 + 3600)",
+                rusqlite::params![format!("closed{i}"), MOON, grp, cents, NOW - 86_400],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// Grupo do Center Star; os testes fecham três na Steam a R$ 17,76, ~1,5× o preço comum (R$ 11,57).
+const T1: &str = "cs:Glock-18 | Moonrise:t1";
+
 async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Vec<Opportunity> {
     let mut found = vec![];
     for _ in 0..400 {
@@ -1263,6 +1285,7 @@ async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Ve
 async fn over_saldo_listing_is_appraised_offline_without_becoming_an_opportunity() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     assert_eq!(run_until_two(&h, &mut rx).await.len(), 2);
@@ -1323,6 +1346,7 @@ async fn over_saldo_listing_is_appraised_offline_without_becoming_an_opportunity
 async fn rare_losing_cents_that_loses_reais_as_common_is_not_a_virtual_candidate() {
     let (base, _bodies) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     let t1 = run_until_two(&h, &mut rx)
@@ -1348,7 +1372,7 @@ async fn rare_losing_cents_that_loses_reais_as_common_is_not_a_virtual_candidate
     l.price_cents += t1.sell.mid.profit_cents + 1;
     assert_eq!(
         (t1.sell.mid.profit_cents, t1.sell.quick.profit_cents),
-        (545, -21)
+        (546, -21)
     );
     let (h2, _rx) = hunt_against(&base, db.clone());
     h2.set_saldo(1_000_000, SaldoSource::Manual);
@@ -1372,6 +1396,7 @@ async fn rare_losing_cents_that_loses_reais_as_common_is_not_a_virtual_candidate
 async fn cheaper_competitor_reevaluates_known_opportunity() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     assert_eq!(run_until_two(&h, &mut rx).await.len(), 2);
@@ -1425,6 +1450,7 @@ async fn cheaper_competitor_reevaluates_known_opportunity() {
 async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
     let (base, _bodies) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db);
     h.set_saldo(3608, SaldoSource::Manual);
     // passa pelo fluxo real uma vez (catálogo, histórico, CSFloat); o T1 sai com o médio a R$ 8,87
@@ -1476,7 +1502,7 @@ async fn rare_competitor_in_another_seed_range_caps_mid_and_drops_it() {
         }
         if price == 1900 {
             assert_eq!(gone, None);
-            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, 1776);
+            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, 1777);
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_T1));
@@ -1721,19 +1747,7 @@ async fn rare_premium_comes_from_what_closed_on_steam_when_there_is_enough() {
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     // três Center Star do mesmo nome que sumiram em 1 h a R$ 34,71, 3× o preço comum (R$ 11,57)
-    db.call(|c| {
-        for i in 0..3 {
-            c.execute(
-                "INSERT INTO observations(listing_id, name, query, grp, price_cents, first_seen, last_seen,
-                    cheapest, gone_at)
-                 VALUES (?1, ?2, 'q', 'cs:Glock-18 | Moonrise:t1', 3471, ?3, ?3, 0, ?3 + 3600)",
-                rusqlite::params![format!("gone{i}"), MOON, NOW - 86_400],
-            )?;
-        }
-        Ok(())
-    })
-    .await
-    .unwrap();
+    steam_closings(&db, T1, 3471).await;
 
     let found = run_until_two(&h, &mut rx).await;
     let t1 = found.iter().find(|o| o.id == ID_T1).unwrap();
@@ -1742,7 +1756,7 @@ async fn rare_premium_comes_from_what_closed_on_steam_when_there_is_enough() {
         "{}",
         t1.evidence
     );
-    // 3× a mediana comum já com a queda de 2 %; só com as 3 vendas do CSFloat (~1,5×) era R$ 17,76
+    // 3× a mediana comum já com a queda de 2 %
     assert_eq!(t1.sell.mid.price_cents, 3473, "{}", t1.evidence);
 }
 
@@ -1750,9 +1764,10 @@ async fn rare_premium_comes_from_what_closed_on_steam_when_there_is_enough() {
 async fn a_listing_that_vanished_above_a_cheaper_one_of_the_same_seed_is_not_a_sale() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
-    // os mesmos três sumiços a R$ 34,71, mas o seed 59 estava à venda a R$ 20,00 antes e continuou depois
+    // mais três sumiços a R$ 34,71, mas o seed 59 estava à venda a R$ 20,00 antes e continuou depois
     db.call(|c| {
         for (id, price, last, gone) in [
             ("gone0", 3471, NOW - 86_400, Some(NOW - 82_800)),
@@ -1774,17 +1789,15 @@ async fn a_listing_that_vanished_above_a_cheaper_one_of_the_same_seed_is_not_a_s
 
     let found = run_until_two(&h, &mut rx).await;
     let t1 = found.iter().find(|o| o.id == ID_T1).unwrap();
-    assert!(
-        !t1.evidence.contains("prêmio medido na Steam"),
-        "{}",
-        t1.evidence
-    );
+    // o prêmio fica nos três fechados a R$ 17,76; os de R$ 34,71 não puxam o preço
+    assert_eq!(t1.sell.mid.price_cents, 1777, "{}", t1.evidence);
 }
 
 #[tokio::test]
 async fn rare_never_sells_above_the_same_pattern_listed_in_a_better_wear() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     // um Center Star Minimal Wear parado a R$ 17,00 (sem ele o preço médio era R$ 17,76); o Well-Worn do mesmo grupo não entra na conta
@@ -1816,6 +1829,7 @@ async fn rare_never_sells_above_the_same_pattern_listed_in_a_better_wear() {
 async fn a_bought_listing_is_revalued_from_the_database_alone() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db);
     h.set_saldo(3608, SaldoSource::Manual);
     let found = run_until_two(&h, &mut rx).await;
@@ -2805,6 +2819,7 @@ async fn value_step_tunes_from_the_reads_and_logs_the_switch() {
 async fn combo_uses_positive_expected_profit_including_rare_without_daily_score() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     let (h, mut rx) = hunt_against(&base, db);
     h.set_saldo(3608, SaldoSource::Manual);
     let found = run_until_two(&h, &mut rx).await;
@@ -2859,6 +2874,7 @@ async fn combo_uses_positive_expected_profit_including_rare_without_daily_score(
 async fn activity_table_failure_does_not_stop_detection() {
     let (base, _) = serve().await;
     let (db, _dir) = temp_db();
+    steam_closings(&db, T1, 1776).await;
     db.call(|c| c.execute("DROP TABLE hourly_activity", []).map(|_| ()))
         .await
         .unwrap();
@@ -2965,7 +2981,7 @@ async fn orders_read_one_book_per_gap_oldest_common_first() {
 }
 
 #[tokio::test]
-async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
+async fn learned_pattern_without_steam_closings_is_priced_as_common() {
     const ID_LEARNED: &str = "341565526995940199"; // seed 269: fora das tabelas do Moonrise
     let (base, bodies) = serve().await;
     {
@@ -3014,7 +3030,7 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
             h.db.call(|c| {
                 Ok(c.query_row(
                     "SELECT rare_group, mid_profit_cents, detail FROM evaluations
-                     WHERE listing_id = ?1 AND reason = 'raro_nao_comprovado'",
+                     WHERE listing_id = ?1 AND reason = 'sem_lucro'",
                     [ID_LEARNED],
                     |r| {
                         Ok((
@@ -3033,14 +3049,12 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
         }
     }
     // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; o pattern aprendido vendeu a 2,0–2,4× no CSFloat, mas
-    // nenhuma venda fechada prova o prêmio: fica de fora (11/11, Serpent Strike #804).
+    // nenhum fechamento na Steam prova o prêmio: vale como comum e fica de fora (11/11, Serpent Strike #804).
     assert!(hit.is_none(), "{hit:?}");
-    let (_, mid, detail) = refused.expect("recusa registrada");
-    assert!(detail.contains("grupo raro: 3 vendas"), "{detail}");
-    assert!(
-        mid >= 100,
-        "o prêmio aprendido ainda aparece no lucro médio: {mid}"
-    );
+    let (group, mid, detail) = refused.expect("recusa registrada");
+    assert!(group.is_some(), "o grupo aprendido continua no registro");
+    assert!(detail.contains("prêmio sem prova (0 vendas)"), "{detail}");
+    assert!(mid < 100, "prêmio do CSFloat não entra no lucro: {mid}");
     // e o seed entra na busca rara do Moonrise
     let tasks = h.lock().queue.tasks();
     assert!(

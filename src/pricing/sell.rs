@@ -378,8 +378,8 @@ pub fn estimate(
                 weighted_quantile(&m, 0.5).unwrap_or(1.0),
                 weighted_quantile(&m, 0.75).unwrap_or(1.0),
             );
-            // A venda rápida não conta com o prêmio: ele vem do CSFloat e já saiu bem abaixo na Steam
-            // (previsto 2,33×, vendido 0,96×). Assim `safe` só marca o que paga mesmo sem prêmio.
+            // A venda rápida não conta com o prêmio: o do CSFloat já saiu bem abaixo na Steam (previsto 2,33×,
+            // vendido 0,96×) e sumiço na Steam não é venda certa. Assim `safe` só marca o que paga sem prêmio.
             (p25, p50, p75) = (p25 * m25.min(1.0), p50 * m50, p75 * m75);
             proven_rare = true;
             evidence += &format!(

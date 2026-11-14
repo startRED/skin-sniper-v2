@@ -638,8 +638,9 @@ fn why(
     }
 }
 
-/// Selo do raro: vendas fechadas do grupo (as do CSFloat guardadas e os anúncios da mesma skin no grupo que
-/// sumiram em até 48 h sem relistagem, múltiplo = preço ÷ `base_cents`) e anúncios do grupo parados há mais de 48 h.
+/// Selo do raro: vendas fechadas do grupo na Steam (anúncios da mesma skin no grupo que sumiram em até 48 h sem
+/// relistagem, múltiplo = preço ÷ `base_cents`) e anúncios do grupo parados há mais de 48 h. Venda do CSFloat não
+/// conta: "comprovado" é promessa de revenda na Steam.
 async fn seal_for(
     h: &Hunt,
     name: &str,
@@ -655,10 +656,7 @@ async fn seal_for(
     let r = h
         .db
         .call(move |c| {
-            let mut sales: Vec<(Option<u16>, f64)> = c
-                .prepare("SELECT seed, multiple FROM csfloat_sales WHERE grp = ?1")?
-                .query_map([&grp], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
+            let mut sales: Vec<(Option<u16>, f64)> = vec![];
             if let Some(b) = base_cents.filter(|&b| b > 0) {
                 let gone = vanished(c, &grp, &name)?;
                 sales.extend(gone.into_iter().map(|(s, p)| (s, p as f64 / b as f64)));
@@ -775,13 +773,16 @@ async fn appraise(
         (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
         (None, _) => None,
     };
-    // Vende-se na Steam: com fechamentos suficientes lá, o prêmio é o que a Steam pagou, não o do CSFloat.
+    // Vende-se na Steam: o prêmio é só o que a Steam fechou. A venda do CSFloat diz onde procurar (`patterns`),
+    // não quanto pedir: no banco de 14/11/2026 o Serpent Strike saía previsto a R$ 19,00 pelo CSFloat e fechou 4
+    // vezes na Steam ao preço comum (R$ 2,91 a 3,23); P2000 Amber Fade 99%+, previsto a 2×, 0 fechamentos.
     let mut on_steam = false;
-    if let (Some(g), Some(b), Some(r)) = (&group, base_cents.filter(|b| *b > 0), rare.as_mut()) {
-        let closed = steam_closed(h, l, &g.key, b).await?;
-        if closed.len() >= sell::RARE_MIN_SALES {
-            (r.multiples, on_steam) = (closed, true);
-        }
+    if let Some(r) = rare.as_mut() {
+        r.multiples = match (&group, base_cents.filter(|b| *b > 0)) {
+            (Some(g), Some(b)) => steam_closed(h, l, &g.key, b).await?,
+            _ => vec![],
+        };
+        on_steam = r.multiples.len() >= sell::RARE_MIN_SALES;
     }
     let better = match &group {
         Some(g) => better_wear_ask(h, &l.name, &g.key, now).await?,
