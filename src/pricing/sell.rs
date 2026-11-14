@@ -49,6 +49,9 @@ pub struct PricePoint {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RareEvidence {
     pub multiples: Vec<f64>,
+    /// `multiples` = `[limite inferior, esperado, limite de cima]` do prêmio (`rarity`), não vendas: o limite
+    /// inferior também barra a compra (`SellEstimate::lower_cents`).
+    pub posterior: bool,
 }
 
 /// Mínimo de vendas do grupo para o prêmio virar preço.
@@ -87,6 +90,10 @@ pub struct SellEstimate {
     pub high: EstTier,
     pub confidence: Confidence,
     pub probabilities: [f64; 3],
+    /// Preço de venda se o prêmio ficar no limite inferior (só com `RareEvidence::posterior`).
+    pub lower_cents: Option<i64>,
+    /// Vendas por dia do nome nos últimos 7 dias.
+    pub sales_per_day: f64,
     pub volatility: Option<f64>,
     /// Desvio do preço em 7 dias (a trava de troca), medido direto entre medianas com 7 dias de distância.
     pub week_move: Option<f64>,
@@ -363,6 +370,7 @@ pub fn estimate(
     }
 
     let mut proven_rare = false;
+    let mut lower_raw = None;
     let mut rare_samples = Vec::new();
     if let Some(r) = &rare {
         let m: Vec<(f64, f64)> = r
@@ -380,14 +388,25 @@ pub fn estimate(
             );
             // A venda rápida não conta com o prêmio: ele vem do CSFloat e já saiu bem abaixo na Steam
             // (previsto 2,33×, vendido 0,96×). Assim `safe` só marca o que paga mesmo sem prêmio.
+            if r.posterior {
+                lower_raw = Some(p50 * m25);
+            }
             (p25, p50, p75) = (p25 * m25.min(1.0), p50 * m50, p75 * m75);
             proven_rare = true;
-            evidence += &format!(
-                " · grupo raro: {}, {}x a {}x o preço comum",
-                sales_word(m.len()),
-                num(m25, 1),
-                num(m75, 1)
-            );
+            evidence += &if r.posterior {
+                format!(
+                    " · prêmio esperado {}x o preço comum, limite inferior {}x (já com o corte de saída)",
+                    num(m50, 1),
+                    num(m25, 1)
+                )
+            } else {
+                format!(
+                    " · grupo raro: {}, {}x a {}x o preço comum",
+                    sales_word(m.len()),
+                    num(m25, 1),
+                    num(m75, 1)
+                )
+            };
             // prêmio com poucas vendas não sustenta confiança alta
             let cap = if m.len() >= RARE_HIGH_CONFIDENCE_SALES {
                 Confidence::High
@@ -408,6 +427,7 @@ pub fn estimate(
     }
     let price = |x: f64| (x.floor() as i64).max(MIN_PRICE_CENTS);
     let (mut quick, mut mid, high) = (price(p25), price(p50), price(p75));
+    let mut lower_cents = lower_raw.filter(|x| x.is_finite()).map(price);
     if let Some(ask) = lowest_other_ask_cents {
         let cap = ask.saturating_sub(1);
         if cap < MIN_PRICE_CENTS {
@@ -423,6 +443,7 @@ pub fn estimate(
             mid = cap;
             evidence += " · preço médio limitado pelo menor anúncio";
         }
+        lower_cents = lower_cents.map(|l| l.min(cap));
     }
     let tier = |p: i64| EstTier {
         price_cents: p,
@@ -466,6 +487,8 @@ pub fn estimate(
     };
     Ok(SellEstimate {
         probabilities: [probability(quick), probability(mid), probability(high)],
+        lower_cents,
+        sales_per_day,
         volatility,
         week_move,
         risk,
@@ -511,11 +534,17 @@ pub struct Evaluation {
     pub margin_pct: f64,
     /// Lucro > 0 mesmo no preço rápido.
     pub safe: bool,
-    /// Entra na lista: lucro no `mid` ≥ R$ 1,00, margem ≥ 10 % e lucro esperado (com risco) não negativo.
+    /// Entra na lista: lucro no `mid` ≥ R$ 1,00, margem ≥ 10 %, lucro esperado (com risco) não negativo e, com
+    /// prêmio estimado (`RareEvidence::posterior`), lucro líquido positivo também no limite inferior dele.
     pub listable: bool,
     /// Vale avisar: entra na lista, tem lucro esperado positivo e `mid` chega ao mínimo. Não exige `safe`:
     /// o lucro esperado já pesa o risco, e raro quase nunca é `safe` (a venda rápida ignora o prêmio).
     pub notify: bool,
+    /// Lucro vendendo no limite inferior do prêmio estimado; `None` sem prêmio estimado.
+    pub lower_profit_cents: Option<i64>,
+    /// `listable` e `notify` sem a exigência do limite inferior: o que a compra de exploração (piso seguro) vê.
+    pub mid_ok: bool,
+    pub mid_notify: bool,
 }
 
 /// Avalia um anúncio de `price_cents` (total que o comprador paga) contra a estimativa.
@@ -556,13 +585,18 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         (expected - price_cents as f64 * week.min(1.0)).round() as i64
     });
     // lucro esperado negativo (risco da semana maior que o ganho) não entra; sem medida, não barra
-    let listable = valid
+    let mid_ok = valid
         && sell.mid.profit_cents >= MIN_LIST_PROFIT_CENTS
         && margin_pct >= MIN_LIST_MARGIN_PCT
         && ev_profit_cents.is_none_or(|profit| profit >= 0);
-    let notify = listable
+    let mid_notify = mid_ok
         && sell.mid.profit_cents >= notify_min_cents
         && ev_profit_cents.is_some_and(|profit| profit > 0);
+    let lower_profit_cents = est
+        .lower_cents
+        .map(|p| seller_gets(p).saturating_sub(price_cents));
+    let listable = mid_ok && lower_profit_cents.is_none_or(|p| p > 0);
+    let notify = listable && mid_notify;
     let days_locked = sell.mid.eta_hours.map(|hours| 7.0 + hours / 24.0);
     let profit_per_day_cents = ev_profit_cents
         .zip(days_locked)
@@ -576,6 +610,9 @@ pub fn evaluate(price_cents: i64, est: &SellEstimate, notify_min_cents: i64) -> 
         safe,
         listable,
         notify,
+        lower_profit_cents,
+        mid_ok,
+        mid_notify,
     }
 }
 
@@ -606,6 +643,7 @@ mod tests {
     fn rare(m: &[f64]) -> RareEvidence {
         RareEvidence {
             multiples: m.to_vec(),
+            ..Default::default()
         }
     }
 
@@ -977,6 +1015,8 @@ mod tests {
             high: t(high),
             confidence: Confidence::High,
             probabilities: [1.0, 1.0, 1.0],
+            lower_cents: None,
+            sales_per_day: 5.0,
             volatility: Some(0.0),
             week_move: Some(0.0),
             risk: Risk::Low,
@@ -1171,5 +1211,44 @@ mod tests {
         assert!(ev.sell.quick.profit_cents < real && real < ev.sell.high.profit_cents);
         // prazo: com prêmio provado não há medida de ritmo do grupo
         assert_eq!(e.mid.eta_hours, None);
+    }
+
+    #[test]
+    fn estimated_premium_must_hold_at_its_lower_bound_to_be_listed() {
+        let post = |m: &[f64], ask: Option<i64>| {
+            let r = RareEvidence {
+                multiples: m.to_vec(),
+                posterior: true,
+            };
+            estimate(&flat(1000, 5), NOW, ask, Some(r)).unwrap()
+        };
+        // preço comum 1000: esperado 2,0×, limite inferior 1,6× → vende a 2000 / 1600 (taxa de 15 % sobre isso)
+        let e = post(&[1.6, 2.0, 2.4], None);
+        assert_eq!(e.lower_cents, Some(1600));
+        assert!(
+            e.evidence.contains("prêmio esperado 2,0x"),
+            "{}",
+            e.evidence
+        );
+        assert!(
+            e.evidence.contains("limite inferior 1,6x"),
+            "{}",
+            e.evidence
+        );
+        let ev = evaluate(1000, &e, 0);
+        assert_eq!(ev.lower_profit_cents, Some(seller_gets(1600) - 1000));
+        assert!(ev.listable && ev.mid_ok);
+        // limite inferior sem prêmio (1,0×): o esperado dá lucro, o pior caso não: não lista, mas a exploração vê
+        let weak = post(&[1.0, 2.0, 2.4], None);
+        let ev = evaluate(1000, &weak, 0);
+        assert!(ev.mid_ok && !ev.listable && !ev.notify);
+        assert!(ev.lower_profit_cents.is_some_and(|p| p < 0));
+        // o menor anúncio concorrente limita o preço do limite inferior também
+        assert_eq!(post(&[1.6, 2.0, 2.4], Some(1301)).lower_cents, Some(1300));
+        // sem prêmio estimado (vendas cruas) nada muda: não há limite inferior
+        let raw = estimate(&flat(1000, 5), NOW, None, Some(rare(&[1.6, 2.0, 2.4]))).unwrap();
+        assert_eq!(raw.lower_cents, None);
+        assert_eq!(evaluate(1000, &raw, 0).lower_profit_cents, None);
+        assert!(raw.evidence.contains("grupo raro: 3 vendas"));
     }
 }

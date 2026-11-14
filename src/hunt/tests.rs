@@ -3013,14 +3013,15 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
         refused =
             h.db.call(|c| {
                 Ok(c.query_row(
-                    "SELECT rare_group, mid_profit_cents, detail FROM evaluations
-                     WHERE listing_id = ?1 AND reason = 'raro_nao_comprovado'",
+                    "SELECT rare_group, mid_profit_cents, detail, reason FROM evaluations
+                     WHERE listing_id = ?1",
                     [ID_LEARNED],
                     |r| {
                         Ok((
                             r.get::<_, Option<String>>(0)?,
                             r.get::<_, i64>(1)?,
                             r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
                         ))
                     },
                 )
@@ -3032,14 +3033,15 @@ async fn learned_pattern_listing_is_priced_by_the_sales_that_taught_it() {
             break;
         }
     }
-    // R$ 12,00 no FT comum de ~R$ 11,6 não dá lucro; o pattern aprendido vendeu a 2,0–2,4× no CSFloat, mas
-    // nenhuma venda fechada prova o prêmio: fica de fora (11/11, Serpent Strike #804).
+    // R$ 12,00 no FT comum de ~R$ 11,6: o pattern aprendido vendeu a 2,0–2,4× no CSFloat, mas 3 vendas e o
+    // encolhimento dão só ~1,3× esperado e 1,0× no limite inferior, e o preço médio não paga o anúncio
+    // (11/11, Serpent Strike #804, que o "provado ou não" deixava passar).
     assert!(hit.is_none(), "{hit:?}");
-    let (_, mid, detail) = refused.expect("recusa registrada");
-    assert!(detail.contains("grupo raro: 3 vendas"), "{detail}");
+    let (_, _, detail, reason) = refused.expect("recusa registrada");
+    assert_eq!(reason, "sem_lucro");
     assert!(
-        mid >= 100,
-        "o prêmio aprendido ainda aparece no lucro médio: {mid}"
+        detail.contains("prêmio esperado 1,3x o preço comum, limite inferior 1,0x"),
+        "{detail}"
     );
     // e o seed entra na busca rara do Moonrise
     let tasks = h.lock().queue.tasks();
@@ -3232,4 +3234,128 @@ fn unproven_rare_is_shown_only_when_selling_as_common_loses_cents() {
     assert!(!refused(-50));
     assert!(refused(-51));
     assert!(refused(-91)); // Serpent Strike #804, 11/11
+}
+
+#[tokio::test]
+async fn exploration_cap_is_counted_in_the_bank_and_can_be_changed_or_turned_off() {
+    let (db, _dir) = temp_db();
+    let (h, _) = hunt_against("http://127.0.0.1:9", db.clone());
+    h.set_saldo(3000, SaldoSource::Manual);
+    db.call(|c| {
+        for (id, price, explore, sold) in [
+            ("a", 300, true, false),
+            ("b", 600, false, false),
+            ("c", 500, true, true), // já vendida: não conta
+        ] {
+            c.execute(
+                "INSERT INTO purchases(id, json, created_at) VALUES (?1, ?2, 1)",
+                rusqlite::params![
+                    id,
+                    json!({ "price_cents": price, "explore": explore }).to_string()
+                ],
+            )?;
+            if sold {
+                c.execute(
+                    "INSERT INTO outcomes(purchase_id, sold_cents, sold_at) VALUES (?1, 900, 2)",
+                    [id],
+                )?;
+            }
+        }
+        // compra antiga, de antes do campo existir, vale como não-exploração
+        c.execute(
+            "INSERT INTO purchases(id, json, created_at) VALUES ('d', ?1, 1)",
+            [json!({ "price_cents": 100 }).to_string()],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // capital 3000 + 300 + 600 + 100 = 4000; 12 % = 480; já abertos em exploração: 300
+    assert!(detect::explore_fits(&h, 180).await.unwrap());
+    assert!(!detect::explore_fits(&h, 181).await.unwrap());
+    catalog::set_setting(&db, "explore_cap_pct", "50".into())
+        .await
+        .unwrap();
+    assert!(detect::explore_fits(&h, 1700).await.unwrap());
+    assert!(!detect::explore_fits(&h, 1701).await.unwrap());
+    catalog::set_setting(&db, "explore_cap_pct", "0".into())
+        .await
+        .unwrap();
+    assert!(!detect::explore_fits(&h, 1).await.unwrap());
+}
+
+/// O anúncio do seed aprendido 269 (Moonrise FT) com o preço pedido e o saldo dados, depois de
+/// 12 vendas comuns a 1× e 3 do seed 269 a `sales` ×. Devolve a oportunidade ou o motivo da recusa.
+async fn learned_listing(
+    sales: [f64; 3],
+    unit_price: i64,
+    saldo: i64,
+) -> (Option<Opportunity>, Option<String>) {
+    const ID: &str = "341565526995940199";
+    let (base, bodies) = serve().await;
+    {
+        let mut b = bodies.listings.lock().unwrap();
+        let l = &mut b["data"]["listings"][14];
+        l["unPrice"] = json!(unit_price * 100 / 115);
+        l["unFee"] = json!(unit_price - unit_price * 100 / 115);
+    }
+    let (db, _dir) = temp_db();
+    db.call(move |c| {
+        let commons = (1..=12).map(|i| (900 + i, 1.0));
+        for (at, (seed, multiple)) in commons.chain(sales.map(|m| (269, m))).enumerate() {
+            c.execute(
+                "INSERT INTO csfloat_sales(name, sold_at, price_usd_cents, base_usd_cents, multiple, seed, \"float\")
+                 VALUES (?1, ?2, ?3, 100, ?4, ?5, 0.3)",
+                rusqlite::params![MOON, at as i64 + 1, (multiple * 100.0) as i64, multiple, seed],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.load().await.unwrap();
+    h.set_saldo(saldo, SaldoSource::Manual);
+    for _ in 0..400 {
+        tick(&h).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Opportunity(o) = ev
+                && o.id == ID
+            {
+                return (Some(o), None);
+            }
+        }
+        let reason =
+            h.db.call(|c| {
+                Ok(c.query_row(
+                    "SELECT reason FROM evaluations WHERE listing_id = ?1",
+                    [ID],
+                    |r| r.get(0),
+                )
+                .ok())
+            })
+            .await
+            .unwrap();
+        if reason.is_some() {
+            return (None, reason);
+        }
+    }
+    panic!("o anúncio não foi avaliado");
+}
+
+#[tokio::test]
+async fn a_premium_that_holds_at_its_lower_bound_is_bought_in_a_size_that_follows_the_confidence() {
+    // Seed 269 com 3 vendas a ~3× (esperado ~1,5×, limite inferior ~1,2×) no Moonrise FT de ~R$ 11,6.
+    // Preço de R$ 11,00: lucro positivo até no limite inferior → tamanho acompanha a confiança (~44 % do saldo).
+    let (opp, reason) = learned_listing([3.0, 3.6, 3.3], 1100, 3608).await;
+    let opp = opp.unwrap_or_else(|| panic!("aprovada: {reason:?}"));
+    assert!(
+        !opp.explore && opp.evidence.contains("limite inferior"),
+        "{}",
+        opp.evidence
+    );
+    // a mesma prova com saldo de R$ 12,00: R$ 11,00 passa da fração dele que o limite inferior sustenta
+    let (opp, reason) = learned_listing([3.0, 3.6, 3.3], 1100, 1200).await;
+    assert!(opp.is_none());
+    assert_eq!(reason.as_deref(), Some("acima_da_confianca"));
 }
