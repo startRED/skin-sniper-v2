@@ -170,7 +170,8 @@ function learning(): Learning {
     { queries: 11900, finds: 2, near: 93, alerts: 6, alerts_closed: 4, labeled: 0, profit_cents: 0 },
     { queries: 0, finds: 0, near: 0, alerts: 0, alerts_closed: 0, labeled: 0, profit_cents: 0 }
   ];
-  return { days, since: nowS() - 2.4 * 86400, teacher, value, refit: 1, weeks,
+  const candidates = { hours: 24, approved: 2, over_saldo: 9, yellow: 31, yellow_gone: 12, yellow_fast: 7, yellow_relisted: 2 };
+  return { days, since: nowS() - 2.4 * 86400, teacher, value, refit: 1, weeks, candidates,
     adjustments: [{ at: nowS() - 86400, old: 1, new: 0.98, why: 'Preços observados abaixo dos previstos' }] };
 }
 

@@ -227,4 +227,5 @@ export type Learning = {
   exploration?: LearningExploration | null;
   experiment?: LearningExperiment | null;
   adjustments?: { at: number; old: number | null; new: number | null; why: string }[];
+  candidates?: { hours: number; approved: number; over_saldo: number; yellow: number; yellow_gone: number; yellow_fast: number; yellow_relisted: number };
 };

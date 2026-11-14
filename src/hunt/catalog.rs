@@ -303,13 +303,14 @@ fn seed_weight(deals: Option<&SkinDeals>, seed: u16, spd: f64) -> f64 {
 }
 
 /// Conta, por skin, os anúncios de seed pagante avaliados (inclusive os acima do saldo, que a auditoria grava) e
-/// os que deram lucro no preço médio ou viraram aviso.
+/// os que deram lucro no preço médio ou viraram aviso (o acima do saldo bom não: a agenda caça o que cabe no saldo).
 pub async fn load_deals(db: &Db, learned: &Learned, now: i64) -> Result<Deals> {
     let rows: Vec<(String, u16, u32, u32)> = db
         .call(move |c| {
             c.prepare(
                 "SELECT name, seed, COUNT(DISTINCT listing_id),
-                        COUNT(DISTINCT CASE WHEN reason = 'aprovada' OR mid_profit_cents >= 0 THEN listing_id END)
+                        COUNT(DISTINCT CASE WHEN reason = 'aprovada'
+                            OR (mid_profit_cents >= 0 AND reason != 'acima_do_saldo_boa') THEN listing_id END)
                  FROM evaluations WHERE seed IS NOT NULL AND at >= ?1 GROUP BY name, seed",
             )?
             .query_map([now - DEALS_DAYS * 86_400], |r| {

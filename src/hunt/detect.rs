@@ -151,6 +151,13 @@ pub(crate) fn roll_cycle(h: &Hunt) {
         recusas = %c.refused_text(),
         "{text}"
     );
+    let n = |k| c.refused.get(k).copied().unwrap_or(0);
+    tracing::info!(
+        aprovadas = c.passed,
+        acima_do_saldo_boas = n("acima_do_saldo_boa"),
+        virtuais = n("zona_amarela"),
+        "candidatos em 10 min"
+    );
     // Para medir o que dispara os bloqueios longos (quantidade ou tempo seguido): o robô antigo gravava cada chamada.
     let [main, extra, book] = h.steam.take_calls();
     tracing::info!(
@@ -192,6 +199,16 @@ pub(super) fn should_notify(opp: &Opportunity, min_profit: i64) -> bool {
 fn is_near(n: &Near) -> bool {
     let short = min_profit(n.price_cents) - n.mid_cents;
     short > 0 && short <= 30.max(n.price_cents / 10)
+}
+
+/// Prejuízo estimado (preço médio) até onde o raro sem lucro vira candidato virtual (zona amarela).
+const YELLOW_MAX_LOSS_CENTS: i64 = 100;
+
+/// Raro recusado sem lucro que vira candidato virtual (`zona_amarela`, só painel e contagem): prejuízo no preço
+/// médio entre R$ 1 e zero e, vendido como comum, perde no máximo o que o raro não comprovado pode perder.
+pub(crate) fn yellow_zone(rare: bool, mid_profit_cents: i64, quick_profit_cents: i64) -> bool {
+    rare && (-YELLOW_MAX_LOSS_CENTS..=0).contains(&mid_profit_cents)
+        && !unproven_loses_too_much(quick_profit_cents)
 }
 
 /// Baixa `QueryPriceHistory` do nome e grava em `price_points` e em `items` (vendas/dia, dispersão).
@@ -263,6 +280,15 @@ async fn history_at(h: &Hunt, name: &str) -> Result<Option<i64>> {
     .await
 }
 
+tokio::task_local! {
+    /// Avaliação só com o que já está no banco (anúncio acima do saldo): nenhuma leitura nova na Steam ou no CSFloat.
+    static OFFLINE: ();
+}
+
+fn offline() -> bool {
+    OFFLINE.try_with(|_| ()).is_ok()
+}
+
 /// Pontos dos últimos 30 dias do nome; baixa o histórico se passou de 6 h.
 pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<PricePoint>> {
     let n = name.to_string();
@@ -275,7 +301,7 @@ pub(crate) async fn points_for(h: &Hunt, name: &str, now: i64) -> Result<Vec<Pri
             .map(Option::flatten)
         })
         .await?;
-    if last.is_none_or(|t| now - t >= HISTORY_TTL) {
+    if !offline() && last.is_none_or(|t| now - t >= HISTORY_TTL) {
         if crate::research::current().is_some_and(|c| c.source == "paralela") {
             anyhow::bail!("histórico vencido para leitura paralela");
         }
@@ -348,7 +374,7 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
         .csfloat_cache
         .get(name)
         .is_some_and(|(at, _)| now - at < HISTORY_TTL);
-    if !fresh {
+    if !fresh && !offline() {
         if crate::research::current().is_some_and(|c| c.source == "paralela") {
             anyhow::bail!("vendas raras ausentes no cache da leitura paralela");
         }
@@ -1123,13 +1149,6 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     for l in relevant.iter().copied() {
         let was_known = known.contains(&l.listing_id);
         let active = h.lock().active.get(&l.listing_id).map(|a| a.opp.clone());
-        if l.price_cents > saldo && active.is_none() {
-            // Guarda uma vez por ciclo: o mesmo anúncio volta em toda consulta da tarefa.
-            if h.lock().cycle.over_saldo.insert(l.listing_id.clone()) {
-                audit.push(EvalRow::new(task, l, None, "acima_do_saldo"));
-            }
-            continue; // não cabe agora; se o saldo subir, ainda é novo
-        }
         // Concorrência = outro anúncio do mesmo nome e do mesmo grupo raro (ou ambos comuns): um comum
         // barato não segura a venda de um T1. Inclui as outras faixas do mesmo raro.
         let mine = key(l);
@@ -1140,6 +1159,13 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .map(|o| o.price_cents)
             .chain(elsewhere.get(&(l.name.clone(), mine.clone())).copied())
             .min();
+        if l.price_cents > saldo && active.is_none() {
+            // Guarda uma vez por ciclo: o mesmo anúncio volta em toda consulta da tarefa.
+            if h.lock().cycle.over_saldo.insert(l.listing_id.clone()) {
+                audit.push(over_saldo(h, task, l, others_min, notify_min, saldo).await);
+            }
+            continue; // não cabe agora; se o saldo subir, ainda é novo
+        }
         // Já visto: só reavalia se o preço, o histórico ou o menor concorrente mudaram desde a última
         // avaliação (ou se é oportunidade ativa e o histórico passou do prazo: a avaliação pode rebaixá-la).
         // shortcut: a janela de 7 dias anda sem mudar a chave; um dia que sai dela só pesa quando o histórico
@@ -1163,7 +1189,7 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                 continue;
             }
         }
-        let judged = match evaluate_one(h, task, l, others_min, notify_min).await {
+        let mut judged = match evaluate_one(h, task, l, others_min, notify_min).await {
             Ok(j) => j,
             Err(e) => {
                 tracing::warn!("avaliação de {} adiada: {e:#}", l.listing_id);
@@ -1171,6 +1197,13 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             }
         };
         let new_credit = !was_known && super::explore::first_credit(h, &l.listing_id).await?;
+        // `mine` é o grupo raro (tabela ou aprendido), o mesmo que a avaliação usou
+        if judged.refused == Some("sem_lucro")
+            && let Some(n) = &judged.near
+            && yellow_zone(mine.is_some(), n.mid_cents, n.quick_cents)
+        {
+            judged.refused = Some("zona_amarela");
+        }
         let mut row = EvalRow::new(task, l, others_min, judged.refused.unwrap_or("aprovada"));
         row.mid_profit = judged.near.as_ref().map(|n| n.mid_cents);
         row.quick_profit = judged.near.as_ref().map(|n| n.quick_cents);
@@ -1231,6 +1264,91 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
         h.publish_state();
     }
     Ok(out)
+}
+
+/// Anúncio acima do saldo: a mesma avaliação, só com o que já está no banco. O que seria aprovado se coubesse vira
+/// `acima_do_saldo_boa` e avisa no Telegram com o que falta no saldo; não vira oportunidade (nem compra, nem
+/// placar, nem crédito da agenda) e não conta como visto: se o saldo subir, ainda é novo.
+async fn over_saldo(
+    h: &Hunt,
+    task: &Task,
+    l: &Listing,
+    others_min: Option<i64>,
+    notify_min: i64,
+    saldo: i64,
+) -> EvalRow {
+    let judged = OFFLINE
+        .scope((), evaluate_one(h, task, l, others_min, notify_min))
+        .await;
+    let Ok(Judged {
+        found: Some((opp, notify)),
+        near,
+        detail,
+        ..
+    }) = judged
+    else {
+        return EvalRow::new(task, l, None, "acima_do_saldo");
+    };
+    h.lock().cycle.refuse("acima_do_saldo_boa");
+    let mut row = EvalRow::new(task, l, others_min, "acima_do_saldo_boa");
+    row.mid_profit = near.as_ref().map(|n| n.mid_cents);
+    row.quick_profit = near.as_ref().map(|n| n.quick_cents);
+    row.detail = detail;
+    let id = l.listing_id.clone();
+    let alerted =
+        h.db.call(move |c| {
+            c.query_row(
+                "SELECT 1 FROM evaluations WHERE reason = 'acima_do_saldo_boa' AND listing_id = ?1",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()
+        })
+        .await;
+    if notify && matches!(alerted, Ok(None)) {
+        send_over_saldo_alert(h, &opp, saldo);
+    }
+    row
+}
+
+/// Aviso no Telegram de um anúncio bom acima do saldo: preço, lucro e quanto falta. Só uma tentativa; o anúncio volta
+/// a ser avaliado no próximo ciclo, mas só avisa de novo se nunca foi gravado como bom.
+fn send_over_saldo_alert(h: &Hunt, opp: &Opportunity, saldo: i64) {
+    let Some(tg) = h.telegram.clone() else {
+        return;
+    };
+    let mut note = format!(
+        "Acima do saldo: faltam {} (saldo {}). Não é compra possível agora; cubra o saldo se quiser.",
+        brl(opp.price_cents - saldo),
+        brl(saldo)
+    );
+    if let Some(s) = &opp.seal {
+        note += &format!(" Raro {}.", s.text);
+    }
+    let alert = Alert {
+        // id próprio: não segura o aviso normal se o anúncio couber no saldo depois
+        id: format!("saldo:{}", opp.id),
+        name: opp.name.clone(),
+        group: opp.group.clone(),
+        price_cents: opp.price_cents,
+        mid_profit_cents: opp.sell.mid.profit_cents,
+        safe_profit_cents: opp.sell.quick.profit_cents,
+        eta_hours: opp.sell.mid.eta_hours,
+        seal: Some(note),
+    };
+    tokio::spawn(async move {
+        match tg.notify(&alert, None).await {
+            Ok(_) | Err(NotifyError::NotConfigured) => {}
+            Err(e) => tracing::warn!("aviso acima do saldo no Telegram falhou: {e}"),
+        }
+    });
+    tracing::info!(
+        "acima do saldo bom: {} a {}, lucro médio {}, faltam {}",
+        opp.name,
+        brl(opp.price_cents),
+        brl(opp.sell.mid.profit_cents),
+        brl(opp.price_cents - saldo)
+    );
 }
 
 /// id, nome, preço, seed, float.
@@ -1548,5 +1666,133 @@ mod tests {
         rows.push(row(mw, 0.1, 2.0, Some("cs:Skin:t1")));
         rows.push(row(mw, 0.1, 5.0, Some("cs:Skin:t2")));
         assert_eq!(rare_multiples(&rows, ft, "cs:Skin:t1"), vec![1.5, 1.7, 2.0]);
+    }
+
+    #[test]
+    fn yellow_zone_is_a_rare_losing_up_to_one_real() {
+        use super::yellow_zone;
+        assert!(yellow_zone(true, -100, -50) && yellow_zone(true, 0, 0));
+        assert!(!yellow_zone(true, -101, 0), "prejuízo acima de R$ 1");
+        assert!(
+            !yellow_zone(true, 1, 0),
+            "lucro abaixo da régua não é prejuízo"
+        );
+        assert!(
+            !yellow_zone(true, -50, -51),
+            "vendido como comum perde demais"
+        );
+        assert!(!yellow_zone(false, -50, 0), "comum não entra");
+    }
+
+    /// Medida: quantos anúncios gravados como `acima_do_saldo` nos últimos 7 dias do banco seriam bons. Só roda à mão
+    /// (`SNIPER_DB=<cópia>/sniper.db cargo test --release over_saldo_on_a_real_db -- --ignored --nocapture`); abre o
+    /// banco para escrita (migração), então use sempre uma cópia. Premissas: avalia com o banco de agora (histórico,
+    /// vendas guardadas, observações, correção), não com o de cada momento; o concorrente é o menor anúncio do mesmo
+    /// nome e grupo vivo no registro na hora da avaliação; nenhuma leitura de rede (clientes apontam para porta morta).
+    #[tokio::test]
+    #[ignore = "medida: SNIPER_DB aponta para uma CÓPIA do banco"]
+    async fn over_saldo_on_a_real_db() {
+        use crate::hunt::{Hunt, HuntDeps};
+        use crate::steam::listings::Listing;
+        let path = std::env::var("SNIPER_DB").expect("SNIPER_DB");
+        let db = crate::db::Db::open(std::path::Path::new(&path)).unwrap();
+        let dead = "http://127.0.0.1:9";
+        let h = Hunt::with_clock(
+            HuntDeps {
+                settings: crate::settings::SettingsStore::new(db.clone()),
+                db: db.clone(),
+                steam: std::sync::Arc::new(
+                    crate::steam::client::SteamClient::with_base(dead).unwrap(),
+                ),
+                csfloat: std::sync::Arc::new(
+                    crate::csfloat::CsfloatClient::with_base(dead).unwrap(),
+                ),
+                events: tokio::sync::broadcast::channel(16).0,
+                telegram: None,
+            },
+            crate::db::now_unix,
+        );
+        h.load().await.unwrap();
+        let notify_min = h.settings.view().await.unwrap().notify_min_profit_cents;
+        type Row = (
+            String,
+            String,
+            i64,
+            Option<f64>,
+            Option<u16>,
+            Option<u32>,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            i64,
+        );
+        let rows: Vec<Row> = db
+            .call(|c| {
+                c.prepare(
+                    "SELECT e.listing_id, e.name, e.price_cents, e.\"float\", e.seed, e.paint_index, e.stickers_json,
+                        e.keychains_json, e.inspect_url,
+                        (SELECT min(o.price_cents) FROM observations o, observations me WHERE me.listing_id = e.listing_id
+                         AND o.name = e.name AND o.grp IS me.grp AND o.listing_id != e.listing_id
+                         AND o.first_seen <= e.at AND coalesce(o.gone_at, o.last_seen) >= e.at), e.at
+                     FROM evaluations e WHERE e.reason = 'acima_do_saldo'
+                     AND e.at >= (SELECT max(at) FROM evaluations) - 7 * 86400
+                     AND e.id = (SELECT max(id) FROM evaluations x WHERE x.listing_id = e.listing_id AND x.reason = 'acima_do_saldo')",
+                )?
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?))
+                })?
+                .collect()
+            })
+            .await
+            .unwrap();
+        let (mut good, mut alert, mut rare_good) = (0, 0, 0);
+        for (id, name, price, float, seed, paint, stickers, keychains, inspect, others_min, _) in
+            &rows
+        {
+            let l = Listing {
+                listing_id: id.clone(),
+                asset_id: String::new(),
+                name: name.clone(),
+                price_cents: *price,
+                seller_cents: 0,
+                fee_cents: 0,
+                currency: 7,
+                float: *float,
+                seed: *seed,
+                paint_index: *paint,
+                icon_url: String::new(),
+                inspect_url: inspect.clone(),
+                stickers: serde_json::from_str(stickers).unwrap_or_default(),
+                keychains: serde_json::from_str(keychains).unwrap_or_default(),
+                market_tradable_restriction: None,
+                market_marketable_restriction: None,
+            };
+            let task = super::Task {
+                id: "prova".into(),
+                name: name.clone(),
+                code: String::new(),
+                wear: None,
+                seeds: vec![],
+                float: None,
+                score: 0.0,
+            };
+            let row = super::over_saldo(&h, &task, &l, *others_min, notify_min, 0).await;
+            if row.reason == "acima_do_saldo_boa" {
+                good += 1;
+                rare_good += usize::from(row.group.is_some() || seed.is_some());
+                let notify = row.mid_profit.is_some_and(|p| p >= notify_min);
+                alert += usize::from(notify);
+                println!(
+                    "boa: {name} #{seed:?} a {price}, médio {:?}, rápido {:?}",
+                    row.mid_profit, row.quick_profit
+                );
+            }
+        }
+        println!(
+            "{} anúncios acima do saldo em 7 dias; {good} bons ({rare_good} com seed), {alert} com lucro médio ≥ aviso; {:.3} bons/h",
+            rows.len(),
+            good as f64 / 168.0
+        );
     }
 }

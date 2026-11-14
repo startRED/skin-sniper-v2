@@ -1260,6 +1260,115 @@ async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Ve
 }
 
 #[tokio::test]
+async fn over_saldo_listing_is_appraised_offline_without_becoming_an_opportunity() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    assert_eq!(run_until_two(&h, &mut rx).await.len(), 2);
+    let task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    let page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    // histórico vencido: fora do modo offline, avaliar pediria o histórico de novo à Steam
+    db.call(|c| c.execute("UPDATE items SET history_at = ?1", [NOW - 7 * 3600]))
+        .await
+        .unwrap();
+    let history = bodies.history_queries.load(Ordering::SeqCst);
+    let csfloat = bodies.csfloat_names.lock().unwrap().len();
+    // outro processo, sem nada ativo e com saldo que não cobre nenhum dos dois achados (R$ 4,00 e R$ 7,00)
+    let (h2, _rx) = hunt_against(&base, db.clone());
+    h2.set_saldo(300, SaldoSource::Manual);
+    let out = detect::process(&h2, &task, &page).await.unwrap();
+    assert!(out.found.is_empty() && h2.lock().active.is_empty());
+    assert_eq!(
+        out.rewarded.finds + out.rewarded.fresh,
+        0,
+        "não rende à agenda"
+    );
+    assert_eq!(bodies.history_queries.load(Ordering::SeqCst), history);
+    assert_eq!(bodies.csfloat_names.lock().unwrap().len(), csfloat);
+    let good: Vec<(String, Option<i64>)> = db
+        .call(|c| {
+            c.prepare("SELECT listing_id, mid_profit_cents FROM evaluations WHERE reason = 'acima_do_saldo_boa'")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .await
+        .unwrap();
+    let mut ids: Vec<&str> = good.iter().map(|g| g.0.as_str()).collect();
+    ids.sort();
+    let mut want = vec![ID_CHEAP, ID_T1];
+    want.sort();
+    assert_eq!(ids, want);
+    assert!(good.iter().all(|g| g.1.is_some_and(|p| p >= 100)));
+    assert!(
+        h2.lock()
+            .cycle
+            .refused_text()
+            .contains("acima_do_saldo_boa=2")
+    );
+    let c = db
+        .call(move |c| crate::web::learning::candidates(c, NOW))
+        .await
+        .unwrap();
+    assert_eq!((c.over_saldo, c.yellow), (2, 0));
+}
+
+#[tokio::test]
+async fn rare_losing_cents_that_loses_reais_as_common_is_not_a_virtual_candidate() {
+    let (base, _bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    let t1 = run_until_two(&h, &mut rx)
+        .await
+        .into_iter()
+        .find(|o| o.id == ID_T1)
+        .unwrap();
+    let task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    // o mesmo T1 com R$ 0,01 de prejuízo no preço médio (a venda não muda, só o custo): está na faixa de R$ 1, mas
+    // vendido como comum perde R$ 5,67, acima dos R$ 0,50 do raro não comprovado
+    let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let l = page
+        .listings
+        .iter_mut()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap();
+    l.price_cents += t1.sell.mid.profit_cents + 1;
+    assert_eq!(
+        (t1.sell.mid.profit_cents, t1.sell.quick.profit_cents),
+        (545, -21)
+    );
+    let (h2, _rx) = hunt_against(&base, db.clone());
+    h2.set_saldo(1_000_000, SaldoSource::Manual);
+    let out = detect::process(&h2, &task, &page).await.unwrap();
+    assert!(out.found.iter().all(|(o, _)| o.id != ID_T1));
+    let (reason, mid): (String, i64) = db
+        .call(|c| {
+            c.query_row(
+                "SELECT reason, mid_profit_cents FROM evaluations WHERE listing_id = ?1 ORDER BY id DESC LIMIT 1",
+                [ID_T1],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!((reason.as_str(), mid), ("sem_lucro", -1));
+    assert!(!h2.lock().cycle.refused_text().contains("zona_amarela"));
+}
+
+#[tokio::test]
 async fn cheaper_competitor_reevaluates_known_opportunity() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
