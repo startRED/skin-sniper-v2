@@ -1684,7 +1684,8 @@ mod tests {
         assert!(!yellow_zone(false, -50, 0), "comum não entra");
     }
 
-    /// Medida: quantos anúncios gravados como `acima_do_saldo` nos últimos 7 dias do banco seriam bons. Só roda à mão
+    /// Medida: quantos anúncios gravados como `acima_do_saldo` (ou o motivo em `REASON`) nos últimos 7 dias do banco
+    /// seriam bons e quantos cairiam na zona amarela, com as regras de hoje. Só roda à mão
     /// (`SNIPER_DB=<cópia>/sniper.db cargo test --release over_saldo_on_a_real_db -- --ignored --nocapture`); abre o
     /// banco para escrita (migração), então use sempre uma cópia. Premissas: avalia com o banco de agora (histórico,
     /// vendas guardadas, observações, correção), não com o de cada momento; o concorrente é o menor anúncio do mesmo
@@ -1713,6 +1714,8 @@ mod tests {
             crate::db::now_unix,
         );
         h.load().await.unwrap();
+        // REASON=aprovada confere a régua: os aprovados do banco devem sair aprovados aqui também
+        let reason = std::env::var("REASON").unwrap_or_else(|_| "acima_do_saldo".into());
         let notify_min = h.settings.view().await.unwrap().notify_min_profit_cents;
         type Row = (
             String,
@@ -1728,25 +1731,26 @@ mod tests {
             i64,
         );
         let rows: Vec<Row> = db
-            .call(|c| {
+            .call(move |c| {
                 c.prepare(
-                    "SELECT e.listing_id, e.name, e.price_cents, e.\"float\", e.seed, e.paint_index, e.stickers_json,
+                    "WITH last AS (SELECT max(id) id FROM evaluations WHERE reason = ?1
+                        AND at >= (SELECT max(at) FROM evaluations) - 7 * 86400 GROUP BY listing_id)
+                     SELECT e.listing_id, e.name, e.price_cents, e.\"float\", e.seed, e.paint_index, e.stickers_json,
                         e.keychains_json, e.inspect_url,
                         (SELECT min(o.price_cents) FROM observations o, observations me WHERE me.listing_id = e.listing_id
                          AND o.name = e.name AND o.grp IS me.grp AND o.listing_id != e.listing_id
                          AND o.first_seen <= e.at AND coalesce(o.gone_at, o.last_seen) >= e.at), e.at
-                     FROM evaluations e WHERE e.reason = 'acima_do_saldo'
-                     AND e.at >= (SELECT max(at) FROM evaluations) - 7 * 86400
-                     AND e.id = (SELECT max(id) FROM evaluations x WHERE x.listing_id = e.listing_id AND x.reason = 'acima_do_saldo')",
+                     FROM last JOIN evaluations e ON e.id = last.id",
                 )?
-                .query_map([], |r| {
+                .query_map([reason], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?))
                 })?
                 .collect()
             })
             .await
             .unwrap();
-        let (mut good, mut alert, mut rare_good) = (0, 0, 0);
+        let mut why: std::collections::BTreeMap<String, u32> = Default::default();
+        let (mut good, mut alert, mut near_100, mut yellow) = (0, 0, 0, 0);
         for (id, name, price, float, seed, paint, stickers, keychains, inspect, others_min, _) in
             &rows
         {
@@ -1777,22 +1781,43 @@ mod tests {
                 float: None,
                 score: 0.0,
             };
-            let row = super::over_saldo(&h, &task, &l, *others_min, notify_min, 0).await;
-            if row.reason == "acima_do_saldo_boa" {
-                good += 1;
-                rare_good += usize::from(row.group.is_some() || seed.is_some());
-                let notify = row.mid_profit.is_some_and(|p| p >= notify_min);
-                alert += usize::from(notify);
-                println!(
-                    "boa: {name} #{seed:?} a {price}, médio {:?}, rápido {:?}",
-                    row.mid_profit, row.quick_profit
+            let judged = super::OFFLINE
+                .scope(
+                    (),
+                    super::evaluate_one(&h, &task, &l, *others_min, notify_min),
+                )
+                .await;
+            let reason = match &judged {
+                Err(e) => format!("erro: {e:#}").chars().take(60).collect(),
+                Ok(j) => j.refused.unwrap_or("aprovada").to_string(),
+            };
+            if let Ok(j) = &judged {
+                near_100 += u32::from(
+                    j.found.is_none() && j.near.as_ref().is_some_and(|n| n.mid_cents >= -100),
                 );
+                let rare = super::rare_group(&h, &l).0.is_some();
+                yellow += u32::from(
+                    j.refused == Some("sem_lucro")
+                        && j.near
+                            .as_ref()
+                            .is_some_and(|n| super::yellow_zone(rare, n.mid_cents, n.quick_cents)),
+                );
+                if let Some((o, notify)) = &j.found {
+                    good += 1;
+                    alert += u32::from(*notify);
+                    println!(
+                        "boa: {name} #{seed:?} a {price}, médio {}, rápido {}",
+                        o.sell.mid.profit_cents, o.sell.quick.profit_cents
+                    );
+                }
             }
+            *why.entry(reason).or_default() += 1;
         }
         println!(
-            "{} anúncios acima do saldo em 7 dias; {good} bons ({rare_good} com seed), {alert} com lucro médio ≥ aviso; {:.3} bons/h",
+            "{} anúncios acima do saldo em 7 dias; {good} bons, {alert} avisariam; {:.3} bons/h; recusados com prejuízo médio até R$ 1: {near_100} ({yellow} na zona amarela, {:.3}/h); motivos: {why:?}",
             rows.len(),
-            good as f64 / 168.0
+            f64::from(good) / 168.0,
+            f64::from(yellow) / 168.0
         );
     }
 }
