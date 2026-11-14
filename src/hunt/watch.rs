@@ -77,6 +77,7 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
         })
         .await?;
 
+    let closed = catalog::load_closed(&h.db).await?;
     let correction = h.corrections();
     let (books, saldo) = {
         let s = h.lock();
@@ -95,24 +96,31 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
             let rare = t.rare();
             // o seed que paga traz a própria prova (`patterns`); sem medida, vale o grupo da tabela
             let seed = t.seeds.first().map(|r| r.0);
-            let learned = super::patterns::group(&h.lock().learned, &t.name, seed);
-            let group = learned
-                .as_ref()
-                .map(|(g, _)| g.clone())
+            let group = super::patterns::group(&h.lock().learned, &t.name, seed)
+                .map(|(g, _)| g)
                 .or_else(|| group_of(&t.name, seed.map(u32::from), None, None));
             let (icon, spd, mut pts) = match f {
                 Some((_, i, s, p)) => (i, s, p),
                 None => (String::new(), 0.0, vec![]),
             };
             sell::discount(&mut pts, correction[usize::from(rare)]);
-            // Raro: o teto vem do prêmio do grupo (vendas do CSFloat já em cache); com menos de
-            // `RARE_MIN_SALES` vendas não há teto honesto.
+            // Raro: o teto vem do prêmio que a Steam fechou no grupo (preço ÷ preço médio comum, a mesma conta do
+            // `detect::appraise`); com menos de `RARE_MIN_SALES` fechamentos não há teto honesto.
             let evidence = if rare {
-                let multiples = match (learned, &group) {
-                    (Some((_, proof)), _) => proof,
-                    (None, Some(g)) => rare_multiples(h, &t.name, &g.key),
-                    (None, None) => vec![],
-                };
+                let base = sell::estimate(&pts, now, None, None)
+                    .ok()
+                    .map(|e| e.mid.price_cents)
+                    .filter(|b| *b > 0);
+                let multiples: Vec<f64> = group
+                    .iter()
+                    .zip(base)
+                    .flat_map(|(g, b)| {
+                        closed
+                            .iter()
+                            .filter(move |(k, n, _)| *k == g.key && *n == t.name)
+                            .map(move |(_, _, p)| *p as f64 / b as f64)
+                    })
+                    .collect();
                 (multiples.len() >= RARE_MIN_SALES).then_some(RareEvidence { multiples })
             } else {
                 None
@@ -175,20 +183,4 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(rows)
-}
-
-/// Múltiplos (preço ÷ base) das vendas do CSFloat do grupo que já estão em cache; não consulta a rede.
-fn rare_multiples(h: &Hunt, name: &str, group_key: &str) -> Vec<f64> {
-    let s = h.lock();
-    s.csfloat_cache.get(name).map_or(vec![], |(_, sales)| {
-        sales
-            .iter()
-            .filter(|x| !x.has_stickers)
-            .filter(|x| {
-                group_of(name, x.seed.map(u32::from), x.paint_index, x.float)
-                    .is_some_and(|g| g.key == group_key)
-            })
-            .map(|x| x.multiple)
-            .collect()
-    })
 }

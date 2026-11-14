@@ -267,6 +267,7 @@ async fn agenda_on_a_real_db() {
     let learned = h.lock().learned.clone();
     let items = catalog::load_items(&db).await.unwrap();
     let deals = catalog::load_deals(&db, &learned, end).await.unwrap();
+    let closed = catalog::load_closed(&db).await.unwrap();
     let (ratio, _) = catalog::load_ratio(&db)
         .await
         .unwrap()
@@ -280,6 +281,7 @@ async fn agenda_on_a_real_db() {
         floors: &floors,
         learned: &learned,
         deals: &deals,
+        closed: &closed,
     };
     let (mut tasks, ranges) = select_ranges(&items, &ctx);
     tasks.retain(Task::rare);

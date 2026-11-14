@@ -1164,13 +1164,13 @@ async fn fixture_listing_becomes_opportunity_event_then_gone() {
     // o que está sendo vigiado: piso visto, teto de compra (de onde ainda sobra R$ 1,00 e 10 %) e ritmo
     let watch = watch::list(&h).await.unwrap();
     assert_eq!(watch.len(), st.hunt.watching as usize);
-    // o Moonrise (aqui raro por seed) aparece com o piso visto e o teto do prêmio do grupo: 3 vendas do
-    // CSFloat → mid R$ 17,76 → líquido 15,45 → compraria até 14,04 (10 % de margem)
+    // o Moonrise (aqui raro por seed) aparece com o piso visto e o teto do prêmio do grupo: 3 fechamentos na
+    // Steam → mid R$ 17,77 → líquido 15,46 → compraria até 14,05 (10 % de margem)
     let raro = watch
         .iter()
         .find(|r| r.kind == Kind::Raro && r.floor_cents == Some(1000))
         .unwrap_or_else(|| panic!("piso R$ 10,00 visto na faixa 58-59: {watch:#?}"));
-    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(1404)));
+    assert_eq!((raro.kind, raro.max_buy_cents), (Kind::Raro, Some(1405)));
     assert_eq!(raro.last_checked_at, Some(NOW));
     // mais perto de compensar primeiro; raro fica fora da conta (piso de qualquer padrão × teto do grupo)
     // e vai para o fim, mesmo com piso abaixo do teto como este Moonrise

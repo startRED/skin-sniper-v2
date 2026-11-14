@@ -1251,32 +1251,27 @@ impl SteamClient {
         method: &str,
         qp: &Value,
     ) -> Result<Value> {
-        for attempt in 0..2 {
-            let req = self
-                .http
-                .get(self.url(route))
-                .query(&[("q", method), ("qp", &qp.to_string())])
-                .header("x-valve-request-type", "queryAction")
-                .header("accept", "application/json, text/javascript, */*");
-            let response = self
-                .send_checked(ep, req, true, Some(envelope_problem), attempt == 0)
-                .await;
-            if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-            let (_, body) = response.map_err(|e| match e {
+        let req = self
+            .http
+            .get(self.url(route))
+            .query(&[("q", method), ("qp", &qp.to_string())])
+            .header("x-valve-request-type", "queryAction")
+            .header("accept", "application/json, text/javascript, */*");
+        // Sem repetição na `data` nula: a de 5 s falhava junto ~9 em 10 vezes (medido em 12/11/2026) e dobrava o
+        // tráfego de cada falha; quem chama decide o descanso (`FAIL_REST_SECS` na agenda).
+        let (_, body) = self
+            .send_checked(ep, req, true, Some(envelope_problem))
+            .await
+            .map_err(|e| match e {
                 Error::Parse(m) => Error::Parse(format!("{method}: {m}")),
                 other => other,
             })?;
-            let mut v: Value = serde_json::from_slice(&body)
-                .map_err(|e| Error::Parse(format!("{method}: {e}")))?;
-            return match v.get_mut("data") {
-                Some(d) if !d.is_null() => Ok(d.take()),
-                _ => Err(Error::Parse(format!("{method}: resposta sem `data`"))),
-            };
+        let mut v: Value =
+            serde_json::from_slice(&body).map_err(|e| Error::Parse(format!("{method}: {e}")))?;
+        match v.get_mut("data") {
+            Some(d) if !d.is_null() => Ok(d.take()),
+            _ => Err(Error::Parse(format!("{method}: resposta sem `data`"))),
         }
-        unreachable!("a segunda tentativa sempre retorna")
     }
 
     /// GET que devolve o corpo como JSON (ex.: `search/render`).
@@ -1355,7 +1350,7 @@ impl SteamClient {
             .get(self.url(path))
             .query(query)
             .header("accept", "application/json");
-        let result = self.send_alt(ep, &req, None, true).await?;
+        let result = self.send_alt(ep, &req, None).await?;
         let (parts, body) = match result {
             Ok(response) => response,
             Err(e) => return Some(Err(e)),
@@ -1412,7 +1407,7 @@ impl SteamClient {
         req: RequestBuilder,
         auth: bool,
     ) -> Result<(Parts, Vec<u8>)> {
-        self.send_checked(ep, req, auth, None, true).await
+        self.send_checked(ep, req, auth, None).await
     }
 
     /// Como `send`, mas `check(status, corpo)` pode dizer que a resposta (200) não é o envelope esperado:
@@ -1423,7 +1418,6 @@ impl SteamClient {
         mut req: RequestBuilder,
         auth: bool,
         check: Option<EnvelopeCheck>,
-        reset_on_success: bool,
     ) -> Result<(Parts, Vec<u8>)> {
         if self.public_only && matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
             return Err(Error::PublicOnly);
@@ -1493,7 +1487,7 @@ impl SteamClient {
                 Slot::Main => break,
                 Slot::Wait(w) => tokio::time::sleep(w).await,
                 Slot::Alt => {
-                    if let Some(r) = self.send_alt(ep, &req, check, reset_on_success).await {
+                    if let Some(r) = self.send_alt(ep, &req, check).await {
                         return r;
                     }
                 }
@@ -1540,9 +1534,7 @@ impl SteamClient {
                 return Err(Error::Transport(e));
             }
         };
-        let result = self
-            .finish(ep, resp, sent_by, check, reset_on_success, false)
-            .await;
+        let result = self.finish(ep, resp, sent_by, check, false).await;
         crate::research::finish(attempt, research_outcome(&result)).await;
         result
     }
@@ -1588,7 +1580,6 @@ impl SteamClient {
         ep: Endpoint,
         req: &RequestBuilder,
         check: Option<EnvelopeCheck>,
-        reset_on_success: bool,
     ) -> Option<Result<(Parts, Vec<u8>)>> {
         self.alt.as_ref()?;
         let mut request = req.try_clone()?.build().ok()?;
@@ -1636,9 +1627,7 @@ impl SteamClient {
                 None
             }
             Ok(r) => {
-                let result = self
-                    .finish(ep, r, None, check, reset_on_success, true)
-                    .await;
+                let result = self.finish(ep, r, None, check, true).await;
                 crate::research::finish(attempt, research_outcome(&result)).await;
                 Some(result)
             }
@@ -1662,7 +1651,6 @@ impl SteamClient {
         resp: reqwest::Response,
         sent_by: Option<String>,
         check: Option<EnvelopeCheck>,
-        reset_on_success: bool,
         via_alt: bool,
     ) -> Result<(Parts, Vec<u8>)> {
         let now = Instant::now();
@@ -1737,8 +1725,7 @@ impl SteamClient {
         }
         let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
         // `{"data":null}` com 200 costuma ser recusa daquela consulta (filtro de seed a frio): conta uma vez por
-        // consulta, só na repetição, e o disjuntor abre com 3 consultas nulas seguidas. Antes a 1ª tentativa e a
-        // repetição contavam as duas; em 12/11/2026, ~10 por hora pausavam toda a leitura de seed/float.
+        // consulta e o disjuntor abre com 3 consultas nulas seguidas.
         let null_data = bad_envelope.is_some()
             && status == StatusCode::OK
             && serde_json::from_slice::<Value>(&body)
@@ -1762,14 +1749,10 @@ impl SteamClient {
             } else {
                 g.bucket(ep).on_ok(now);
             }
-            if status.is_server_error()
-                || status == StatusCode::FORBIDDEN
-                || (bad_envelope.is_some() && !null_data)
-                || (null_data && !reset_on_success)
+            if status.is_server_error() || status == StatusCode::FORBIDDEN || bad_envelope.is_some()
             {
                 g.breakers[ep.idx()].on_fail(now);
-            } else if null_data {
-            } else if reset_on_success {
+            } else {
                 g.breakers[ep.idx()].on_ok();
             }
         }
@@ -1919,7 +1902,7 @@ mod tests {
                 .header("authorization", "Bearer must-not-send")
         };
         c.send(Endpoint::Legacy, request(), true).await.unwrap();
-        c.send_alt(Endpoint::History, &request(), None, true)
+        c.send_alt(Endpoint::History, &request(), None)
             .await
             .unwrap()
             .unwrap();
@@ -1942,8 +1925,7 @@ mod tests {
             c.send_alt(
                 Endpoint::Listings,
                 &c.request(Method::POST, "/public"),
-                None,
-                true
+                None
             )
             .await,
             Some(Err(Error::PublicOnly))
@@ -1972,10 +1954,11 @@ mod tests {
             block_id: None,
         };
         let (result, context) = crate::research::scope_tracked(db.clone(), decision, async {
-            let err = c
-                .action(Endpoint::Listings, "Q", &serde_json::json!([]))
-                .await
-                .unwrap_err();
+            // 15 consultas normais pagam uma exploratória: a 2ª já não sai
+            let qp = serde_json::json!([]);
+            let err = c.action(Endpoint::Listings, "Q", &qp).await.unwrap_err();
+            assert!(matches!(err, Error::ActionUnavailable { .. }));
+            let err = c.action(Endpoint::Listings, "Q", &qp).await.unwrap_err();
             assert!(matches!(err, Error::BudgetExhausted));
             c.get_json(Endpoint::Session, "/ok", &[]).await.unwrap();
             c.get_json(Endpoint::Buy, "/ok", &[]).await.unwrap();
@@ -2215,7 +2198,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn null_data_retries_once() {
+    async fn null_data_is_not_repeated() {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -2226,81 +2209,56 @@ mod tests {
             let app = Router::new().route(
                 "/market/actions",
                 get(move || {
-                    let seen = seen.clone();
-                    async move {
-                        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
-                            include_str!("../../testdata/steam_actions_null_contract.json")
-                        } else {
-                            r#"{"data":{"ok":true}}"#
-                        }
-                    }
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    async { include_str!("../../testdata/steam_actions_null_contract.json") }
                 }),
             );
             let c = fast(&serve(app).await);
-            let started = Instant::now();
-            let data = c
-                .action(ep, "Query", &serde_json::json!([730, "item"]))
-                .await
-                .unwrap();
-            assert_eq!(data["ok"], true);
-            assert_eq!(calls.load(Ordering::SeqCst), 2);
-            assert!(started.elapsed() >= Duration::from_secs(5));
+            assert!(matches!(
+                c.action(ep, "Query", &serde_json::json!([730, "item"]))
+                    .await,
+                Err(Error::ActionUnavailable { .. })
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert!(c.breaker_open_until(ep).is_none());
         }
     }
 
     #[tokio::test]
-    async fn retry_wait_does_not_delay_other_endpoints_and_alternating_null_data_never_opens_breaker()
-     {
+    async fn alternating_null_data_never_opens_breaker() {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         };
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
-        let app = Router::new()
-            .route(
-                "/market/actions",
-                get(move || {
-                    let n = seen.fetch_add(1, Ordering::SeqCst);
-                    async move {
-                        if n.is_multiple_of(2) {
-                            include_str!("../../testdata/steam_actions_null_contract.json")
-                        } else {
-                            r#"{"data":{"ok":true}}"#
-                        }
+        let app = Router::new().route(
+            "/market/actions",
+            get(move || {
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n.is_multiple_of(2) {
+                        include_str!("../../testdata/steam_actions_null_contract.json")
+                    } else {
+                        r#"{"data":{"ok":true}}"#
                     }
-                }),
-            )
-            .route("/other", get(|| async { r#"{"ok":true}"# }));
-        let c = Arc::new(fast(&serve(app).await));
-        let first = c.clone();
-        let task = tokio::spawn(async move {
-            first
-                .action(Endpoint::Listings, "Query", &serde_json::json!([]))
-                .await
-        });
-        while calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-        let other = tokio::time::timeout(
-            Duration::from_secs(2),
-            c.get_json(Endpoint::History, "/other", &[]),
-        )
-        .await;
-        assert!(other.unwrap().is_ok());
-        assert!(task.await.unwrap().is_ok());
-        assert!(
-            c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
-                .await
-                .is_ok()
+                }
+            }),
         );
+        let c = fast(&serve(app).await);
         // data nula é recusa da consulta, não do servidor: alternar com sucesso nunca abre o disjuntor
-        assert!(
-            c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
-                .await
-                .is_ok()
-        );
+        for _ in 0..3 {
+            assert!(matches!(
+                c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
+                    .await,
+                Err(Error::ActionUnavailable { .. })
+            ));
+            assert!(
+                c.action(Endpoint::Listings, "Query", &serde_json::json!([]))
+                    .await
+                    .is_ok()
+            );
+        }
         assert!(c.breaker_open_until(Endpoint::Listings).is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 6);
     }
@@ -2326,7 +2284,7 @@ mod tests {
             c.action(Endpoint::Listings, "Query", &qp).await,
             Err(Error::ActionUnavailable { .. })
         ));
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         // uma falha por consulta nula: abre na 3ª seguida
         for _ in 0..2 {
             assert!(matches!(
@@ -2338,7 +2296,7 @@ mod tests {
             c.action(Endpoint::Listings, "Query", &qp).await,
             Err(Error::BreakerOpen { .. })
         ));
-        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert!(c.breaker_open_until(Endpoint::History).is_none());
     }
 

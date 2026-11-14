@@ -410,6 +410,17 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
     ranges(seeds)
 }
 
+/// Tier 1 do guia em skin sem nota: fica no grupo e na busca mesmo sem pagar no CSFloat (`pattern_group`).
+pub fn guide_top(market_hash_name: &str) -> Vec<u16> {
+    let base = split_name(market_hash_name).0;
+    let top = tables().cs.skins.get(base).and_then(|s| s.tiers.get("1"));
+    top.into_iter()
+        .flatten()
+        .copied()
+        .filter(|s| score(base, *s).is_none())
+        .collect()
+}
+
 /// Seeds em faixas `(de, até)` inclusivas, juntando as consecutivas, ordenadas.
 pub fn ranges(seeds: impl IntoIterator<Item = u16>) -> Vec<(u16, u16)> {
     let seeds: BTreeSet<u16> = seeds.into_iter().collect();

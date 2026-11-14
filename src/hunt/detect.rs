@@ -421,19 +421,36 @@ async fn steam_closed(h: &Hunt, l: &Listing, group_key: &str, base_cents: i64) -
         .collect())
 }
 
-/// `(seed, preço)` dos anúncios do nome e grupo que sumiram em até 48 h sem relistagem e sem um mais barato do
-/// mesmo seed à venda (`NO_CHEAPER_TWIN`).
+/// O que conta como fechamento na Steam: sumiu em até 48 h sem relistagem e sem um mais barato do mesmo seed à
+/// venda (`NO_CHEAPER_TWIN`).
+fn closed_where() -> String {
+    use super::teacher::{FAST, NO_CHEAPER_TWIN};
+    format!(
+        "relisted = 0 AND gone_at IS NOT NULL AND gone_at - first_seen <= {FAST} AND {NO_CHEAPER_TWIN}"
+    )
+}
+
+/// `(seed, preço)` dos fechamentos do nome e grupo.
 fn vanished(
     c: &rusqlite::Connection,
     grp: &str,
     name: &str,
 ) -> rusqlite::Result<Vec<(Option<u16>, i64)>> {
-    use super::teacher::{FAST, NO_CHEAPER_TWIN};
     c.prepare(&format!(
-        "SELECT seed, price_cents FROM observations a WHERE grp = ?1 AND name = ?2 AND relisted = 0
-         AND gone_at IS NOT NULL AND gone_at - first_seen <= ?3 AND {NO_CHEAPER_TWIN}"
+        "SELECT seed, price_cents FROM observations a WHERE grp = ?1 AND name = ?2 AND {}",
+        closed_where()
     ))?
-    .query_map(params![grp, name, FAST], |r| Ok((r.get(0)?, r.get(1)?)))?
+    .query_map(params![grp, name], |r| Ok((r.get(0)?, r.get(1)?)))?
+    .collect()
+}
+
+/// `(grupo, nome, preço)` de todos os fechamentos de grupo raro: a seleção caça onde a Steam paga (`catalog`).
+pub(super) fn closed(c: &rusqlite::Connection) -> rusqlite::Result<Vec<(String, String, i64)>> {
+    c.prepare(&format!(
+        "SELECT grp, name, price_cents FROM observations a WHERE grp IS NOT NULL AND {}",
+        closed_where()
+    ))?
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
     .collect()
 }
 

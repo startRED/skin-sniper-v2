@@ -17,9 +17,12 @@ use super::scheduler::{Range, Task};
 use super::{Hunt, detect};
 use crate::db::Db;
 use crate::pricing::fees::seller_gets;
-use crate::pricing::groups::{ranges, seed_ranges, skin_base, table_skins, wear_index};
+use crate::pricing::groups::{
+    group_of, guide_top, ranges, seed_ranges, skin_base, table_skins, wear_index,
+};
+use crate::pricing::premium::PROVEN_SALES;
 use crate::pricing::sell::{
-    MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, weighted_quantile,
+    MIN_LIST_MARGIN_PCT, MIN_LIST_PROFIT_CENTS, PricePoint, RARE_MIN_SALES, weighted_quantile,
 };
 use crate::steam::client::{Endpoint, Error as SteamError};
 use crate::steam::listings::{self, paint_index_from_code};
@@ -233,13 +236,18 @@ pub fn score(sales_per_day: f64, possible_profit_cents: i64) -> f64 {
     sales_per_day.min(SCORE_SALES_CAP) * (possible_profit_cents.max(0) + 1) as f64 / 100.0
 }
 
-/// Faixas de seed da busca rara: só os seeds que as vendas provaram pagar (`patterns`). Sem medida nenhuma
-/// ainda (instalação nova), vale o tier 1 / topo das tabelas até a primeira leitura de vendas.
+/// Faixas de seed da busca rara: os seeds que as vendas provaram pagar (`patterns`) e o tier 1 do guia em skin
+/// sem nota, que fica no grupo mesmo sem pagar no CSFloat (`groups::guide_top`). Sem medida nenhuma ainda
+/// (instalação nova), vale o tier 1 / topo das tabelas até a primeira leitura de vendas.
 fn rare_ranges(name: &str, learned: &Learned) -> Vec<(u16, u16)> {
     if learned.is_empty() {
         seed_ranges(name)
     } else {
-        ranges(patterns::active(learned, name))
+        ranges(
+            patterns::active(learned, name)
+                .into_iter()
+                .chain(guide_top(name)),
+        )
     }
 }
 
@@ -261,6 +269,8 @@ pub struct Ctx<'a> {
     pub learned: &'a Learned,
     /// Quantos anúncios de seed pagante de cada skin o avaliador já viu e quantos davam lucro (`load_deals`).
     pub deals: &'a Deals,
+    /// `(grupo, nome, preço)` dos fechamentos na Steam (`load_closed`): o lucro esperado de cada faixa.
+    pub closed: &'a [(String, String, i64)],
 }
 
 /// Anúncios de seed pagante de uma skin que o avaliador viu nos últimos 14 dias.
@@ -300,6 +310,12 @@ fn seed_weight(deals: Option<&SkinDeals>, seed: u16, spd: f64) -> f64 {
         .copied()
         .unwrap_or(0);
     f64::from(seen) + spd * DEALS_DAYS as f64 / 1001.0
+}
+
+/// Fechamentos de grupo raro vistos na Steam (`detect::closed`).
+pub async fn load_closed(db: &Db) -> Result<Vec<(String, String, i64)>> {
+    let rows = db.call(|c| detect::closed(c)).await?;
+    Ok(rows)
 }
 
 /// Conta, por skin, os anúncios de seed pagante avaliados (inclusive os acima do saldo, que a auditoria grava) e
@@ -387,6 +403,23 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
     // Raros: uma tarefa por skin com tabela (código G), sem filtro de desgaste: a mesma consulta traz todos os
     // desgastes, StatTrak e Souvenir da faixa de seed, então cada faixa é revista ~4× mais vezes no mesmo ritmo.
     // Nome = o desgaste que mais vende (painel e CSFloat); piso = o menor dos desgastes; vendas = a soma.
+    // Múltiplos (preço ÷ preço comum do nome) dos fechamentos na Steam, por skin e grupo: o avaliador só dá prêmio
+    // com `RARE_MIN_SALES` deles (`detect::appraise`), então é só aí que um anúncio novo pode virar aviso.
+    // shortcut: junta os desgastes da skin e ignora a nota do seed (`detect::proves`), porque a consulta traz
+    // todos os desgastes; separar se a agenda insistir num desgaste que o avaliador recusa.
+    let common: HashMap<&str, i64> = items
+        .iter()
+        .filter_map(|i| Some((i.name.as_str(), i.history_price_cents.or(ratio_floor(i))?)))
+        .collect();
+    let mut steam: HashMap<(&str, &str), Vec<f64>> = HashMap::new();
+    for (grp, name, price) in c.closed {
+        if let Some(b) = common.get(name.as_str()).filter(|b| **b > 0) {
+            steam
+                .entry((skin_base(name), grp))
+                .or_default()
+                .push(*price as f64 / *b as f64);
+        }
+    }
     let mut by_code: BTreeMap<&str, (i64, &str, f64, f64)> = BTreeMap::new();
     let mut seen_names: HashSet<&str> = HashSet::new();
     for i in items {
@@ -416,7 +449,30 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
         .into_iter()
         .filter_map(|(code, (f, name, _, spd))| {
             let id = format!("r:{code}");
-            let seeds = rare_ranges(name, c.learned);
+            // (fechamentos na Steam do grupo do seed, lucro de comprar no piso comum e vender pela mediana deles)
+            let pay = |s: u16| -> Option<(usize, i64)> {
+                let key = patterns::group(c.learned, name, Some(s))
+                    .map(|(g, _)| g)
+                    .or_else(|| group_of(name, Some(s.into()), None, None))?
+                    .key;
+                let m = steam.get(&(skin_base(name), key.as_str()))?;
+                let sale = (f as f64 * median(m)?) as i64;
+                (m.len() >= RARE_MIN_SALES).then(|| (m.len(), seller_gets(sale) - f))
+            };
+            // Seed cujo grupo já tem `PROVEN_SALES` fechamentos na Steam sem pagar o lucro mínimo sai da busca: é a
+            // mesma régua do selo, para o outro lado. Serpent Strike #128 em 14/11/2026: R$ 19,00 previstos pelo
+            // CSFloat, fechamentos na Steam a preço de comum.
+            let seeds = ranges(
+                rare_ranges(name, c.learned)
+                    .into_iter()
+                    .flat_map(|(lo, hi)| lo..=hi)
+                    .filter(|&s| {
+                        !pay(s).is_some_and(|(n, p)| n >= PROVEN_SALES && p < MIN_LIST_PROFIT_CENTS)
+                    }),
+            );
+            if seeds.is_empty() {
+                return None;
+            }
             let seen = observed(c.floors, &id, c.now);
             // todas as faixas conferidas, todas com anúncio e o menor não cabe: nada a caçar aqui agora
             let out = seen.fresh >= seeds.len()
@@ -424,22 +480,24 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                 && seen.floor.is_some_and(|f| f > c.saldo);
             (!out).then(|| {
                 // Por faixa: seeds × giro (anúncios novos esperados, a menos de uma constante que a agenda aprende)
-                // e o lucro esperado de um anúncio novo: chance de ser compra × (vender pela mediana da prova do
-                // seed − comprar no piso comum). Sem prova (tabela, instalação nova) cada seed vale 1 centavo.
-                let (proof, wear) = (c.learned.get(skin_base(name)), wear_index(name));
-                let chance = deal_chance(c.deals, skin_base(name));
+                // e o lucro esperado de um anúncio novo: chance de ser compra × (vender pela mediana dos fechamentos
+                // do grupo na Steam − comprar no piso comum). Grupo com menos de `RARE_MIN_SALES` fechamentos vale
+                // 1 centavo por seed: só o rodízio cego o lê, o que basta para ver os sumiços (≤ 48 h).
+                // skin cujo anúncio mais barato visto não cabe no saldo: ainda gira (outra faixa pode estar barata),
+                // mas a agenda a lê menos. 14/11/2026: 3 057 anúncios acima do saldo em 7 dias, nenhum bom.
+                let weight = if seen.floor.is_some_and(|f| f > c.saldo) {
+                    OVER_BUDGET_WEIGHT
+                } else {
+                    1.0
+                };
+                let chance = weight * deal_chance(c.deals, skin_base(name));
                 let measured = c.deals.get(skin_base(name));
                 let ranges: Vec<Range> = seeds
                     .iter()
                     .map(|&(lo, hi)| {
                         let n = f64::from(hi - lo + 1);
                         let gain: f64 = (lo..=hi)
-                            .map(|s| {
-                                proof.and_then(|p| p.get(&(s, wear))).map_or(1.0, |e| {
-                                    let sale = (f as f64 * e[e.len() / 2]) as i64;
-                                    (seller_gets(sale) - f).max(1) as f64
-                                })
-                            })
+                            .map(|s| pay(s).map_or(1.0, |(_, p)| p.max(1) as f64))
                             .sum();
                         Range {
                             weight: (lo..=hi).map(|s| seed_weight(measured, s, spd)).sum(),
@@ -456,12 +514,6 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                     seeds,
                     float: None,
                     score: 0.0,
-                };
-                // faixa vista acima do saldo: ainda gira (outra faixa pode estar barata), mas com menos peso
-                let weight = if seen.floor.is_some_and(|f| f > c.saldo) {
-                    OVER_BUDGET_WEIGHT
-                } else {
-                    1.0
                 };
                 (worth, seen.floor.unwrap_or(f), task, weight, ranges)
             })
@@ -1056,6 +1108,7 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
     };
     let items = load_items(&h.db).await?;
     let deals = load_deals(&h.db, &learned, now).await?;
+    let closed = load_closed(&h.db).await?;
     let boost = h.lock().queue.boosts(now);
     let ctx = Ctx {
         ratio,
@@ -1065,6 +1118,7 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         floors: &floors,
         learned: &learned,
         deals: &deals,
+        closed: &closed,
     };
     let (mut tasks, ranges) = select_ranges(&items, &ctx);
     if h.cheap.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1250,6 +1304,7 @@ mod tests {
                     floors: &HashMap::new(),
                     learned: &Learned::new(),
                     deals: &Deals::new(),
+                    closed: &[],
                 }
             )
             .is_empty(),
@@ -1415,6 +1470,7 @@ mod tests {
             floors,
             learned: &NO_LEARNED,
             deals: &NO_DEALS,
+            closed: &[],
         }
     }
 
@@ -1422,12 +1478,12 @@ mod tests {
     static NO_DEALS: std::sync::LazyLock<Deals> = std::sync::LazyLock::new(Deals::new);
 
     #[test]
-    fn measured_skins_hunt_only_their_paying_seeds_and_each_range_carries_weight_and_gain() {
+    fn measured_skins_hunt_their_paying_seeds_and_the_gain_comes_from_steam_closings() {
         let (items, saldo) = catalog_fixture();
         let boost = NO_BOOST();
         let floors = HashMap::new();
         let mut learned = Learned::new();
-        // Moonrise medido: só o seed 500 paga; o Center Star (59) da tabela não provou e sai da busca
+        // Moonrise medido: só o seed 500 paga no CSFloat; o Center Star (tier 1 do guia) continua na busca
         learned
             .entry("Glock-18 | Moonrise".into())
             .or_default()
@@ -1445,24 +1501,49 @@ mod tests {
             learned: &learned,
             ..ctx(saldo, &boost, &floors)
         };
+        let find = |tasks: &[Task], start: &str| {
+            tasks
+                .iter()
+                .find(|t| t.rare() && t.name.starts_with(start))
+                .cloned()
+        };
         let (tasks, ranges) = select_ranges(&items, &c);
-        let rare: Vec<&Task> = tasks.iter().filter(|t| !t.seeds.is_empty()).collect();
-        let moon = rare
-            .iter()
-            .find(|t| t.name.starts_with("Glock-18 | Moonrise ("))
-            .unwrap();
-        assert_eq!(moon.seeds, vec![(500, 500)]);
-        let awp = rare
-            .iter()
-            .find(|t| t.code == plain.code.clone().unwrap())
-            .expect("AWP Duality com seed pagante vira busca rara");
+        let moon = find(&tasks, "Glock-18 | Moonrise (").unwrap();
+        assert!(
+            moon.seeds.contains(&(500, 500)) && moon.seeds.contains(&(58, 59)),
+            "{moon:?}"
+        );
+        let awp =
+            find(&tasks, "AWP | Duality (").expect("AWP Duality com seed pagante vira busca rara");
         assert_eq!(awp.seeds, vec![(77, 77)]);
-        // skin de tabela sem medida não é lida: sem venda não há prova de que o seed paga
-        assert_eq!(rare.len(), 2, "{rare:?}");
-        // cada faixa leva o peso (média 1 entre as faixas) e o lucro de vender pela mediana da prova
-        let (m, a) = (ranges[&moon.id][0], ranges[&awp.id][0]);
-        assert!((m.weight + a.weight - 2.0).abs() < 1e-9, "{m:?} {a:?}");
-        assert!(m.gain > 1.0 && a.gain > 1.0, "{m:?} {a:?}");
+        // skin de tabela sem medida e sem tier 1 do guia não é lida: sem venda não há prova de que o seed paga
+        assert!(find(&tasks, "SSG 08 | Acid Fade (").is_none());
+        // sem fechamento na Steam nenhuma faixa promete lucro: todas valem o mesmo centavo × chance
+        let at = |t: &Task, seed: u16| t.seeds.iter().position(|r| r.0 == seed).unwrap();
+        let (m, a) = (ranges[&moon.id][at(&moon, 500)], ranges[&awp.id][0]);
+        assert!(
+            (m.gain - a.gain).abs() < 1e-9 && m.gain <= 1.0,
+            "{m:?} {a:?}"
+        );
+        // 3 fechamentos do seed 500 na Steam a 3× o comum: a faixa passa a valer o lucro dessa venda;
+        // 10 fechamentos do AWP #77 a preço de comum: o seed sai da busca
+        let closing = |name: &str, seed: u16, times: i64| {
+            let i = items.iter().find(|i| i.name == name).unwrap();
+            let common = i.history_price_cents.or(i.triage_brl(c.now, c.ratio));
+            let grp = patterns::group(&learned, name, Some(seed)).unwrap().0.key;
+            (grp, name.to_string(), common.unwrap() * times)
+        };
+        let mut closed = vec![closing(&moon.name, 500, 3); 3];
+        closed.extend(vec![closing(&awp.name, 77, 1); 10]);
+        let c = Ctx {
+            closed: &closed,
+            ..c
+        };
+        let (tasks, ranges) = select_ranges(&items, &c);
+        assert!(find(&tasks, "AWP | Duality (").is_none());
+        let m = ranges[&moon.id][at(&moon, 500)];
+        let star = ranges[&moon.id][at(&moon, 58)];
+        assert!(m.gain > 10.0 * star.gain, "{m:?} {star:?}");
         // a Moonrise mostrou 90 anúncios de seed pagante sem nenhuma compra: o lucro esperado cai 10×
         let moon_deals = SkinDeals {
             seen: 90,
@@ -1471,16 +1552,15 @@ mod tests {
         };
         let deals = Deals::from([("Glock-18 | Moonrise".to_string(), moon_deals)]);
         let (_, measured) = select_ranges(&items, &Ctx { deals: &deals, ..c });
-        let m2 = measured[&moon.id][0];
+        let m2 = measured[&moon.id][at(&moon, 500)];
         assert!(
             (m2.gain * 10.0 - m.gain).abs() < 1e-6 * m.gain,
             "{m:?} {m2:?}"
         );
-        // e o peso segue os anúncios vistos: com 90 no seed 500, a faixa da Moonrise pesa mais que a do AWP
-        let a2 = measured[&awp.id][0];
+        // e o peso segue os anúncios vistos: com 90 no seed 500, a faixa pesa mais que a do Center Star
         assert!(
-            m2.weight > m.weight && m2.weight > a2.weight,
-            "{m2:?} {a2:?}"
+            m2.weight > m.weight && m2.weight > measured[&moon.id][at(&moon, 58)].weight,
+            "{m2:?}"
         );
         assert!(
             select(&items, &ctx(saldo, &boost, &floors))

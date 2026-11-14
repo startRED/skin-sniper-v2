@@ -1,0 +1,1 @@
+- Raro segue os fechamentos na Steam em tudo: preço, selo, agenda de leitura e teto da lista "vigiando". As vendas do CSFloat só escolhem onde procurar; grupo com 10 fechamentos sem pagar o lucro mínimo sai da busca; tier 1 do guia fica sempre na busca. [by AI]

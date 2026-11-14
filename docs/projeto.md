@@ -206,7 +206,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
      o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
      foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
-     enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
+     enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base e, desde 14/11, com
+     1/4 do `lucro` de cada faixa na agenda (antes o 1/4 só desempatava alvos e a agenda lia essas faixas pelo
+     valor cheio; nos 7 dias até 14/11, 3 057 anúncios avaliados acima do saldo, nenhum bom).
      A seleção é refeita a cada 15 min e no próximo passo após observar um piso novo acima do saldo.
    - **Agenda que aprende:** cada alvo (skin × desgaste × modo: `barato`, `seed` ou `float`) recebe a leitura
      quando o **valor dela agora**, em centavos, é o maior: taxa de anúncio novo do alvo × anúncios acumulados desde
@@ -437,8 +439,16 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
        releituras de faixa (escolheu 28 800 s, o topo da grade). Simulação de 7 dias × 10 sorteios
        (`hunt/agenda_sim.rs`, premissas lá): anúncios novos por leitura iguais ou maiores que a conta antiga em 6
        cenários (vida 15 min a 12 h × mercado observado/giro), de 0 a +54 %;
-     - `lucro` = líquido de vender pelo piso comum × mediana da prova dos seeds da faixa − o piso comum, em
-       centavos (mínimo 1);
+     - `lucro` = média, entre os seeds da faixa, do líquido de vender pelo preço comum × mediana dos fechamentos
+       do grupo do seed na Steam (`detect::closed`, mesmo nome e grupo, 3 ou mais) − o preço comum, em centavos
+       (mínimo 1). Grupo com menos de 3 fechamentos vale 1 centavo por seed: só o rodízio cego (1 em 8 leituras) o
+       lê, o que basta para ver os sumiços. Seed cujo grupo já tem 10 fechamentos sem pagar o lucro mínimo sai da
+       busca (a régua do selo "comprovado", para o outro lado). Até 14/11 o `lucro` vinha da prova do CSFloat;
+       medido nesse dia (24 h, 1 016 leituras): MAC-10 Snow Splash levou 400 com no máximo 1 fechamento na Steam,
+       Glock Grinder 81 sem anúncio novo, e o Moonrise T1 (11 fechamentos; 2,1× o comum no FT, 4,2× no MW) só 9 a 12. Refeitos os 7
+       dias anteriores pela regra da Steam: das 13 oportunidades avisadas nenhuma se sustenta e 1 recusada passa a
+       boa (Moonrise FT #694 a R$ 7,20). **Não medido:** quantas oportunidades por dia a agenda nova encontra; só
+       o app ligado alguns dias responde;
      - `taxa` = anúncios novos dentro do saldo por segundo e por peso, medida no alvo (skin × desgaste):
        `a = r + m·W·λ`, `taxa = (a + √a) ÷ (exposição + m·W)`. A exposição de cada leitura é
        `peso × W·(1 − e^(−Δ/W))` da faixa lida, gravada com a leitura (`reads.gap`, `reads.weight`); `λ` é a taxa
@@ -605,8 +615,9 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   foi conferido). Com n ≥ 3 fechamentos: `mid` e
   `high` da base × Q50/Q75 do múltiplo; `quick` fica sem prêmio (× min(1, Q25)). Com n < 3: usa a base comum e
   escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço. Não medido: quantas
-  oportunidades por dia sobram com a regra nova. O teto de compra da lista "vigiando" (`watch`) ainda usa o CSFloat.
-  Tier 1 do guia em skin sem nota (Moonrise, High Beam) fica no grupo mesmo quando a medida do CSFloat diz que
+  oportunidades por dia sobram com a regra nova. O teto de compra da lista "vigiando" (`watch`) usa os mesmos
+  fechamentos da Steam (3 ou mais do nome e grupo); sem eles o raro fica sem teto.
+  Tier 1 do guia em skin sem nota (Moonrise, High Beam) fica no grupo e na busca mesmo quando a medida do CSFloat diz que
   não paga: em 14/11 o Moonrise T1 FT estava fora do grupo e a Steam guardava 4 fechamentos dele com mediana a
   2,1× o comum.
   **Prova da própria Steam (11/11):** em grupo de tabela ou seed aprendido, quando o banco guarda 3 ou mais
