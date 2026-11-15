@@ -143,6 +143,9 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
       o.last_seen,o.gone_at,COALESCE(a.reason,json_extract(p.json,'$.gone_reason')),COALESCE(a.at,p.gone_at),f.listing_id IS NOT NULL
       FROM ids LEFT JOIN ghosts g ON g.listing_id=ids.id AND g.approved=1 LEFT JOIN opportunities p ON p.id=ids.id
       LEFT JOIN alert_forecasts f ON f.listing_id=ids.id LEFT JOIN observations o ON o.listing_id=ids.id LEFT JOIN alert_outcomes a ON a.listing_id=ids.id
+      WHERE f.listing_id IS NOT NULL OR EXISTS (
+        SELECT 1 FROM alert_delivery d WHERE d.listing_id=ids.id
+        AND d.state IN ('desconhecido','aceito','falhou'))
       ORDER BY 3 DESC,1")?;
     let raw = stmt.query_map([], |r| {
         Ok((
@@ -250,10 +253,6 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
             sales: if ready { sales.len() as i64 } else { 0 },
         });
     }
-    let mut arm = [(0_i64, 0_i64); 2];
-    for (control, slot) in arm.iter_mut().enumerate() {
-        *slot=c.query_row("SELECT count(*),COALESCE(sum(fresh),0) FROM reads WHERE at>=?1 AND at<?2 AND arm LIKE 'r:%' AND gap>0 AND control=?3",params![start,end,control as i64],|r|Ok((r.get(0)?,r.get(1)?)))?;
-    }
     let mut daily = Vec::new();
     for day in 0..7 {
         daily.push(c.query_row("SELECT COALESCE(sum(fresh),0) FROM reads WHERE at>=?1 AND at<?2 AND arm LIKE 'r:%' AND gap>0",params![start+day*DAY,start+(day+1)*DAY],|r|r.get::<_,i64>(0))?);
@@ -269,7 +268,12 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
     let rate = if hours > 0.0 { new as f64 / hours } else { 0.0 };
     let test = latest_test(c)?;
     let screen_answer: Option<bool> = c.query_row("SELECT appeared FROM notice_tests WHERE answered_at IS NOT NULL AND at>=?1 ORDER BY answered_at DESC,id DESC LIMIT 1", [start], |r|r.get(0)).optional()?;
-    let mut metrics = Vec::new();
+    let mut metrics = vec![Metric {
+        label: "Raros novos no saldo por leitura".into(),
+        baseline: "5% agenda × 36% rodízio: não comparáveis".into(),
+        value: "Agenda e rodízio leem alvos e intervalos diferentes; o registro ainda não guarda a faixa lida.".into(),
+        state: "inconclusivo".into(),
+    }];
     let mut add =
         |label: &str, baseline: &str, value: String, enough: bool, passes: bool, closed: bool| {
             metrics.push(Metric {
@@ -290,21 +294,6 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
                 .into(),
             });
         };
-    let rates = arm.map(|(n, f)| {
-        if n > 0 {
-            format!("{:.1}% ({f}/{n})", 100.0 * f as f64 / n as f64)
-        } else {
-            "não medido".into()
-        }
-    });
-    add(
-        "Raros novos no saldo por leitura",
-        "5% agenda × 36% rodízio",
-        format!("{} agenda × {} rodízio", rates[0], rates[1]),
-        arm.iter().all(|a| a.0 > 0),
-        i128::from(arm[0].1) * i128::from(arm[1].0) >= i128::from(arm[1].1) * i128::from(arm[0].0),
-        now >= end,
-    );
     add(
         "Raros novos no saldo por dia",
         "12 a 43/dia; precisa passar de 43",
@@ -453,6 +442,45 @@ pub async fn answer(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn opportunities_without_notice_attempts_are_not_alerts() {
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            c.execute("UPDATE alert_window SET started_at=1000", [])?;
+            c.execute("INSERT INTO opportunities(id,json,created_at) VALUES ('silent','{\"name\":\"skin\",\"price_cents\":100}',1001)", [])?;
+            c.execute("INSERT INTO ghosts(listing_id,name,kind,bought_at,price_cents,mid_price_cents,mid_net_cents,approved) VALUES ('silent','skin','raro',1001,100,200,170,1)", [])?;
+            // Registro incorreto da versão anterior: não prova tentativa.
+            delivery(c, "silent", "windows", "pendente", None, 1001)?;
+            let r = report(c, 1000 + 9 * DAY)?;
+            assert!(r.rows.is_empty());
+            assert_eq!(r.metrics[3].value, "0 em 7 dias");
+            assert_ne!(r.metrics[3].state, "cumprido");
+            c.execute("INSERT INTO alert_forecasts SELECT listing_id,name,bought_at,price_cents,mid_price_cents,grp,base_cents FROM ghosts", [])?;
+            let attempted = report(c, 1000 + 9 * DAY)?;
+            assert_eq!(attempted.rows.len(), 1);
+            assert_eq!(attempted.rows[0].windows, "pendente");
+            assert_eq!(attempted.metrics[3].value, "1 em 7 dias");
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn agenda_comparison_is_always_inconclusive_even_when_its_rate_wins() {
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            c.execute("UPDATE alert_window SET started_at=1000", [])?;
+            c.execute("INSERT INTO reads(at,arm,fresh,gap,control) VALUES (1001,'r:agenda',100,60,0),(1002,'r:controle',1,21600,1)", [])?;
+            for now in [1000, 1001, 1000 + 7 * DAY, 1000 + 9 * DAY] {
+                let r = report(c, now)?;
+                let m = &r.metrics[0];
+                assert_eq!(m.state, "inconclusivo");
+                assert!(m.baseline.contains("não comparáveis"));
+                assert!(m.value.contains("alvos e intervalos diferentes"));
+                assert!(m.value.contains("não guarda a faixa lida"));
+            }
+            Ok(())
+        }).await.unwrap();
+    }
+    #[tokio::test]
     async fn test_answer_is_dated_single_use_and_saved_on_disk() {
         let (db, dir) = crate::db::temp_db();
         let app = AppState::new(db.clone(), crate::settings::SettingsStore::new(db.clone()));
@@ -526,7 +554,8 @@ mod tests {
         let (db, _dir) = crate::db::temp_db();
         db.call(|c| {c.execute("UPDATE alert_window SET started_at=1000",[])?;
             c.execute("INSERT INTO ghosts(listing_id,name,kind,bought_at,price_cents,mid_price_cents,mid_net_cents,approved) VALUES ('old','skin','raro',900,100,200,170,1)",[])?;
-            let r=report(c,1000)?;assert_eq!(r.metrics.len(),7);assert!(r.metrics.iter().all(|m|m.state=="não medido"));
+            delivery(c,"old","windows","desconhecido",None,900)?;
+            let r=report(c,1000)?;assert_eq!(r.metrics.len(),7);assert_eq!(r.metrics[0].state,"inconclusivo");assert!(r.metrics[1..].iter().all(|m|m.state=="não medido"));
             assert_eq!(r.rows[0].windows,"desconhecido");assert_eq!(r.rows[0].listing,"desconhecido (faixa não foi relida)");
             let r=report(c,1000+9*DAY)?;assert!(r.metrics[4].value.contains("amostra pequena"));assert_eq!(r.metrics[6].state,"inconclusivo");Ok(())}).await.unwrap();
     }

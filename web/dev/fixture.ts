@@ -149,14 +149,14 @@ function alertExample(): NonNullable<Learning['alerts']> {
     started_at: now - 3 * 86400, closes_at: now + 6 * 86400, test: noticeTest,
     rows: states.map((windows, i) => ({ id: `exemplo-${i}`, name: ['Glock-18 | Moonrise (Field-Tested)', 'SSG 08 | Acid Fade (Factory New)', 'MAC-10 | Snow Splash (Battle-Scarred)', 'Five-SeveN | Heat Treated (Field-Tested)'][i], at: now - (i + 1) * 86400, price_cents: 720, windows, telegram: 'desconhecido', listing: ['saiu do ar em 3 min (comprado ou retirado)', 'ainda anunciado', 'deixou de compensar', 'desconhecido (faixa não foi relida)'][i], group_check: i > 1 ? 'não teve' : 'ainda sem dados', price_check: 'sem prova de preço', sales: 0 })),
     metrics: [
-      ['Raros novos no saldo por leitura', '5% agenda × 36% rodízio'],
+      ['Raros novos no saldo por leitura', '5% agenda × 36% rodízio: não comparáveis'],
       ['Raros novos no saldo por dia', '12 a 43/dia'],
       ['Estado dos avisos e teste de tela', 'sem registro por canal'],
       ['Avisos por dia', '14 em 9 dias; meta 12 em 7 dias'],
       ['Conferência de 48 h', '3 de 14'],
       ['Anúncios novos lidos por hora', '8 a 12/h'],
       ['Preço nas vendas do grupo em 48 h', 'sem prova de preço na base']
-    ].map(([label, baseline], i) => ({ label, baseline, value: i === 4 ? '0 de 2; amostra pequena' : 'não medido neste exemplo', state: 'inconclusivo' }))
+    ].map(([label, baseline], i) => ({ label, baseline, value: i === 0 ? 'Agenda e rodízio leem alvos e intervalos diferentes; o registro ainda não guarda a faixa lida.' : i === 4 ? '0 de 2; amostra pequena' : 'não medido neste exemplo', state: 'inconclusivo' }))
   };
 }
 function learning(): Learning {

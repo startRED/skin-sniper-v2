@@ -33,6 +33,13 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'A página passou da borda.');
     await page.screenshot({ path: new URL(`${name}.png`, output).pathname.replace(/^\/(\w:)/, '$1'), fullPage: true });
     assert.equal(await page.locator('.metrics > li').count(), 7);
+    const comparison = page.locator('.metrics > li').first();
+    assert.match(await comparison.innerText(), /não comparáveis/);
+    assert.match(await comparison.innerText(), /alvos e intervalos diferentes/);
+    assert.match(await comparison.innerText(), /não guarda a faixa lida/);
+    assert.equal(await comparison.locator('.muted').innerText(), 'inconclusivo');
+    await comparison.screenshot({ path: new URL(`${name}-comparacao.png`, output).pathname.replace(/^\/(\w:)/, '$1') });
+    await page.evaluate(() => scrollTo(0, 0));
     await page.getByRole('button', { name: 'Testar aviso', exact: true }).click();
     await page.getByRole('button', { name: 'apareceu', exact: true }).click();
     await page.getByText(/Resposta salva em .*: apareceu/).waitFor();

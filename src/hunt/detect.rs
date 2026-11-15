@@ -1424,7 +1424,6 @@ async fn store_opportunity(
             params![id, json, at, tid, lj],
         )?;
 
-        tx.execute("INSERT OR IGNORE INTO alert_delivery VALUES (?1,'windows','pendente',NULL,?2)", params![id,now])?;
         tx.execute("DELETE FROM alert_outcomes WHERE listing_id=?1", [&id])?;
         // Reserva com prazo: se o processo fechar durante o envio, a próxima consulta tenta de novo.
         let alert = notify && tx.execute(
