@@ -44,7 +44,7 @@ pub const RARE_MAX_TASKS: usize = 24;
 const SKIN_RANK_BASE: i64 = 100_000;
 /// Piso visto numa consulta vale por tanto tempo (depois a tarefa é conferida de novo).
 pub const FLOOR_TTL: i64 = 6 * 3600;
-/// A seleção é refeita a cada tanto, para o piso visto tirar quem não cabe no saldo.
+/// A seleção é refeita periodicamente; piso acima do saldo só exclui alvos de desconto.
 pub const RESELECT_SECS: i64 = 900;
 /// Quanto o piso pode ficar abaixo da mediana de vendas e ainda ser plausível: a hipótese que dá o piso mínimo
 /// de desconto (`min_discount_floor`) antes de haver histórico. Com histórico vale a dispersão do item.
