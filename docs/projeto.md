@@ -198,16 +198,21 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
    por skin com tabela (código G, **sem filtro de desgaste**: a mesma consulta traz todos os desgastes, StatTrak e
-   Souvenir da faixa) cujo piso, no desgaste mais barato, cabe no saldo (`propertyFilters` por faixa de seed dos
+   Souvenir da faixa) com seeds admitidas pela prova de vendas, inclusive quando o preço atual passa do saldo (`propertyFilters` por faixa de seed dos
    tiers; a tarefa percorre as faixas em rodízio, uma por consulta). Até 24 raros, os que mais vendem por dia
    primeiro (soma dos desgastes; sem venda medida conta 1/dia): giro alto traz anúncio novo, e a revenda sai mais
    rápido. Antes era uma tarefa por desgaste: o Moonrise ocupava 5 vagas e cada faixa era revista 5× menos.
    - **Piso:** o do anúncio visto na última consulta da tarefa (vale 6 h); sem consulta ainda, USD × razão medida,
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
-     o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
-     foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
-     enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
+     o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro continua elegível mesmo quando todas as faixas
+     vistas estão acima do saldo. Um anúncio novo barato pode aparecer depois. O raro com piso visto acima
+     do saldo recebe 1/4 da nota-base, sem perder a elegibilidade.
      A seleção é refeita a cada 15 min e no próximo passo após observar um piso novo acima do saldo.
+     Entrada rara exige código, desgaste normal, referência disponível e seed admitida por `patterns::learn`
+     para aquele desgaste; sem medida alguma usa as tabelas de instalação. Os limites da prova não mudam.
+     Reconsidera a prova ao renovar vendas e a seleção a cada 15 min ou mudança relevante do saldo,
+     mantendo o limite de 24 skins. Ausência de vendas não autoriza inventar prêmio nem admitir candidato.
+     A medição offline do funil está em `medida-catalogo-2026-11-15.md`.
    - **Agenda que aprende:** cada alvo (skin × desgaste × modo: `barato`, `seed` ou `float`) recebe a leitura
      quando o **valor dela agora**, em centavos, é o maior: taxa de anúncio novo do alvo × anúncios acumulados desde
      a última leitura × retorno por anúncio novo (fórmula, ajuste e medidas no item 6 do Aprendizado). Sinal =
@@ -215,7 +220,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      anúncio não conta de novo. Alvo nunca lido vai na
      frente; empate vai para o lido há mais tempo. Regras que não mudam: 12,5 % das consultas vão sempre ao alvo
      menos testado, com o slot girando entre os modos (cada modo tem piso próprio, qualquer que seja o número de
-     alvos). O saldo e a taxa continuam decidindo quem entra (regras acima); a nota-base do catálogo só desempata
+     alvos). O saldo e a taxa continuam decidindo quais anúncios viram oportunidade (regras acima); a nota-base do catálogo só desempata
      alvos ainda não testados. A busca e as consultas de anúncios dividem o mesmo limitador global. As notas ficam
      no banco (`arm_stats`, retenção 14 dias e no máximo 2000 linhas) e sobrevivem a reinício.
    - **Fator aprendido na seleção (desconto):** rendimento do alvo `d:` (taxa × retorno, já encolhido para a média
