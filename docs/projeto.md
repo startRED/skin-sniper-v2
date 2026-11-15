@@ -561,7 +561,7 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   anúncio de float bom sumiu sem voltar em 36 % dos casos a 1,15–1,5× o comum e 5 % a 3× ou mais; 205
   fechamentos de Red Quartz na faixa saíram a 0,99×.
 - **Catálogo de pattern (`src/hunt/patterns.rs`, 12/11).** As tabelas (`bluegem`, `cspatterns`, `fade`, `phases`,
-  `named.json` com 28 grupos nomeados em 22 skins, `blue.json` com o % de azul por seed de 5 skins) só indicam
+  `named.json` com 33 grupos nomeados em 24 skins, `blue.json` com o % de azul por seed de 5 skins) só indicam
   candidatos. Quem decide se um seed é raro são as vendas guardadas do CSFloat (`csfloat_sales`, sem adesivo nem
   chaveiro). Cada venda vira uma razão sobre o preço comum do nome (a mediana das vendas dele, com ≥ 10 vendas
   limpas). O seed paga quando:
@@ -588,8 +588,12 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
     da trava é estimada (7 dias arredondados para a hora cheia, regra tirada de uma compra só); confirmação pelo
     inventário não existe, porque o app não tem login.
   - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo
-    lentas ou caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo); cada skin no máximo 1×/24 h,
-    sem gastar consulta da Steam. A
+    lentas ou caras), as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo) e, desde 14/11, as de giro
+    nunca medido dentro do saldo (uma leitura em cada três, da leitura mais antiga para a mais nova); cada skin
+    no máximo 1×/24 h, sem gastar consulta da Steam. Medido em 14/11 no banco do app: de 4 087 nomes
+    elegíveis só 828 tinham giro medido, porque o histórico da Steam hoje só é lido para skin de tabela ou com
+    seed pagante; cerca de 1 688 nomes dentro do saldo nunca chegavam ao CSFloat. Quantos deles têm seed que
+    paga não foi medido. A
     mesma vaga prioriza nomes vigiados cujo cache de vendas falta ou venceu (6 h), a cada 15 s enquanto a última
     consulta não falhou. A cota e a pausa do CSFloat continuam obrigatórias; falhas por nome esperam 10 min.
     Cada leitura refaz a prova; quando os seeds pagantes de uma skin crescem, a seleção é refeita na hora.
