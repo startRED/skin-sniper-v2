@@ -2,7 +2,8 @@
 "skins":{
 "AWP | PAW":[
   {"label":"Golden Cat","seeds":[41,350],"source":"https://cs2pattern-prices.com/weapons/awp/paw/golden-cat-1"},
-  {"label":"Stoner Cat","seeds":[420,788],"source":"https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1"}
+  {"label":"Stoner Cat","seeds":[420,788],"source":"https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-1"},
+  {"label":"Stoner Cat (tier 2)","seeds":[19,35,177,531,581,624,644,675,744],"source":"https://cs2pattern-prices.com/weapons/awp/paw/stoner-cat-2","why":"A página mostra 216 vendas a 1,9× (FN) e 1,7× (MW); nas vendas guardadas do app em 14/11 o grupo ainda não passa na prova (5 vendas, mediana 2,1×, quartil de baixo 1,2×). Fica como candidato: só entra na caça se as vendas provarem."}
 ],
 "AWP | Sun in Leo":[
   {"label":"Big Centered Sun","seeds":[82,102,146,187,190,255,308,379,457,648,664],"source":"https://cs2pattern-prices.com/weapons/awp/sun-in-leo/big-centered-sun"}

@@ -3,8 +3,9 @@
 //!
 //! As tabelas são o catálogo de candidatos: tiers de guia, % de azul por seed (`blue.json`), % do fade e grupos
 //! nomeados curados (`named.json`). Quem decide se um seed é raro são as vendas: `hunt::patterns` mede cada
-//! skin e publica os seeds que pagam (`set_paying`). Skin medida: só os seeds pagantes têm grupo. Skin ainda sem
-//! medida (instalação nova, teste): vale a tabela (tier 1, topo do fade, grupo nomeado).
+//! skin e publica os seeds que pagam (`set_paying`). Skin medida: só os seeds pagantes e o tier 1 do guia em skin
+//! sem nota têm grupo. Skin ainda sem medida (instalação nova, teste): vale a tabela (tier 1, topo do fade, grupo
+//! nomeado).
 
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
@@ -309,11 +310,15 @@ fn pattern_group(
 
     let seed = u16::try_from(seed?).ok()?;
     let proven = paying(base, seed, wear_index(market_hash_name));
-    if proven == Some(false) {
+    let tier = t.cs.skins.get(base).and_then(|s| tier_of(&s.tiers, seed));
+    // Tier 1 do guia em skin sem nota fica no grupo mesmo sem pagar no CSFloat: o preço vem dos fechamentos da
+    // Steam. Moonrise T1 FT em 14/11/2026: fora do grupo pela medida do CSFloat, 4 fechamentos na Steam com
+    // mediana a 2,1× o comum.
+    if proven == Some(false) && (tier != Some(1) || score(base, seed).is_some()) {
         return None;
     }
     let proven = proven == Some(true);
-    if let Some(tier) = t.cs.skins.get(base).and_then(|s| tier_of(&s.tiers, seed)) {
+    if let Some(tier) = tier {
         return Some(Group {
             key: format!("cs:{base}:t{tier}"),
             label: cs_label(pattern, tier),
@@ -403,6 +408,17 @@ pub fn seed_ranges(market_hash_name: &str) -> Vec<(u16, u16)> {
         );
     }
     ranges(seeds)
+}
+
+/// Tier 1 do guia em skin sem nota: fica no grupo e na busca mesmo sem pagar no CSFloat (`pattern_group`).
+pub fn guide_top(market_hash_name: &str) -> Vec<u16> {
+    let base = split_name(market_hash_name).0;
+    let top = tables().cs.skins.get(base).and_then(|s| s.tiers.get("1"));
+    top.into_iter()
+        .flatten()
+        .copied()
+        .filter(|s| score(base, *s).is_none())
+        .collect()
 }
 
 /// Seeds em faixas `(de, até)` inclusivas, juntando as consecutivas, ordenadas.
@@ -495,12 +511,22 @@ mod tests {
             "T1 Full Beam"
         );
         assert_eq!(group_of(name, Some(7), None, None), None);
-        set_paying(HashMap::from([(
-            base.to_string(),
-            BTreeSet::from([(7, 0), (511, 0)]),
-        )]));
-        // medida: o T1 que não paga some, o seed fora da tabela que paga entra, o T1 que paga fica
-        assert_eq!(group_of(name, Some(302), None, None), None);
+        set_paying(HashMap::from([
+            (base.to_string(), BTreeSet::from([(7, 0), (511, 0)])),
+            (
+                "Desert Eagle | Heat Treated".to_string(),
+                BTreeSet::from([(490, 0)]),
+            ),
+        ]));
+        // medida: o T1 sem nota que não paga no CSFloat fica (a Steam dá o preço), o T2 some, o T1 com nota
+        // some, o seed fora da tabela que paga entra, o T1 que paga fica
+        assert_eq!(
+            group_of(name, Some(302), None, None).unwrap().label,
+            "T1 Full Beam"
+        );
+        assert_eq!(group_of(name, Some(8), None, None), None);
+        let deagle = "Desert Eagle | Heat Treated (Factory New)";
+        assert_eq!(group_of(deagle, Some(16), None, None), None);
         let g = group_of(name, Some(7), None, None).unwrap();
         assert_eq!(
             (g.key.as_str(), g.label.as_str()),

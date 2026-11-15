@@ -58,7 +58,7 @@ const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
 pub(super) const LISTINGS_REST_SECS: i64 = 28;
 /// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
 // Medido em 12/11/2026 (24 h): MP7 | Amberline (seed) falhou 287 de 464 tentativas e Serpent Strike (seed) 129 de
-// 366; cada falha são 2 requisições (a repetição de 5 s falha junto ~9 em 10 vezes) e o alvo voltava a ser
+// 366; cada falha eram 2 requisições (a repetição de 5 s, tirada em 14/11, falhava junto ~9 em 10 vezes) e o alvo voltava a ser
 // escolhido ~80 s depois. Nas últimas 4 h foram 150 de 415 tentativas de anúncios. Outros alvos de seed: 0 de 102.
 // shortcut: 5 min e 1 h são hipótese; conferir por `research_attempts` com `outcome='error'` por alvo.
 const FAIL_REST_SECS: i64 = 300;

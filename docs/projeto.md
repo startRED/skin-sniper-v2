@@ -206,7 +206,9 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
      o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
      foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
-     enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
+     enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base e, desde 14/11, com
+     1/4 do `lucro` de cada faixa na agenda (antes o 1/4 só desempatava alvos e a agenda lia essas faixas pelo
+     valor cheio; nos 7 dias até 14/11, 3 057 anúncios avaliados acima do saldo, nenhum bom).
      A seleção é refeita a cada 15 min e no próximo passo após observar um piso novo acima do saldo.
    - **Agenda que aprende:** cada alvo (skin × desgaste × modo: `barato`, `seed` ou `float`) recebe a leitura
      quando o **valor dela agora**, em centavos, é o maior: taxa de anúncio novo do alvo × anúncios acumulados desde
@@ -409,10 +411,10 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
      comuns; abaixo de 1 = o app prevê alto), lucro virtual realizado dos avisos contra o previsto e raros que fecharam.
    - Prazos e régua são hipóteses de calibração. Tudo fica 60 dias.
 5. **Selo do raro (`pricing/premium.rs`).** Todo raro que vira aviso leva um selo; a regra do aviso não muda.
-   - Vendas fechadas do grupo: as do CSFloat guardadas (`csfloat_sales`) e os anúncios da mesma skin no grupo que
-     sumiram em até 48 h sem relistagem (múltiplo = preço ÷ preço médio comum da skin, sem prêmio). Valem os mesmos
-     dois filtros da prova da Steam (13/11, abaixo): seed de nota melhor não prova o pior, e sumiço com anúncio mais
-     barato do mesmo seed à venda não é venda.
+   - Vendas fechadas do grupo: só os anúncios da mesma skin no grupo que sumiram na Steam em até 48 h sem
+     relistagem (múltiplo = preço ÷ preço médio comum da skin, sem prêmio). Venda do CSFloat não conta desde 14/11:
+     "comprovado" é promessa de revenda na Steam. Valem os mesmos dois filtros da prova da Steam (13/11, abaixo):
+     seed de nota melhor não prova o pior, e sumiço com anúncio mais barato do mesmo seed à venda não é venda.
    - Prêmio = média geométrica encolhida seed → grupo → 1× com 5 vendas fictícias por nível; p25/p75 das vendas da
      seed quando ela tem ≥ 10, senão das do grupo.
    - "Comprovado" = ≥ 10 vendas fechadas e vender a `base × p25` ainda dá o lucro e a margem mínimos do aviso
@@ -437,8 +439,16 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
        releituras de faixa (escolheu 28 800 s, o topo da grade). Simulação de 7 dias × 10 sorteios
        (`hunt/agenda_sim.rs`, premissas lá): anúncios novos por leitura iguais ou maiores que a conta antiga em 6
        cenários (vida 15 min a 12 h × mercado observado/giro), de 0 a +54 %;
-     - `lucro` = líquido de vender pelo piso comum × mediana da prova dos seeds da faixa − o piso comum, em
-       centavos (mínimo 1);
+     - `lucro` = média, entre os seeds da faixa, do líquido de vender pelo preço comum × mediana dos fechamentos
+       do grupo do seed na Steam (`detect::closed`, mesmo nome e grupo, 3 ou mais) − o preço comum, em centavos
+       (mínimo 1). Grupo com menos de 3 fechamentos vale 1 centavo por seed: só o rodízio cego (1 em 8 leituras) o
+       lê, o que basta para ver os sumiços. Seed cujo grupo já tem 10 fechamentos sem pagar o lucro mínimo sai da
+       busca (a régua do selo "comprovado", para o outro lado). Até 14/11 o `lucro` vinha da prova do CSFloat;
+       medido nesse dia (24 h, 1 016 leituras): MAC-10 Snow Splash levou 400 com no máximo 1 fechamento na Steam,
+       Glock Grinder 81 sem anúncio novo, e o Moonrise T1 (11 fechamentos; 2,1× o comum no FT, 4,2× no MW) só 9 a 12. Refeitos os 7
+       dias anteriores pela regra da Steam: das 13 oportunidades avisadas nenhuma se sustenta e 1 recusada passa a
+       boa (Moonrise FT #694 a R$ 7,20). **Não medido:** quantas oportunidades por dia a agenda nova encontra; só
+       o app ligado alguns dias responde;
      - `taxa` = anúncios novos dentro do saldo por segundo e por peso, medida no alvo (skin × desgaste):
        `a = r + m·W·λ`, `taxa = (a + √a) ÷ (exposição + m·W)`. A exposição de cada leitura é
        `peso × W·(1 − e^(−Δ/W))` da faixa lida, gravada com a leitura (`reads.gap`, `reads.weight`); `λ` é a taxa
@@ -551,7 +561,7 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   anúncio de float bom sumiu sem voltar em 36 % dos casos a 1,15–1,5× o comum e 5 % a 3× ou mais; 205
   fechamentos de Red Quartz na faixa saíram a 0,99×.
 - **Catálogo de pattern (`src/hunt/patterns.rs`, 12/11).** As tabelas (`bluegem`, `cspatterns`, `fade`, `phases`,
-  `named.json` com 28 grupos nomeados em 22 skins, `blue.json` com o % de azul por seed de 5 skins) só indicam
+  `named.json` com 33 grupos nomeados em 24 skins, `blue.json` com o % de azul por seed de 5 skins) só indicam
   candidatos. Quem decide se um seed é raro são as vendas guardadas do CSFloat (`csfloat_sales`, sem adesivo nem
   chaveiro). Cada venda vira uma razão sobre o preço comum do nome (a mediana das vendas dele, com ≥ 10 vendas
   limpas). O seed paga quando:
@@ -578,8 +588,12 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
     da trava é estimada (7 dias arredondados para a hora cheia, regra tirada de uma compra só); confirmação pelo
     inventário não existe, porque o app não tem login.
   - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo
-    lentas ou caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo); cada skin no máximo 1×/24 h,
-    sem gastar consulta da Steam. A
+    lentas ou caras), as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo) e, desde 14/11, as de giro
+    nunca medido dentro do saldo (uma leitura em cada três, da leitura mais antiga para a mais nova); cada skin
+    no máximo 1×/24 h, sem gastar consulta da Steam. Medido em 14/11 no banco do app: de 4 087 nomes
+    elegíveis só 828 tinham giro medido, porque o histórico da Steam hoje só é lido para skin de tabela ou com
+    seed pagante; cerca de 1 688 nomes dentro do saldo nunca chegavam ao CSFloat. Quantos deles têm seed que
+    paga não foi medido. A
     mesma vaga prioriza nomes vigiados cujo cache de vendas falta ou venceu (6 h), a cada 15 s enquanto a última
     consulta não falhou. A cota e a pausa do CSFloat continuam obrigatórias; falhas por nome esperam 10 min.
     Cada leitura refaz a prova; quando os seeds pagantes de uma skin crescem, a seleção é refeita na hora.
@@ -596,17 +610,24 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   - **Limites:** razão do CSFloat não é preço da Steam (medido em 11/11: Center Star 1,6× lá × 2,0–2,6× aqui;
     High Beam T1 2,9× × 1,4×); skin com menos de 10 vendas limpas por nome não é medida e não é caçada; facas e
     luvas ficam fora; a tabela `learned_sales` fica no banco, sem uso.
-- Raro: o grupo do anúncio (tier, fase, faixa de fade, float de elite) busca vendas do CSFloat do mesmo grupo
-  (`price / reference.base_price`) entre todas as guardadas (`csfloat_sales`), não só as da última leitura do
-  nome: as do grupo no mesmo nome ou, com menos de 8, as do grupo em todos os desgastes. Em 10/11 um Moonrise FT
-  Center Star a R$ 7,20 (1,2× o comum) foi recusado com "5 vendas, 1,4x a 1,6x" quando o banco guardava 39 vendas
-  do grupo (mediana 1,78×). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
-  prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
-  usa a base comum e escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço.
+- Raro: o prêmio do grupo (tier, fase, faixa de fade, seed aprendido) é só o que fechou na Steam
+  (`detect::steam_closed`, abaixo). As vendas do CSFloat escolhem onde procurar (`patterns`) e não entram mais no
+  preço nem no selo (14/11). Medido no banco de 14/11, nos grupos das 13 oportunidades da vida do app: o
+  Serpent Strike saía previsto a R$ 19,00 e fechou 4 vezes na Steam ao preço comum (R$ 2,91 a 3,23); a P2000 Amber
+  Fade 99%+ FT saía a R$ 5,71 com 0 fechamentos e 17 anúncios do grupo parados; o Snow Splash tinha no máximo 1
+  fechamento; só o SSG 08 Acid Fade FN 99%+ tinha prova, 12 fechamentos a 4,2–5× o comum (o Tropical Breeze não
+  foi conferido). Com n ≥ 3 fechamentos: `mid` e
+  `high` da base × Q50/Q75 do múltiplo; `quick` fica sem prêmio (× min(1, Q25)). Com n < 3: usa a base comum e
+  escreve na evidência "prêmio sem prova (n vendas)". Preço pedido nunca vira preço. Não medido: quantas
+  oportunidades por dia sobram com a regra nova. O teto de compra da lista "vigiando" (`watch`) usa os mesmos
+  fechamentos da Steam (3 ou mais do nome e grupo); sem eles o raro fica sem teto.
+  Tier 1 do guia em skin sem nota (Moonrise, High Beam) fica no grupo e na busca mesmo quando a medida do CSFloat diz que
+  não paga: em 14/11 o Moonrise T1 FT estava fora do grupo e a Steam guardava 4 fechamentos dele com mediana a
+  2,1× o comum.
   **Prova da própria Steam (11/11):** em grupo de tabela ou seed aprendido, quando o banco guarda 3 ou mais
   anúncios do mesmo nome e grupo que sumiram em até 48 h sem relistagem (`observations`), o múltiplo passa a ser
-  preço ÷ preço comum desses sumiços, no lugar do CSFloat (`detect::steam_closed`), e a evidência diz "prêmio
-  medido na Steam". Medido em 11/11: Center Star FT 1,6× no CSFloat × 2,0–2,6× fechado na Steam; High Beam T1
+  preço ÷ preço comum desses sumiços (`detect::steam_closed`), e a evidência diz "prêmio medido na Steam".
+  Medido em 11/11: Center Star FT 1,6× no CSFloat × 2,0–2,6× fechado na Steam; High Beam T1
   2,9× × 1,4×; seed 425 do Serpent Strike 1,0× na Steam. Refeitas as avaliações antigas de raro com 3+
   fechamentos, a regra muda uma (o Moonrise a R$ 7,20 recusado em 10/11 passa a +R$ 3,72) e não cria aviso. Grupo de
   float fica de fora: os anúncios da faixa são pedidos a preço comum e somem como comum (205 fechamentos de Red

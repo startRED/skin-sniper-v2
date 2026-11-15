@@ -216,9 +216,17 @@ pub fn backtest(comps: &HashMap<String, Vec<Comp>>) -> Vec<(f64, f64)> {
     out
 }
 
-fn candidates(mut items: Vec<Item>, saldo: i64, ratio: Option<f64>, now: i64) -> Vec<String> {
+/// `measured`: skins de giro medido na Steam (≥ `MIN_SALES_PER_DAY`); senão, as de giro nunca medido.
+fn candidates(
+    mut items: Vec<Item>,
+    saldo: i64,
+    ratio: Option<f64>,
+    now: i64,
+    measured: bool,
+) -> Vec<String> {
     items.retain(|i| {
-        i.sales_per_day.is_some_and(|s| s >= MIN_SALES_PER_DAY)
+        i.sales_per_day
+            .map_or(!measured, |s| measured && s >= MIN_SALES_PER_DAY)
             && !i.name.starts_with('★')
             && i.name.contains('|')
             && catalog::wear_of(&i.name).is_some()
@@ -234,6 +242,13 @@ fn candidates(mut items: Vec<Item>, saldo: i64, ratio: Option<f64>, now: i64) ->
             .then(a.name.cmp(&b.name))
     });
     items.into_iter().map(|i| i.name).collect()
+}
+
+/// Da leitura mais antiga para a mais nova, pela última venda guardada: quem nunca foi lido vem primeiro e a
+/// fila não recomeça do "A" a cada vez que o app liga.
+fn oldest_first(mut names: Vec<String>, last: &HashMap<String, i64>) -> Vec<String> {
+    names.sort_by_cached_key(|n| (last.get(n).copied().unwrap_or(0), n.clone()));
+    names
 }
 
 /// Nomes de skin de catálogo de pattern, do mais vendido ao menos: lidos mesmo com pouco giro ou acima do
@@ -394,12 +409,23 @@ pub async fn maybe_step(h: &Hunt) {
     };
     let names = match catalog::load_items(&h.db).await {
         Ok(items) => {
-            // metade das leituras para as skins de catálogo de pattern, metade para descobrir seed novo
-            let (table, rest) = (catalog_names(&items), candidates(items, saldo, ratio, now));
-            if (now / GAP) % 2 == 0 {
-                [table, rest].concat()
-            } else {
-                [rest, table].concat()
+            // um terço das leituras para as skins de catálogo de pattern, um terço para as de giro medido e um
+            // terço para as de giro nunca medido dentro do saldo (a Steam só mede giro de skin que já tem seed)
+            let table = catalog_names(&items);
+            let rest = candidates(items.clone(), saldo, ratio, now, true);
+            let last =
+                h.db.call(|c| {
+                    c.prepare("SELECT name, max(sold_at) FROM csfloat_sales GROUP BY name")?
+                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<HashMap<String, i64>>>()
+                })
+                .await
+                .unwrap_or_default();
+            let tail = oldest_first(candidates(items, saldo, ratio, now, false), &last);
+            match (now / GAP) % 3 {
+                0 => [table, rest, tail].concat(),
+                1 => [rest, table, tail].concat(),
+                _ => [tail, table, rest].concat(),
             }
         }
         Err(e) => return tracing::warn!("patterns: catálogo ilegível: {e}"),
@@ -464,20 +490,38 @@ mod tests {
             dispersion: None,
             history_at: None,
         };
-        assert_eq!(candidates(vec![item.clone()], 600, Some(5.0), 100).len(), 1);
-        assert!(candidates(vec![item.clone()], 400, Some(5.0), 100).is_empty());
-        assert!(candidates(vec![item.clone()], 600, None, 100).is_empty());
-        assert!(candidates(vec![item.clone()], 600, Some(5.0), 100 + 8 * 86_400).is_empty());
+        assert_eq!(
+            candidates(vec![item.clone()], 600, Some(5.0), 100, true).len(),
+            1
+        );
+        assert!(candidates(vec![item.clone()], 400, Some(5.0), 100, true).is_empty());
+        assert!(candidates(vec![item.clone()], 600, None, 100, true).is_empty());
+        assert!(candidates(vec![item.clone()], 600, Some(5.0), 100 + 8 * 86_400, true).is_empty());
         let mut missing = item.clone();
         missing.sales_per_day = None;
-        assert!(candidates(vec![missing], 600, Some(5.0), 100).is_empty());
+        assert!(candidates(vec![missing.clone()], 600, Some(5.0), 100, true).is_empty());
+        // giro nunca medido: fila própria, com o mesmo teto de saldo; giro medido baixo fica fora das duas
+        assert_eq!(
+            candidates(vec![missing.clone()], 600, Some(5.0), 100, false).len(),
+            1
+        );
+        assert!(candidates(vec![missing.clone()], 400, Some(5.0), 100, false).is_empty());
+        assert!(candidates(vec![item.clone()], 600, Some(5.0), 100, false).is_empty());
+        missing.sales_per_day = Some(1.0);
+        assert!(candidates(vec![missing], 600, Some(5.0), 100, false).is_empty());
+        let last = HashMap::from([("b".to_string(), 5), ("c".to_string(), 9)]);
+        let order = oldest_first(vec!["c".into(), "b".into(), "a".into()], &last);
+        assert_eq!(order, ["a", "b", "c"]);
         let mut no_price = item.clone();
         no_price.reference_usd_cents = None;
-        assert_eq!(candidates(vec![no_price], 0, None, 100).len(), 1);
+        assert_eq!(candidates(vec![no_price], 0, None, 100, true).len(), 1);
         let mut measured = item;
         measured.reference_usd_cents = None;
         measured.floor_usd_cents = Some(100);
-        assert_eq!(candidates(vec![measured], 600, Some(5.0), 100).len(), 1);
+        assert_eq!(
+            candidates(vec![measured], 600, Some(5.0), 100, true).len(),
+            1
+        );
     }
 
     const T: i64 = 1_793_000_000;

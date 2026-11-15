@@ -356,3 +356,27 @@ valendo sobre o corpo descomprimido.
   frescor da fila pública enquanto ela pode consultar. Teste com a captura real de histórico reproduziu
   a falsa recuperação e verifica a pausa completa depois das duas recusas. O texto não atribui o bloqueio
   a uma cota, prazo ou identidade que a resposta da Steam não informa.
+
+## Listas externas de pattern conferidas em 14/11/2026
+
+Pedido do Erick: procurar mais skins com pattern valorizado e curar o que entra. Lido sem tocar na Steam: o
+índice de [cs2pattern-prices.com](https://cs2pattern-prices.com) (45 skins que não são faca, 177 páginas de
+grupo, 111 lidas) e os guias de csgoskins.gg. Dos 127 grupos anotados, o que a própria página mostra:
+
+- **Com prêmio nas vendas (5):** AWP | PAW Golden Cat tier 1 e Stoner Cat tier 1 (já no catálogo), Stoner Cat
+  tier 2 (1,9× FN, 1,7× MW em 216 vendas; entrou em `named.json` só como candidato), AK-47 | Aphrodite Pink
+  Gems (os mesmos 12 seeds já no catálogo) e MP7 | Fade Max Purple tier 1 (seeds 80, 449, 576; cerca de 2× em
+  37 vendas; já coberto: `fade.json` dá 100 %, 99,76 % e 99,71 % a esses seeds, dentro do grupo de fade 99 %+).
+- **Com vendas e sem prêmio (47), fora do catálogo:** AWP | Exothermic (Centered e Scope Diamond), AWP | BOOM,
+  AWP | PAW (CT Cat, Golden Cat with Knife, Stoner Cat tier 3), AK-47 | Aphrodite (Bronze, Gold e Purple Gems),
+  Galil AR | Rainbow Spoon (Fade Gems tier 2 a 5), M4A1-S | Fatal Glitch (Max Green e Max Orange), MP7 | Fade
+  Max Purple tier 2 e Glock-18 | Gamma Doppler (19 grupos). A mesma fonte mostra Desert Eagle | Serpent Strike
+  Max Orange e Max Black com cerca de 230 vendas e sem prêmio.
+- **Só visual, sem venda que prove (75), fora do catálogo:** XM1014 | XOXO (47 grupos), Desert Eagle | Emerald
+  Jörmungandr (22) e MP5-SD | Lab Rats (6).
+
+Conferência com as vendas guardadas do app (51 818, cópia do banco em 14/11): os 8 seeds novos do Stoner Cat
+tier 2 têm 5 vendas, mediana 2,1× e quartil de baixo 1,2× (não passam na prova); Exothermic Centered Diamond
+1,2×; MP7 | Fade tier 2 1,3×; XOXO tem 53 vendas e nenhum grupo com 3; Aphrodite, BOOM, Rainbow Spoon, Fatal
+Glitch, Lab Rats e Jörmungandr não têm venda guardada. Conclusão: as listas públicas não trouxeram skin nova
+com prêmio provado; skin nova só entra pelas vendas (ver o coletor em `docs/projeto.md`).
