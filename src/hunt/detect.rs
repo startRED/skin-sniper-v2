@@ -1313,10 +1313,15 @@ async fn over_saldo(
 
 /// Aviso no Telegram de um anúncio bom acima do saldo: preço, lucro e quanto falta. Só uma tentativa; o anúncio volta
 /// a ser avaliado no próximo ciclo, mas só avisa de novo se nunca foi gravado como bom.
-fn send_over_saldo_alert(h: &Hunt, opp: &Opportunity, saldo: i64) {
-    let Some(tg) = h.telegram.clone() else {
-        return;
-    };
+pub(super) fn send_over_saldo_alert(
+    h: &Hunt,
+    opp: &Opportunity,
+    saldo: i64,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let tg = h.telegram.clone()?;
+    if !tg.is_configured() {
+        return None;
+    }
     let mut note = format!(
         "Acima do saldo: faltam {} (saldo {}). Não é compra possível agora; cubra o saldo se quiser.",
         brl(opp.price_cents - saldo),
@@ -1336,10 +1341,39 @@ fn send_over_saldo_alert(h: &Hunt, opp: &Opportunity, saldo: i64) {
         eta_hours: opp.sell.mid.eta_hours,
         seal: Some(note),
     };
-    tokio::spawn(async move {
-        match tg.notify(&alert, None).await {
-            Ok(_) | Err(NotifyError::NotConfigured) => {}
-            Err(e) => tracing::warn!("aviso acima do saldo no Telegram falhou: {e}"),
+    let db = h.db.clone();
+    let at = h.now();
+    let record = opp.clone();
+    let handle = tokio::spawn(async move {
+        let id = alert.id.clone();
+        let reserved = db.call(move |c| {
+            let tx = c.transaction()?;
+            tx.execute("INSERT OR IGNORE INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,grp,base_cents,above_saldo) SELECT ?1,?2,?3,?4,?5,g.grp,g.base_cents,1 FROM (SELECT 1) LEFT JOIN ghosts g ON g.listing_id=?6 AND g.approved=1", params![id,record.name,at,record.price_cents,record.sell.mid.price_cents,record.id])?;
+            crate::web::learning_alerts::delivery(&tx,&id,"telegram","pendente",None,at)?;
+            tx.commit()
+        }).await;
+        if let Err(e) = reserved {
+            tracing::warn!("não consegui registrar tentativa de aviso acima do saldo: {e:#}");
+            return;
+        }
+        let (state, reason) = match tg.notify(&alert, None).await {
+            Ok(_) => ("aceito", None),
+            Err(e) => ("falhou", Some(e.to_string())),
+        };
+        if let Err(e) = db
+            .call(move |c| {
+                crate::web::learning_alerts::delivery(
+                    c,
+                    &alert.id,
+                    "telegram",
+                    state,
+                    reason.as_deref(),
+                    at,
+                )
+            })
+            .await
+        {
+            tracing::warn!("não consegui registrar resultado do aviso acima do saldo: {e:#}");
         }
     });
     tracing::info!(
@@ -1349,6 +1383,7 @@ fn send_over_saldo_alert(h: &Hunt, opp: &Opportunity, saldo: i64) {
         brl(opp.sell.mid.profit_cents),
         brl(opp.price_cents - saldo)
     );
+    Some(handle)
 }
 
 /// id, nome, preço, seed, float.
@@ -1432,7 +1467,7 @@ async fn store_opportunity(
             params![id, now, now - 60],
         )? == 1;
         if alert {
-            tx.execute("INSERT OR IGNORE INTO alert_forecasts SELECT ?1,json_extract(?2,'$.name'),?3,json_extract(?2,'$.price_cents'),json_extract(?2,'$.sell.mid.price_cents'),g.grp,g.base_cents FROM (SELECT 1) LEFT JOIN ghosts g ON g.listing_id=?1 AND g.approved=1", params![id,json,now])?;
+            tx.execute("INSERT OR IGNORE INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,grp,base_cents) SELECT ?1,json_extract(?2,'$.name'),?3,json_extract(?2,'$.price_cents'),json_extract(?2,'$.sell.mid.price_cents'),g.grp,g.base_cents FROM (SELECT 1) LEFT JOIN ghosts g ON g.listing_id=?1 AND g.approved=1", params![id,json,now])?;
             crate::web::learning_alerts::delivery(&tx, &id, "windows", "pendente", None, now)?;
             crate::web::learning_alerts::delivery(&tx, &id, "telegram", "pendente", None, now)?;
         }

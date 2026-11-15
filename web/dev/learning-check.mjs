@@ -33,6 +33,11 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'A página passou da borda.');
     await page.screenshot({ path: new URL(`${name}.png`, output).pathname.replace(/^\/(\w:)/, '$1'), fullPage: true });
     assert.equal(await page.locator('.metrics > li').count(), 7);
+    const aboveSaldo = page.locator('.alerts > li').filter({ hasText: 'acima do saldo' });
+    assert.equal(await aboveSaldo.count(), 1);
+    assert.equal(await aboveSaldo.getByText('Windows', { exact: true }).count(), 0);
+    assert.match(await aboveSaldo.innerText(), /falhou: Telegram recusou/);
+    await aboveSaldo.screenshot({ path: new URL(`${name}-acima-do-saldo.png`, output).pathname.replace(/^\/(\w:)/, '$1') });
     const comparison = page.locator('.metrics > li').first();
     assert.match(await comparison.innerText(), /não comparáveis/);
     assert.match(await comparison.innerText(), /alvos e intervalos diferentes/);

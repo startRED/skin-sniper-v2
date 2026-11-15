@@ -147,7 +147,7 @@ function alertExample(): NonNullable<Learning['alerts']> {
   const states = ['pedido aceito pelo Windows', 'falhou: avisos desativados no Windows', 'pendente', 'desconhecido'];
   return {
     started_at: now - 3 * 86400, closes_at: now + 6 * 86400, test: noticeTest,
-    rows: states.map((windows, i) => ({ id: `exemplo-${i}`, name: ['Glock-18 | Moonrise (Field-Tested)', 'SSG 08 | Acid Fade (Factory New)', 'MAC-10 | Snow Splash (Battle-Scarred)', 'Five-SeveN | Heat Treated (Field-Tested)'][i], at: now - (i + 1) * 86400, price_cents: 720, windows, telegram: 'desconhecido', listing: ['saiu do ar em 3 min (comprado ou retirado)', 'ainda anunciado', 'deixou de compensar', 'desconhecido (faixa não foi relida)'][i], group_check: i > 1 ? 'não teve' : 'ainda sem dados', price_check: 'sem prova de preço', sales: 0 })),
+    rows: states.map((windows, i) => ({ above_saldo: i === 2, id: `exemplo-${i}`, name: ['Glock-18 | Moonrise (Field-Tested)', 'SSG 08 | Acid Fade (Factory New)', 'MAC-10 | Snow Splash (Battle-Scarred)', 'Five-SeveN | Heat Treated (Field-Tested)'][i], at: now - (i + 1) * 86400, price_cents: 720, windows, telegram: i === 2 ? 'falhou: Telegram recusou o pedido de exemplo' : 'desconhecido', listing: ['saiu do ar em 3 min (comprado ou retirado)', 'ainda anunciado', 'deixou de compensar', 'desconhecido (faixa não foi relida)'][i], group_check: i > 1 ? 'não teve' : 'ainda sem dados', price_check: 'sem prova de preço', sales: 0 })),
     metrics: [
       ['Raros novos no saldo por leitura', '5% agenda × 36% rodízio: não comparáveis'],
       ['Raros novos no saldo por dia', '12 a 43/dia'],

@@ -127,6 +127,11 @@ impl Telegram {
         self.creds.lock().unwrap().clone()
     }
 
+    pub(crate) fn is_configured(&self) -> bool {
+        let credentials = self.creds.lock().unwrap();
+        credentials.0.is_some() && credentials.1.is_some()
+    }
+
     /// `getMe`: valida o token. `Refused` = token recusado (estado "recusada"); erro de rede não diz nada
     /// sobre o token.
     pub async fn get_me(&self) -> Result<BotInfo, NotifyError> {

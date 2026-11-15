@@ -23,6 +23,13 @@ CREATE TABLE notice_tests (
 );
 "#;
 
+pub const FOLLOWUP_SCHEMA: &str = r#"
+ALTER TABLE alert_forecasts ADD COLUMN above_saldo INTEGER NOT NULL DEFAULT 0;
+UPDATE alert_delivery SET state='desconhecido'
+ WHERE state='pendente' AND NOT EXISTS (
+ SELECT 1 FROM alert_forecasts f WHERE f.listing_id=alert_delivery.listing_id);
+"#;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Report {
     pub started_at: i64,
@@ -33,6 +40,8 @@ pub struct Report {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertRow {
+    #[serde(default)]
+    pub above_saldo: bool,
     pub id: String,
     pub name: String,
     pub at: i64,
@@ -140,9 +149,11 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
     let mut stmt = c.prepare("WITH ids AS (SELECT listing_id AS id FROM ghosts WHERE approved=1 UNION SELECT id FROM opportunities UNION SELECT listing_id FROM alert_forecasts)
       SELECT ids.id,COALESCE(f.name,g.name,json_extract(p.json,'$.name')),COALESCE(f.at,g.bought_at,p.created_at),
       COALESCE(f.price_cents,g.price_cents,json_extract(p.json,'$.price_cents')),COALESCE(f.grp,g.grp),COALESCE(f.base_cents,g.base_cents),COALESCE(f.predicted_cents,g.mid_price_cents),
-      o.last_seen,o.gone_at,COALESCE(a.reason,json_extract(p.json,'$.gone_reason')),COALESCE(a.at,p.gone_at),f.listing_id IS NOT NULL
+      o.last_seen,o.gone_at,COALESCE(a.reason,json_extract(p.json,'$.gone_reason')),COALESCE(a.at,p.gone_at),COALESCE(f.above_saldo,0)
       FROM ids LEFT JOIN ghosts g ON g.listing_id=ids.id AND g.approved=1 LEFT JOIN opportunities p ON p.id=ids.id
-      LEFT JOIN alert_forecasts f ON f.listing_id=ids.id LEFT JOIN observations o ON o.listing_id=ids.id LEFT JOIN alert_outcomes a ON a.listing_id=ids.id
+      LEFT JOIN alert_forecasts f ON f.listing_id=ids.id
+      LEFT JOIN observations o ON o.listing_id=CASE WHEN f.above_saldo=1 THEN substr(ids.id,7) ELSE ids.id END
+      LEFT JOIN alert_outcomes a ON a.listing_id=CASE WHEN f.above_saldo=1 THEN substr(ids.id,7) ELSE ids.id END
       WHERE f.listing_id IS NOT NULL OR EXISTS (
         SELECT 1 FROM alert_delivery d WHERE d.listing_id=ids.id
         AND d.state IN ('desconhecido','aceito','falhou'))
@@ -176,7 +187,7 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
             gone,
             reason,
             ended,
-            requested,
+            above_saldo,
         ) = raw?;
         let windows = delivery_text(c, &id, "windows")?;
         let telegram = delivery_text(c, &id, "telegram")?;
@@ -228,19 +239,24 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
         } else {
             "não sustenta"
         };
-        if requested && at >= start && at < end {
+        if at >= start && at < end {
             alerts += 1;
-            unknown += i64::from(windows == "desconhecido");
-            if ready && group_check != "ainda sem dados" {
+            unknown += i64::from(if above_saldo {
+                telegram == "desconhecido"
+            } else {
+                windows == "desconhecido"
+            });
+            if !above_saldo && ready && group_check != "ainda sem dados" {
                 mature += 1;
                 with_sales += i64::from(!sales.is_empty());
             }
-            if price_check != "sem prova de preço" {
+            if !above_saldo && price_check != "sem prova de preço" {
                 priced += 1;
                 sustained += i64::from(price_check == "sustenta");
             }
         }
         rows.push(AlertRow {
+            above_saldo,
             id,
             name,
             at,
@@ -442,6 +458,22 @@ pub async fn answer(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn daily_alert_count_matches_every_listed_notice_in_the_window() {
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            c.execute("UPDATE alert_window SET started_at=1000", [])?;
+            for (id, state, at) in [("unknown","desconhecido",1001),("accepted","aceito",1002),("failed","falhou",1003),("old","desconhecido",900)] {
+                c.execute("INSERT INTO ghosts(listing_id,name,kind,bought_at,price_cents,mid_price_cents,mid_net_cents,approved) VALUES (?1,'skin','raro',?2,100,200,170,1)", params![id,at])?;
+                delivery(c,id,"windows",state,None,at)?;
+            }
+            let r=report(c,1000+9*DAY)?;
+            let listed=r.rows.iter().filter(|r|r.at>=1000 && r.at<1000+7*DAY).count();
+            assert_eq!(listed,3);
+            assert_eq!(r.metrics[3].value,format!("{listed} em 7 dias"));
+            Ok(())
+        }).await.unwrap();
+    }
+    #[tokio::test]
     async fn opportunities_without_notice_attempts_are_not_alerts() {
         let (db, _dir) = crate::db::temp_db();
         db.call(|c| {
@@ -454,7 +486,7 @@ mod tests {
             assert!(r.rows.is_empty());
             assert_eq!(r.metrics[3].value, "0 em 7 dias");
             assert_ne!(r.metrics[3].state, "cumprido");
-            c.execute("INSERT INTO alert_forecasts SELECT listing_id,name,bought_at,price_cents,mid_price_cents,grp,base_cents FROM ghosts", [])?;
+            c.execute("INSERT INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,grp,base_cents) SELECT listing_id,name,bought_at,price_cents,mid_price_cents,grp,base_cents FROM ghosts", [])?;
             let attempted = report(c, 1000 + 9 * DAY)?;
             assert_eq!(attempted.rows.len(), 1);
             assert_eq!(attempted.rows[0].windows, "pendente");
@@ -526,7 +558,7 @@ mod tests {
             for i in 0..12 {
                 c.execute("INSERT INTO ghosts(listing_id,name,kind,grp,bought_at,price_cents,mid_price_cents,mid_net_cents,base_cents,approved) VALUES (?1,?1,'raro','g',1001,100,200,170,100,1)",[i.to_string()])?;
             }
-            c.execute("INSERT INTO alert_forecasts SELECT listing_id,name,bought_at,price_cents,mid_price_cents,grp,base_cents FROM ghosts",[])?;
+            c.execute("INSERT INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,grp,base_cents) SELECT listing_id,name,bought_at,price_cents,mid_price_cents,grp,base_cents FROM ghosts",[])?;
             let close=1000+9*DAY;
             let r=report(c,close)?;
             assert_eq!(r.metrics[3].state,"cumprido");

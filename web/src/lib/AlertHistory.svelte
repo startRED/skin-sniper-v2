@@ -40,8 +40,8 @@
   <ol class="alerts">
     {#each report.rows.slice(0, shown) as row (row.id)}
       <li><div class="heading"><h4>{row.name}</h4><span>{money(row.price_cents)}</span></div>
-        <p class="muted">{date(row.at)} · anúncio {row.id}</p>
-        <dl><div><dt>Windows</dt><dd>{row.windows}</dd></div>{#if !row.telegram.includes('Telegram sem token ou chat id')}<div><dt>Telegram</dt><dd>{row.telegram}</dd></div>{/if}<div><dt>Anúncio</dt><dd>{row.listing}</dd></div><div><dt>Conferência de 48 h</dt><dd>{row.group_check}</dd></div><div><dt>Preço do grupo</dt><dd>{row.price_check}{row.sales ? ` · ${row.sales} vendas registradas` : ''}</dd></div></dl>
+        <p class="muted">{date(row.at)} · anúncio {row.id}{#if row.above_saldo}<span class="amber"> · acima do saldo</span>{/if}</p>
+        <dl>{#if !row.above_saldo}<div><dt>Windows</dt><dd>{row.windows}</dd></div>{/if}{#if row.above_saldo || !row.telegram.includes('Telegram sem token ou chat id')}<div><dt>Telegram</dt><dd>{row.telegram}</dd></div>{/if}<div><dt>Anúncio</dt><dd>{row.listing}</dd></div><div><dt>Conferência de 48 h</dt><dd>{row.group_check}</dd></div><div><dt>Preço do grupo</dt><dd>{row.price_check}{row.sales ? ` · ${row.sales} vendas registradas` : ''}</dd></div></dl>
       </li>
     {/each}
   </ol>

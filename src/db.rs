@@ -201,6 +201,7 @@ const MIGRATIONS: &[&str] = &[
     // como anúncio novo. As leituras ficam; a repetição e o placar já as pulam.
     "UPDATE arm_stats SET r = 0, exposure = 0 WHERE id LIKE 'r:%';",
     crate::web::learning_alerts::SCHEMA,
+    crate::web::learning_alerts::FOLLOWUP_SCHEMA,
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -377,12 +378,22 @@ mod tests {
     #[test]
     fn alert_migration_preserves_old_predictions_and_marks_delivery_unknown() {
         let mut c = Connection::open_in_memory().unwrap();
-        for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+        let old_version = MIGRATIONS
+            .iter()
+            .position(|sql| *sql == crate::web::learning_alerts::SCHEMA)
+            .unwrap()
+            + 1;
+        for sql in &MIGRATIONS[..old_version] {
             c.execute_batch(sql).unwrap();
         }
-        c.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64)
+        c.pragma_update(None, "user_version", old_version as i64)
             .unwrap();
         c.execute("INSERT INTO ghosts(listing_id,name,kind,bought_at,price_cents,mid_price_cents,mid_net_cents,approved) VALUES ('old','skin','raro',100,100,200,170,1)",[]).unwrap();
+        c.execute(
+            "INSERT INTO alert_delivery VALUES ('old','windows','pendente',NULL,100)",
+            [],
+        )
+        .unwrap();
         migrate(&mut c).unwrap();
         assert_eq!(
             c.query_row(
@@ -402,6 +413,11 @@ mod tests {
             .unwrap(),
             "desconhecido"
         );
+        c.execute("INSERT INTO opportunities(id,json,created_at) VALUES ('silent','{\"name\":\"skin\",\"price_cents\":100}',?1)", [now_unix()]).unwrap();
+        let report = crate::web::learning_alerts::report(&c, now_unix()).unwrap();
+        assert_eq!(report.rows.len(), 1);
+        assert_eq!(report.rows[0].id, "old");
+        assert_eq!(report.rows[0].windows, "desconhecido");
         migrate(&mut c).unwrap();
         assert_eq!(
             c.query_row("SELECT count(*) FROM alert_window", [], |r| r

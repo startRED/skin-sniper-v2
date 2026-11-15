@@ -234,7 +234,7 @@ export type Learning = {
 export type NoticeTest = { id: number; at: number; state: string; reason: string | null; appeared: boolean | null; answered_at: number | null };
 export type AlertReport = {
   started_at: number; closes_at: number;
-  rows: { id: string; name: string; at: number; price_cents: number; windows: string; telegram: string; listing: string; group_check: string; price_check: string; sales: number }[];
+  rows: { above_saldo?: boolean; id: string; name: string; at: number; price_cents: number; windows: string; telegram: string; listing: string; group_check: string; price_check: string; sales: number }[];
   test: NoticeTest | null;
   metrics: { label: string; baseline: string; value: string; state: string }[];
 };
