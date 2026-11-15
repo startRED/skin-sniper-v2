@@ -38,6 +38,10 @@ try {
     assert.equal(await aboveSaldo.getByText('Windows', { exact: true }).count(), 0);
     assert.match(await aboveSaldo.innerText(), /falhou: Telegram recusou/);
     await aboveSaldo.screenshot({ path: new URL(`${name}-acima-do-saldo.png`, output).pathname.replace(/^\/(\w:)/, '$1') });
+    const dailyAlerts = page.locator('.metrics > li').nth(3);
+    assert.match(await dailyAlerts.innerText(), /meta 12 dentro do saldo/);
+    assert.match(await dailyAlerts.innerText(), /3 em 7 dias; 2 dentro do saldo/);
+    await dailyAlerts.screenshot({ path: new URL(`${name}-meta-avisos.png`, output).pathname.replace(/^\/(\w:)/, '$1') });
     const comparison = page.locator('.metrics > li').first();
     assert.match(await comparison.innerText(), /não comparáveis/);
     assert.match(await comparison.innerText(), /alvos e intervalos diferentes/);

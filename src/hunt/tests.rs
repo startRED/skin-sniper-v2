@@ -1312,7 +1312,7 @@ async fn over_saldo_notice_is_recorded_with_result_without_network() {
             row.telegram
                 .starts_with("falhou: Telegram recusou: recusado no teste offline")
         );
-        assert_eq!(r.metrics[3].value, "1 em 7 dias");
+        assert_eq!(r.metrics[3].value, "1 em 7 dias; 0 dentro do saldo");
         assert!(r.metrics[4].value.starts_with("0 de 0"));
         assert!(r.metrics[6].value.starts_with("0 de 0"));
         assert_eq!(

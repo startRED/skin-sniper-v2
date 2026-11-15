@@ -152,11 +152,11 @@ function alertExample(): NonNullable<Learning['alerts']> {
       ['Raros novos no saldo por leitura', '5% agenda × 36% rodízio: não comparáveis'],
       ['Raros novos no saldo por dia', '12 a 43/dia'],
       ['Estado dos avisos e teste de tela', 'sem registro por canal'],
-      ['Avisos por dia', '14 em 9 dias; meta 12 em 7 dias'],
+      ['Avisos por dia', '14 em 9 dias; meta 12 dentro do saldo em 7 dias'],
       ['Conferência de 48 h', '3 de 14'],
       ['Anúncios novos lidos por hora', '8 a 12/h'],
       ['Preço nas vendas do grupo em 48 h', 'sem prova de preço na base']
-    ].map(([label, baseline], i) => ({ label, baseline, value: i === 0 ? 'Agenda e rodízio leem alvos e intervalos diferentes; o registro ainda não guarda a faixa lida.' : i === 4 ? '0 de 2; amostra pequena' : 'não medido neste exemplo', state: 'inconclusivo' }))
+    ].map(([label, baseline], i) => ({ label, baseline, value: i === 0 ? 'Agenda e rodízio leem alvos e intervalos diferentes; o registro ainda não guarda a faixa lida.' : i === 3 ? '3 em 7 dias; 2 dentro do saldo' : i === 4 ? '0 de 2; amostra pequena' : 'não medido neste exemplo', state: 'inconclusivo' }))
   };
 }
 function learning(): Learning {

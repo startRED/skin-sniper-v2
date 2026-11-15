@@ -145,6 +145,7 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
     let mut priced = 0;
     let mut sustained = 0;
     let mut alerts = 0;
+    let mut within_saldo_alerts = 0;
     let mut unknown = 0;
     let mut stmt = c.prepare("WITH ids AS (SELECT listing_id AS id FROM ghosts WHERE approved=1 UNION SELECT id FROM opportunities UNION SELECT listing_id FROM alert_forecasts)
       SELECT ids.id,COALESCE(f.name,g.name,json_extract(p.json,'$.name')),COALESCE(f.at,g.bought_at,p.created_at),
@@ -241,6 +242,7 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
         };
         if at >= start && at < end {
             alerts += 1;
+            within_saldo_alerts += i64::from(!above_saldo);
             unknown += i64::from(if above_saldo {
                 telegram == "desconhecido"
             } else {
@@ -339,10 +341,10 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
     );
     add(
         "Avisos por dia",
-        "14 em 9 dias (~1,6/dia); meta 12 em 7 dias",
-        format!("{alerts} em 7 dias"),
+        "14 em 9 dias (~1,6/dia); meta 12 dentro do saldo em 7 dias",
+        format!("{alerts} em 7 dias; {within_saldo_alerts} dentro do saldo"),
         true,
-        alerts >= 12,
+        within_saldo_alerts >= 12,
         now >= end,
     );
     add(
@@ -458,6 +460,27 @@ pub async fn answer(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn above_saldo_notice_counts_in_total_but_cannot_complete_the_balance_goal() {
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            c.execute("UPDATE alert_window SET started_at=1000", [])?;
+            for i in 0..12 {
+                c.execute("INSERT INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,above_saldo) VALUES (?1,'skin',1001,100,200,?2)", params![i.to_string(),i==11])?;
+            }
+            let r=report(c,1000+9*DAY)?;
+            assert_eq!(r.rows.len(),12);
+            assert_eq!(r.rows.iter().filter(|r|!r.above_saldo).count(),11);
+            assert_eq!(r.metrics[3].state,"não cumprido");
+            assert_eq!(r.metrics[3].value,"12 em 7 dias; 11 dentro do saldo");
+            c.execute("INSERT INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents) VALUES ('another','skin',1001,100,200)", [])?;
+            let r=report(c,1000+9*DAY)?;
+            assert_eq!(r.rows.len(),13);
+            assert_eq!(r.metrics[3].state,"cumprido");
+            assert_eq!(r.metrics[3].value,"13 em 7 dias; 12 dentro do saldo");
+            Ok(())
+        }).await.unwrap();
+    }
+    #[tokio::test]
     async fn daily_alert_count_matches_every_listed_notice_in_the_window() {
         let (db, _dir) = crate::db::temp_db();
         db.call(|c| {
@@ -469,7 +492,7 @@ mod tests {
             let r=report(c,1000+9*DAY)?;
             let listed=r.rows.iter().filter(|r|r.at>=1000 && r.at<1000+7*DAY).count();
             assert_eq!(listed,3);
-            assert_eq!(r.metrics[3].value,format!("{listed} em 7 dias"));
+            assert_eq!(r.metrics[3].value,format!("{listed} em 7 dias; {listed} dentro do saldo"));
             Ok(())
         }).await.unwrap();
     }
@@ -484,13 +507,13 @@ mod tests {
             delivery(c, "silent", "windows", "pendente", None, 1001)?;
             let r = report(c, 1000 + 9 * DAY)?;
             assert!(r.rows.is_empty());
-            assert_eq!(r.metrics[3].value, "0 em 7 dias");
+            assert_eq!(r.metrics[3].value, "0 em 7 dias; 0 dentro do saldo");
             assert_ne!(r.metrics[3].state, "cumprido");
             c.execute("INSERT INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,grp,base_cents) SELECT listing_id,name,bought_at,price_cents,mid_price_cents,grp,base_cents FROM ghosts", [])?;
             let attempted = report(c, 1000 + 9 * DAY)?;
             assert_eq!(attempted.rows.len(), 1);
             assert_eq!(attempted.rows[0].windows, "pendente");
-            assert_eq!(attempted.metrics[3].value, "1 em 7 dias");
+            assert_eq!(attempted.metrics[3].value, "1 em 7 dias; 1 dentro do saldo");
             Ok(())
         }).await.unwrap();
     }
