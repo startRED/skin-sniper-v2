@@ -4,7 +4,7 @@
 
 **Não decidido** para as três guardas: `n > 3`, múltiplo enorme em skin de centavos e separação
 StatTrak/Souvenir/normal. Nenhuma guarda de produção foi alterada; o fallback de desgaste permanece.
-Há 8 casos pós-corte, abaixo dos 10 exigidos em D, e não é possível reconstruir integralmente os
+Há 8 casos pós-corte e não é possível reconstruir integralmente os
 rótulos nem a decisão da regra atual. Os 16 casos reconstruíveis ficam inconclusivos; não são
 16 vendas nem prova de lucro. Não foi medida melhora de avisos confirmados ou de leitura por hora.
 
@@ -18,16 +18,17 @@ O script usa apenas a biblioteca padrão do Python e imprime JSON; não grava no
 
 ```powershell
 $env:PYTHONIOENCODING='utf-8'
-python scripts/measure_rare_price.py
-python -m unittest discover -s scripts -p test_measure_rare_price.py
+python -B .faber/d-review/scripts/measure_rare_price.py
+python -B -m unittest discover -s .faber/d-review/scripts -p test_measure_rare_price.py
 ```
 
-Corte fixado antes da medição: **2026-11-13 08:26:00 UTC**, Unix **1794558360**.
+Corte escolhido após ler as datas para separar a união em 8/8, antes dos rótulos:
+**2026-11-13 08:26:00 UTC**, Unix **1794558360**. Não foi um corte pré-registrado antes de acessar os dados.
 Treino: aprovação `< corte`; avaliação: aprovação `>= corte`. Não houve busca de corte favorável.
 Ele precede o oitavo ghost raro: 7 ghosts antes, 8 depois. A união acrescenta um caso anterior,
 ficando 8/8. Nenhum limiar foi ajustado, inclusive usando os resultados posteriores.
 
-Na execução registrada, `reads` tinha 9.326 linhas, entre 1794311920 e 1794782970.
+Na execução registrada em `measurement-receipt.json`, `reads` tinha 9.339 linhas, entre 1794311920 e 1794783344.
 O banco é alimentado pelo processo já existente; reexecutar garante o mesmo método, não congela
 essa fonte viva. O script não inicia, para ou reinicia processo. O JSON completo permite guardar
 o recibo de uma execução fora do banco; os identificadores abaixo fixam a população desta execução.
@@ -91,6 +92,50 @@ Na última data de reads, um caso pós-corte nem tinha completado 48 h (P2000, I
 
 ## Dados impossíveis e proteção contra informação futura
 
+## Sinais medidos por SQL, independentemente do rótulo
+
+Os 16 rótulos inconclusivos não escondem os sinais abaixo. `signals` em cada caso do recibo
+preserva a observação inteira e os anúncios concorrentes com ID, nome, preço e datas.
+
+| Período | Persistência ≥48 h | Grupo abaixo do previsto | Sumiço inicial mais barato ≤48 h | Conflito candidato | Qualquer sinal falso |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Treino | 0 | 3 | 7 | 3 | 3 |
+| Pós-corte | 3 | 5 | 4 | 2 | 6 |
+
+Persistência: `last_seen - aprovação >= 172800` e preço gravado na observação menor ou igual ao
+preço aprovado. Pós-corte: 2236410982722897117 = 60,48 h (123 centavos),
+497240074063122389 = 59,43 h (218), 8493351350422908213 = 57,97 h (1946).
+Não prova preço contínuo nem presença no instante exato de 48 h: a observação é sobrescrita.
+
+Grupo abaixo: outro ID com `grp` idêntico, `price_cents < ghost.mid_price_cents` e
+`first_seen BETWEEN aprovação AND aprovação+172800`. Usa o grupo gravado, inclusive entre
+desgastes; não pressupõe equivalência entre variantes. Não conta anúncio visto só antes nem depois
+da janela e não inclui o próprio ID. Sem previsão gravada (caso só em evaluations), o teste fica
+indisponível, não negativo comprovado. Preço atual sobrescrito impede provar o preço na primeira aparição.
+
+| ID pós-corte | Concorrentes grupo | Destes com nome/desgaste exato |
+| --- | ---: | ---: |
+| 864855775413109701 | 7 | 0 |
+| 497240074063122389 | 5 | 0 |
+| 1110882788837215127 | 16 | 16 |
+| 98668873419638827 | 6 | 6 |
+| 8493351350422908213 | 18 | 18 |
+
+No treino há concorrentes para 1712796784570457425 (2; 1 nome exato),
+4203895644640287181 (1; 0 exatos), 4323584935092825132 (1; 1 exato).
+Os 5/8 pós-corte são sinais de grupo; com nome/desgaste exato são 3/8. O sinal de 497…
+é entre desgastes, e isso limita a comparação direta de preço. Não esconder essa distinção.
+
+Sumiço candidato: `cheapest=1` na primeira observação, `gone_at` entre aprovação e +48 h,
+`relisted=0`. Não prova continuidade como mais barato nem ausência definitiva de retorno.
+Conflito candidato = esse sumiço junto com persistência ou concorrente abaixo; no pós-corte
+são 864855775413109701 e 1110882788837215127; no treino, os três IDs com concorrentes acima.
+Esses 5 conflitos são de sinais limitados, não a demonstração completa do conflito da regra D.
+Cobertura permanece falsa por falta de prova de faixa; `classify` recebe os sinais realmente
+consultados e mantém a prioridade inconclusiva. Nenhuma guarda foi escolhida a partir deles.
+
+## Limites da reconstrução
+
 - `observations.cheapest` só guarda a posição na primeira leitura. `last_seen` é sobrescrito;
   não existe sequência de posições e preços por anúncio. Não prova continuidade como mais barato,
   nem o preço exato no instante de 48 h. `gone_at` e `relisted` também não são uma trilha de eventos.
@@ -104,7 +149,7 @@ Na última data de reads, um caso pós-corte nem tinha completado 48 h (P2000, I
   consultadas não preservam tudo isso. Não se leu settings para tentar preencher essas lacunas.
 - Preço e base do ghost são os valores gravados da decisão, não série temporal anterior ao anúncio.
   Nenhuma variável posterior foi usada como feature de guarda. Datas de aprovação só separam a
-  amostra; observations só confere presença, sem orientar previsão ou decisão.
+  amostra; observations mede sinais posteriores de resultado, sem orientar previsão ou decisão de guarda.
 - `fast_closed` do professor usa outro critério e não substitui rótulo D. Não é validação de venda
   daquele anúncio. Os rótulos finais de 16/11 e 20/11 ainda não foram observados nesta medição.
 
@@ -124,6 +169,9 @@ da separação na evidência disponível à época. O fallback de desgaste vizin
 
 Cinco testes offline passaram: deduplicação e primeira data, prioridade do inconclusivo sem
 cobertura, conflito de sinais, ordem falso/achado/sem encaixe e medição integrada em banco em memória
-sem tabela settings (incluindo exclusão de comum e fronteira exata do corte). O script real também
+sem tabela settings (incluindo exclusão de comum e fronteira exata do corte). O integrado executa
+o SQL de persistência e concorrentes, exclui grupo errado/preço igual/fora da janela, inclui e distingue
+nome diferente, verifica previsão ausente, sumiço, conflito e retorno. Primeiro falhou por ausência
+de `signals`; depois da correção passou. O script real também
 foi executado na URI autorizada e produziu as contagens acima. Guardas e desempenho de produção
 não foram validados por esta tarefa; nenhuma mudança de produção foi feita.
