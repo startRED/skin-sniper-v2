@@ -53,6 +53,8 @@ pub struct Day {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Learning {
+    #[serde(default)]
+    pub alerts: super::learning_alerts::Report,
     /// Do mais recente ao mais antigo.
     pub days: Vec<Day>,
     /// Primeiro anúncio do registro (`None` = registro vazio).
@@ -287,6 +289,7 @@ pub async fn get(State(app): State<AppState>) -> Result<Json<Learning>, ApiError
                 )
                 .optional()?;
             Ok(Learning {
+                alerts: super::learning_alerts::report(c, now)?,
                 days,
                 since,
                 teacher: crate::hunt::teacher::summary(c)?,

@@ -141,6 +141,24 @@ function watchRows(): WatchRow[] {
 }
 
 // Placar de exemplo: 3 dias de registro (o resto vazio, como logo depois de instalar).
+let noticeTest: import('../src/lib/types').NoticeTest | null = null;
+function alertExample(): NonNullable<Learning['alerts']> {
+  const now = nowS();
+  const states = ['pedido aceito pelo Windows', 'falhou: avisos desativados no Windows', 'pendente', 'desconhecido'];
+  return {
+    started_at: now - 3 * 86400, closes_at: now + 6 * 86400, test: noticeTest,
+    rows: states.map((windows, i) => ({ id: `exemplo-${i}`, name: ['Glock-18 | Moonrise (Field-Tested)', 'SSG 08 | Acid Fade (Factory New)', 'MAC-10 | Snow Splash (Battle-Scarred)', 'Five-SeveN | Heat Treated (Field-Tested)'][i], at: now - (i + 1) * 86400, price_cents: 720, windows, telegram: 'desconhecido', listing: ['saiu do ar em 3 min (comprado ou retirado)', 'ainda anunciado', 'deixou de compensar', 'desconhecido (faixa não foi relida)'][i], group_check: i > 1 ? 'não teve' : 'ainda sem dados', price_check: 'sem prova de preço', sales: 0 })),
+    metrics: [
+      ['Raros novos no saldo por leitura', '5% agenda × 36% rodízio'],
+      ['Raros novos no saldo por dia', '12 a 43/dia'],
+      ['Estado dos avisos e teste de tela', 'sem registro por canal'],
+      ['Avisos por dia', '14 em 9 dias; meta 12 em 7 dias'],
+      ['Conferência de 48 h', '3 de 14'],
+      ['Anúncios novos lidos por hora', '8 a 12/h'],
+      ['Preço nas vendas do grupo em 48 h', 'sem prova de preço na base']
+    ].map(([label, baseline], i) => ({ label, baseline, value: i === 4 ? '0 de 2; amostra pequena' : 'não medido neste exemplo', state: 'inconclusivo' }))
+  };
+}
 function learning(): Learning {
   const days = Array.from({ length: 60 }, (_, i) => {
     const d = new Date((nowS() - 3 * 3600 - i * 86400) * 1000).toISOString().slice(0, 10);
@@ -171,7 +189,7 @@ function learning(): Learning {
     { queries: 0, finds: 0, near: 0, alerts: 0, alerts_closed: 0, labeled: 0, profit_cents: 0 }
   ];
   const candidates = { hours: 24, approved: 2, over_saldo: 9, yellow: 31, yellow_gone: 12, yellow_fast: 7, yellow_relisted: 2 };
-  return { days, since: nowS() - 2.4 * 86400, teacher, value, refit: 1, weeks, candidates,
+  return { alerts: alertExample(), days, since: nowS() - 2.4 * 86400, teacher, value, refit: 1, weeks, candidates,
     adjustments: [{ at: nowS() - 86400, old: 1, new: 0.98, why: 'Preços observados abaixo dos previstos' }] };
 }
 
@@ -235,6 +253,16 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (p === '/api/opportunities') return send(res, 200, [...opps, ...lost]);
   if (p === '/api/watch') return send(res, 200, watchRows());
   if (p === '/api/purchases') return send(res, 200, purchases);
+  if (p === '/api/learning/test' && m === 'POST') {
+    noticeTest = { id: nowS(), at: nowS(), state: 'pedido aceito pelo Windows', reason: null, appeared: null, answered_at: null };
+    return send(res, 200, noticeTest);
+  }
+  if (p === '/api/learning/test/answer' && m === 'POST') {
+    const input = await readJson(req);
+    if (!noticeTest || input.id !== noticeTest.id) return send(res, 404, { error: 'Teste não encontrado.' });
+    noticeTest = { ...noticeTest, appeared: input.appeared, answered_at: nowS() };
+    return send(res, 200, noticeTest);
+  }
   if (p === '/api/learning') return send(res, 200, learning());
   if (p === '/api/settings' && m === 'GET') return send(res, 200, settings);
   if (p === '/api/settings' && m === 'PUT') {

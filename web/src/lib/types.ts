@@ -215,6 +215,7 @@ export type LearningExperiment = {
   reason: string;
 };
 export type Learning = {
+  alerts?: AlertReport;
   days: LearningDay[];
   since: number | null;
   teacher: TeacherSummary;
@@ -228,4 +229,12 @@ export type Learning = {
   experiment?: LearningExperiment | null;
   adjustments?: { at: number; old: number | null; new: number | null; why: string }[];
   candidates?: { hours: number; approved: number; over_saldo: number; yellow: number; yellow_gone: number; yellow_fast: number; yellow_relisted: number };
+};
+
+export type NoticeTest = { id: number; at: number; state: string; reason: string | null; appeared: boolean | null; answered_at: number | null };
+export type AlertReport = {
+  started_at: number; closes_at: number;
+  rows: { id: string; name: string; at: number; price_cents: number; windows: string; telegram: string; listing: string; group_check: string; price_check: string; sales: number }[];
+  test: NoticeTest | null;
+  metrics: { label: string; baseline: string; value: string; state: string }[];
 };
