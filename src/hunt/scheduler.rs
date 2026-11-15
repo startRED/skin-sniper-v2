@@ -47,14 +47,8 @@ const SAVE_EVERY_SECS: i64 = 30;
 const ACTIVE_RECHECK_SECS: i64 = 60;
 /// Teto da conferência do achado antigo (ver `recheck_secs`).
 const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
-/// Descanso da leitura de anúncios: no máximo uma a cada 28 s (≤ 129/h).
-// shortcut: 100/h é hipótese. Medido: ~200 leituras de anúncios/h por 3 h terminaram em 429 por horas (10/11),
-// como 220–250/h em 06/11 e 07/11; 75–85/h de anúncios + 46–49/h de histórico rodaram 6 h (11/11) e a mesma soma
-// terminou em bloqueio às 4 h (10/11). Com a vaga livre sempre indo a seed/float, o teto vira o ritmo real.
-// 11/11: 8 janelas livres desde 06/11, de 123 a 262/h somados, terminaram todas em bloqueio depois de 1 a 7 h;
-// o ritmo não explica a duração. 42 s (86/h + ~11/h de descoberta + avaliação ≈ 100/h) é o teto pedido pelo
-// Erick, não um número medido como seguro. 12/11: com o Chrome (#107), 24 h a ~75 anúncios/h + histórico tiveram
-// só 2 rajadas curtas de 429; o Erick pediu 28 s. Se voltar bloqueio de horas, é o primeiro número a desfazer.
+/// Descanso inicial; em operação o cliente mantém o degrau persistente de 28 até 20 s.
+#[cfg(test)]
 pub(super) const LISTINGS_REST_SECS: i64 = 28;
 /// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
 // Medido em 12/11/2026 (24 h): MP7 | Amberline (seed) falhou 287 de 464 tentativas e Serpent Strike (seed) 129 de
@@ -480,9 +474,9 @@ impl Queue {
         }
     }
 
-    /// A leitura de anúncios ainda descansa da última (`LISTINGS_REST_SECS`).
-    pub fn resting(&self, now: i64) -> bool {
-        now - self.listed_at < LISTINGS_REST_SECS
+    /// A leitura de anúncios ainda descansa da última.
+    pub fn resting(&self, now: i64, rest_seconds: i64) -> bool {
+        now - self.listed_at < rest_seconds
     }
 
     /// Há alvo de seed: a vaga da leitura de anúncios vai para eles, e entre eles decide a agenda (valor da
@@ -977,6 +971,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         return Tick::Book;
     }
     // A seleção é provisória até uma requisição sair; a falha continua contando se a Steam recebeu a tentativa.
+    let listings_rest = h.steam.listings_rest_secs();
     let (next, credit) = {
         let now = h.now();
         let mut s = h.lock();
@@ -1004,7 +999,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
                 .collect();
             // No descanso da leitura de anúncios a vaga é do livro de ofertas (alvo barato); fora dele, de um
             // alvo de seed ou float: é a leitura escassa e é onde está o anúncio mal precificado.
-            let no_listings = listings_blocked || s.queue.resting(now);
+            let no_listings = listings_blocked || s.queue.resting(now, listings_rest);
             let rare = !no_listings && s.queue.has_rare();
             (
                 s.queue.next_matching(now, |t| {
@@ -1861,12 +1856,26 @@ mod tests {
     }
 
     #[test]
+    fn listings_rest_obeys_each_interval() {
+        let q = Queue {
+            listed_at: 1_000_000,
+            ..Default::default()
+        };
+        for seconds in [28, 26, 20] {
+            assert!(q.resting(1_000_000 + seconds - 1, seconds));
+            assert!(!q.resting(1_000_000 + seconds, seconds));
+        }
+        assert!(q.resting(1_000_020, 28));
+        assert!(!q.resting(1_000_020, 20));
+    }
+
+    #[test]
     fn listings_rest_between_reads_and_an_old_find_is_rechecked_less_often() {
         let mut q = Queue::default();
-        assert!(!q.resting(1_000_000));
+        assert!(!q.resting(1_000_000, LISTINGS_REST_SECS));
         q.listed_at = 1_000_000;
-        assert!(q.resting(1_000_000 + LISTINGS_REST_SECS - 1));
-        assert!(!q.resting(1_000_000 + LISTINGS_REST_SECS));
+        assert!(q.resting(1_000_000 + LISTINGS_REST_SECS - 1, LISTINGS_REST_SECS));
+        assert!(!q.resting(1_000_000 + LISTINGS_REST_SECS, LISTINGS_REST_SECS));
         assert_eq!(recheck_secs(0), 60);
         assert_eq!(recheck_secs(3600), 360);
         assert_eq!(recheck_secs(5 * 3600), 1800);
