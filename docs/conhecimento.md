@@ -116,15 +116,32 @@ As duas primeiras omitiram o sort; a terceira reproduziu também sort field=0/di
 Duas sondas adicionais, também espaçadas: listagens com filtro seed 58–59 (200, 58356 bytes) e
 histórico do mesmo nome (200, 270361 bytes). As cinco consultas esgotaram o limite autorizado.
 Diagnóstico de `QueryListingsForItem`, sem consultas extras: WARN em cada tentativa nula,
-INFO quando a tentativa 2 recupera e nos demais sucessos com filtro seed/float. Ambos são gravados com o filtro INFO padrão.
+INFO em toda recuperação na tentativa 2, sem amostragem. Sucessos filtrados de primeira tentativa
+são amostrados globalmente por cliente: primeiro, sétimo, décimo terceiro e assim por diante
+(20 linhas em 115 sucessos). Nulos e recuperações não avançam o contador. A amostra pode não
+conter determinada skin; os pares nulo + recuperação ficam preservados e comparáveis pelo
+código, filtro e tentativa. Todos esses registros passam pelo filtro INFO padrão.
 `attempt` vale 1 ou 2; `via_alt` identifica a saída. `elapsed_with_wait_ms` mede a tentativa
 incluindo a espera na fila e leitura do corpo, não o tempo da Steam nem os 5 s entre tentativas.
+`response_elapsed_ms` mede do envio ao fim da leitura do corpo, antes do parse, sem a fila
+`pace_send`, nas saídas principal e extra. No Chrome, `performance.now()` envolve somente
+`fetch` e `r.text()`, excluindo a fila do mutex e a abertura do navegador; o tempo segue como
+metadado interno tipado, sem mudar status/corpo. Se esse metadado não estiver disponível,
+a leitura continua válida, mas o campo de tempo fica ausente; não se usa o relógio Rust com fila do Chrome.
 `query` contém apenas código G validado (até 256 caracteres), `start`/`count` inteiros,
 `seed_min`/`seed_max` convertidos de strings inteiras, `float_min`/`float_max` finitos e
 `exterior` restrito a WearCategory0–4. Campos inválidos são omitidos.
 `response` contém `status` HTTP e `bytes` lidos; `top_keys` só admite data/success/error/message,
 `success` só booleano ou número. `total_count`/`start` inteiros e `more` booleano/inteiro vêm de
-`data`; `returned` é o tamanho de `data.listings` quando é array. Campos ausentes não viram zero.
+`data`; `returned` é o tamanho de `data.listings` quando é array. Esses números descrevem
+somente o recorte filtrado; resposta nula não traz contagem. Campos ausentes não viram zero.
+O cliente não tem em mãos o total completo do código. Para contexto já persistido, cruzar
+`query.code` com `items.g_code`, obter `items.name` e procurar `book_snapshots.name` no
+snapshot `at` mais próximo anterior à tentativa. `sell_orders` vem de `Book.sell_orders`
+(`cSellOrders`) e é salvo por `remember_book` por variante/desgaste e momento: a cobertura
+pode faltar ou estar desatualizada, e não garante o total completo do código. Não somar
+snapshots repetidos. `CatalogEntry.sell_listings` não é persistido por `store_entries`.
+O total filtrado sozinho não permite testar a hipótese de tamanho do mercado.
 Não registra parâmetros brutos, nomes, URLs, cabeçalhos, cookies nem corpo cru.
 
 Não foi capturado corpo nulo ao vivo. `testdata/steam_actions_null_contract.json` é

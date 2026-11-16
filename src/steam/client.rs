@@ -609,6 +609,7 @@ struct Inner {
     /// [principal, extra, livro e busca], para o balanço de 10 min no log.
     calls: [Calls; 3],
     sent: u64,
+    filtered_success_sample: u8,
 }
 
 /// Endpoints do balde do livro de ofertas e da busca (`Inner::side`).
@@ -755,6 +756,7 @@ impl SteamClient {
                 last_read: None,
                 alt_last_read: None,
                 calls: [Calls::default(); 3],
+                filtered_success_sample: 0,
                 sent: 0,
                 alt_down_until: None,
             }),
@@ -929,11 +931,13 @@ impl SteamClient {
                         Some((k.to_string(), v.to_string()))
                     })
                     .collect();
-                let (status, body) = b.fetch(request.url().as_str(), &headers).await?;
-                let resp = http::Response::builder()
+                let (status, body, elapsed) = b.fetch(request.url().as_str(), &headers).await?;
+                let mut resp = http::Response::builder()
                     .status(status)
                     .body(body)
                     .map_err(|e| e.to_string())?;
+                resp.extensions_mut()
+                    .insert(super::browser::ResponseElapsed(elapsed));
                 Ok(reqwest::Response::from(resp))
             }
             _ => {
@@ -1619,6 +1623,7 @@ impl SteamClient {
             crate::research::finish(attempt, "not_sent").await;
             return Err(e);
         }
+        let response_started = Instant::now();
         let resp = match self.execute(ep, request, false).await {
             Ok(r) => r,
             Err(e) => {
@@ -1627,7 +1632,9 @@ impl SteamClient {
                 return Err(Error::Transport(e));
             }
         };
-        let result = self.finish(ep, resp, sent_by, options, false).await;
+        let result = self
+            .finish(ep, resp, sent_by, options, false, response_started)
+            .await;
         crate::research::finish(attempt, research_outcome(&result)).await;
         result
     }
@@ -1699,6 +1706,7 @@ impl SteamClient {
                 Some(Err(e))
             };
         }
+        let response_started = Instant::now();
         match self.execute(ep, request, true).await {
             Ok(r) if r.status() == StatusCode::TOO_MANY_REQUESTS => {
                 crate::research::finish(attempt, "rate_limited").await;
@@ -1724,7 +1732,9 @@ impl SteamClient {
                 None
             }
             Ok(r) => {
-                let result = self.finish(ep, r, None, options, true).await;
+                let result = self
+                    .finish(ep, r, None, options, true, response_started)
+                    .await;
                 crate::research::finish(attempt, research_outcome(&result)).await;
                 Some(result)
             }
@@ -1749,6 +1759,7 @@ impl SteamClient {
         sent_by: Option<String>,
         options: ResponseCheck,
         via_alt: bool,
+        response_started: Instant,
     ) -> Result<(Parts, Vec<u8>)> {
         let now = Instant::now();
         let status = resp.status();
@@ -1808,6 +1819,10 @@ impl SteamClient {
                 proxima_sem_login = logged_read, "Steam: 429");
             return Err(Error::RateLimited { until });
         }
+        let browser_elapsed = resp
+            .extensions()
+            .get::<super::browser::ResponseElapsed>()
+            .copied();
         let mut resp = resp;
         if resp.content_length().is_some_and(|n| n > MAX_BODY as u64) {
             return Err(Error::Parse("resposta da Steam excede 16 MiB".into()));
@@ -1823,8 +1838,11 @@ impl SteamClient {
             }
             body.extend_from_slice(&chunk);
         }
+        let response_elapsed_ms = browser_elapsed
+            .map(|t| t.0)
+            .unwrap_or_else(|| Some(response_started.elapsed().as_millis() as u64));
         let bad_envelope = options.check.and_then(|f| f(status.as_u16(), &body));
-        // `{"data":null}` com 200 costuma ser recusa daquela consulta (filtro de seed a frio): conta uma vez por
+        // `{"data":null}` com 200 costuma ser recusa daquela consulta: conta uma vez por
         // consulta, só na repetição, e o disjuntor abre com 3 consultas nulas seguidas. Antes a 1ª tentativa e a
         // repetição contavam as duas; em 12/11/2026, ~10 por hora pausavam toda a leitura de seed/float.
         let null_data = bad_envelope.is_some()
@@ -1841,16 +1859,19 @@ impl SteamClient {
             let query = &diagnostic.query;
             let attempt = diagnostic.attempt;
             if null_data {
-                tracing::warn!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, "Steam listings: data nula");
+                tracing::warn!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: data nula");
             } else if bad_envelope.is_none() && status.is_success() {
                 if attempt == 2 {
-                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, "Steam listings: recuperação");
-                } else if query.get("seed_min").is_some()
+                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: recuperação");
+                } else if (query.get("seed_min").is_some()
                     || query.get("seed_max").is_some()
                     || query.get("float_min").is_some()
-                    || query.get("float_max").is_some()
+                    || query.get("float_max").is_some())
+                    && sample_filtered_success(
+                        &mut self.inner.lock().unwrap().filtered_success_sample,
+                    )
                 {
-                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, "Steam listings: sucesso filtrado");
+                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: sucesso filtrado");
                 }
             }
         }
@@ -1967,6 +1988,12 @@ fn envelope_problem(status: u16, body: &[u8]) -> Option<String> {
         body.len(),
         keys.join(", ")
     ))
+}
+
+fn sample_filtered_success(counter: &mut u8) -> bool {
+    let emit = *counter == 0;
+    *counter = (*counter + 1) % 6;
+    emit
 }
 
 #[derive(Clone)]
@@ -3410,6 +3437,31 @@ fn jittered(now: Instant, spacing: Duration) -> Instant {
 mod listing_diagnostic_tests {
     use super::*;
     use serde_json::json;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn filtered_sampler_first_then_every_six() {
+        let mut counter = 0;
+        let emitted: Vec<_> = (1..=115)
+            .filter(|_| sample_filtered_success(&mut counter))
+            .collect();
+        assert_eq!(emitted, (1..=115).step_by(6).collect::<Vec<_>>());
+        assert_eq!(emitted.len(), 20);
+    }
+
     #[test]
     fn listing_diagnostic_real_response_and_safe_query() {
         let body = include_bytes!("../../testdata/steam_actions_fiveseven_seed904.json");
@@ -3441,20 +3493,6 @@ mod listing_diagnostic_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn filtered_success_is_visible_at_info_without_secrets() {
         use axum::{Router, routing::get};
-        use std::io::{self, Write};
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Clone)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-        impl Write for Capture {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
         let output = Capture(Arc::new(Mutex::new(Vec::new())));
         let writer = output.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -3477,8 +3515,33 @@ mod listing_diagnostic_tests {
             .action(Endpoint::Listings, "QueryListingsForItem", &query)
             .await
             .unwrap();
+        let client = client.with_alt(http_builder().build().unwrap());
+        client.set_gap_for_test(Duration::ZERO);
+        client.inner.lock().unwrap().filtered_success_sample = 0;
+        client
+            .send_alt(
+                Endpoint::Listings,
+                &client.request(Method::GET, "/market/actions"),
+                ResponseCheck {
+                    check: None,
+                    reset_on_success: true,
+                    diagnostic: Some(ListingDiagnostic {
+                        query: listing_query_diagnostic(&query),
+                        attempt: 1,
+                        started: Instant::now(),
+                    }),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
         assert!(log.contains("Steam listings: sucesso filtrado"), "{log}");
+        assert_eq!(log.matches("response_elapsed_ms=").count(), 2, "{log}");
+        assert!(
+            log.contains("via_alt=false") && log.contains("via_alt=true"),
+            "{log}"
+        );
         assert!(
             log.contains("G180320BF063004")
                 && log.contains("904")
@@ -3487,5 +3550,129 @@ mod listing_diagnostic_tests {
             "{log}"
         );
         assert!(!log.contains("segredo-teste"), "{log}");
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn response_timing_queue_body_and_browser_metadata() {
+        use axum::{
+            Router,
+            body::{Body, Bytes},
+            routing::get,
+        };
+        let output = Capture(Arc::new(Mutex::new(Vec::new())));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let fixture = include_bytes!("../../testdata/steam_actions_fiveseven_seed904.json");
+        let app = Router::new().route(
+            "/market/actions",
+            get(|| async {
+                Body::from_stream(futures_util::stream::once(async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok::<_, std::io::Error>(Bytes::from_static(include_bytes!(
+                        "../../testdata/steam_actions_fiveseven_seed904.json"
+                    )))
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = SteamClient::with_base(&format!("http://{addr}")).unwrap();
+        client.set_gap_for_test(Duration::from_millis(300));
+        let options = || ResponseCheck {
+            check: None,
+            reset_on_success: true,
+            diagnostic: Some(ListingDiagnostic {
+                query: json!({"code":"G180320BF063004", "seed_min":904}),
+                attempt: 2,
+                started: Instant::now(),
+            }),
+        };
+        for i in 0..2 {
+            if i == 1 {
+                {
+                    let mut inner = client.inner.lock().unwrap();
+                    inner.next_any = Instant::now();
+                    inner.limiter.next_at = Instant::now();
+                }
+                client.main_send_pace.lock().await.last_bucket[0] = Some(Instant::now());
+            }
+            let (parts, body) = client
+                .send_checked(
+                    Endpoint::Listings,
+                    client.request(Method::GET, "/market/actions"),
+                    false,
+                    options(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(parts.status, StatusCode::OK);
+            assert_eq!(body, fixture);
+        }
+        let client = client.with_alt(http_builder().build().unwrap());
+        client.set_gap_for_test(Duration::ZERO);
+        client
+            .send_alt(
+                Endpoint::Listings,
+                &client.request(Method::GET, "/market/actions"),
+                options(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        for elapsed in [Some(42), None] {
+            let mut response = http::Response::builder()
+                .status(201)
+                .body(fixture.to_vec())
+                .unwrap();
+            response
+                .extensions_mut()
+                .insert(super::super::browser::ResponseElapsed(elapsed));
+            let (parts, body) = client
+                .finish(
+                    Endpoint::Listings,
+                    response.into(),
+                    None,
+                    options(),
+                    false,
+                    Instant::now() - Duration::from_secs(10),
+                )
+                .await
+                .unwrap();
+            assert_eq!(parts.status, 201);
+            assert_eq!(body, fixture);
+        }
+        let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<_> = log
+            .lines()
+            .filter(|l| l.contains("Steam listings: recuperação"))
+            .collect();
+        assert_eq!(lines.len(), 5, "{log}");
+        let field = |line: &str, name: &str| -> u64 {
+            line.split(&format!("{name}="))
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        for line in &lines[..3] {
+            assert!(field(line, "response_elapsed_ms") >= 200, "{line}");
+        }
+        assert!(
+            field(lines[1], "elapsed_with_wait_ms") - field(lines[1], "response_elapsed_ms") >= 50,
+            "{log}"
+        );
+        assert!(lines[2].contains("via_alt=true"), "{log}");
+        assert_eq!(field(lines[3], "response_elapsed_ms"), 42);
+        assert!(!lines[4].contains("response_elapsed_ms="), "{log}");
+        server.abort();
     }
 }
