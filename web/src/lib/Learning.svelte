@@ -113,7 +113,7 @@
 
         {#if hv}
           <div class="grp">
-            <h3 title="A agenda lê a faixa de seed onde mais anúncio novo que cabe no saldo deve ter aparecido desde a última leitura, pesado pelo lucro que as vendas daquele seed provam.">Agenda de leituras</h3>
+            <h3 title="A agenda lê a faixa de seed onde ler agora mais acrescenta: quanto mais tempo sem leitura e mais lucro as vendas daquele seed provam, antes ela volta. Reler a mesma faixa logo em seguida quase não conta.">Agenda de leituras</h3>
             <dl class="stats">
               {@render kv('Um achado dura', `~${life(hv.life_s)}`, hv.lives ? `Medido em ${hv.lives} sumiços` : 'Valor padrão, ainda sem medida')}
               {#if hv.reads}
