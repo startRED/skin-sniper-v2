@@ -126,12 +126,7 @@ Ao atingir o limite, uma INFO adicional avisa que o diagnóstico parou; o orçam
 processo, não por cliente, fila ou 429. Os avisos originais do scheduler “data nula: o alvo descansa” e
 “consulta falhou” ficam fora desse orçamento.
 
-A revisão principal informou 25529 linhas em 12 dias e estimou 1300 linhas/dia, 0,2 MB/dia e retenção
-de 75 para 16 dias com rotação de 3 arquivos de 5 MiB. Essas estimativas são atribuídas à revisão:
-25529/12 dá cerca de 2127 linhas/dia, portanto não confirma 1300. Em 8,2 horas, a revisão informou
-225 nulas na tentativa 1, 92 na tentativa 2 e 133 recuperações: 450 linhas, cerca de 55 por hora;
-mais cerca de 19 linhas de sucesso amostrado por hora, segundo a revisão principal, levam à estimativa informada de aproximadamente 1800 linhas novas por dia. O limite é por
-linhas, não por bytes.
+Medido no programa instalado em 16/11/2026 às 13:20 (horário local): o log tinha 25.529 linhas e 3.701.767 bytes desde 04/11/2026 04:14 UTC (12,5 dias), média de cerca de 2.040 linhas e 0,30 MB por dia (dias 13, 14 e 15/11: 1.157, 635 e 1.327 linhas). Com a rotação de três arquivos de 5 MiB isso guarda cerca de 50 dias. Em 8,2 horas de 16/11 houve 225 nulas na tentativa 1, 92 nulas na tentativa 2 e 133 recuperações (450 linhas, cerca de 55 por hora); com cerca de 19 sucessos amostrados por hora são perto de 1.800 linhas novas por dia. O tamanho em bytes dessas linhas não foi medido; por isso o limite é por linhas (2.000 por execução, cerca de um dia de coleta).
 `attempt` vale 1 ou 2; `via_alt` identifica a saída. `elapsed_with_wait_ms` mede a tentativa
 incluindo a espera na fila e leitura do corpo, não o tempo da Steam nem os 5 s entre tentativas.
 `response_elapsed_ms` mede do envio ao fim da leitura do corpo, antes do parse, sem a fila
