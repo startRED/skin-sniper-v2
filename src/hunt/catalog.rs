@@ -1090,7 +1090,15 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 // Banco
 
+pub(crate) async fn load_pattern_items(db: &Db) -> Result<Vec<Item>> {
+    load_items_filtered(db, false).await
+}
+
 pub async fn load_items(db: &Db) -> Result<Vec<Item>> {
+    load_items_filtered(db, true).await
+}
+
+async fn load_items_filtered(db: &Db, curated: bool) -> Result<Vec<Item>> {
     let now = crate::db::now_unix();
     db.call(move |c| {
         c.prepare(
@@ -1099,10 +1107,10 @@ pub async fn load_items(db: &Db) -> Result<Vec<Item>> {
                     (SELECT median_cents FROM price_points p WHERE p.name=i.name
                      AND p.ts >= ?1 AND p.ts <= ?2 AND p.purchases > 0 ORDER BY ts DESC LIMIT 1)
              FROM items i LEFT JOIN catalog_references r ON r.name = i.name
-             WHERE r.name IS NOT NULL OR NOT EXISTS(SELECT 1 FROM catalog_references)
+             WHERE ?3 = 0 OR r.name IS NOT NULL OR NOT EXISTS(SELECT 1 FROM catalog_references)
              ORDER BY COALESCE(r.rank, i.rank, 1000000), i.name",
         )?
-        .query_map(params![now - 7 * DAY, now], |r| {
+        .query_map(params![now - 7 * DAY, now, curated], |r| {
             Ok(Item {
                 name: r.get(0)?,
                 code: r.get(1)?,
@@ -1256,6 +1264,20 @@ mod tests {
         i.history_price_cents = Some(900);
         i.history_at = Some(now + 30 * DAY);
         assert_eq!(i.triage_brl(now + 30 * DAY, 5.0), Some(900));
+    }
+
+    #[tokio::test]
+    async fn pattern_research_reaches_unlisted_names_without_admitting_them_to_hunt() {
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            for name in ["AWP | Fade (Factory New)", "Glock-18 | Fade (Factory New)", "P250 | Plum Netting (Field-Tested)", "AWP | PAW (Field-Tested)"] {
+                c.execute("INSERT INTO items(name,updated_at) VALUES (?1,1)", [name])?;
+            }
+            c.execute("INSERT INTO catalog_references(name,observed_at,rank) VALUES ('AWP | PAW (Field-Tested)',1,0)", [])?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(load_items(&db).await.unwrap().len(), 1);
+        assert_eq!(load_pattern_items(&db).await.unwrap().len(), 4);
     }
 
     #[tokio::test]

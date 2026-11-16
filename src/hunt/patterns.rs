@@ -368,6 +368,16 @@ pub(crate) async fn cache_sales(h: &Hunt, name: &str, sales: &[crate::csfloat::C
     super::teacher::store_csfloat(h, name, sales).await;
 }
 
+fn collection_decision(name: &str) -> crate::research::Decision {
+    crate::research::Decision {
+        source: "patterns".into(),
+        policy: "pattern_sales".into(),
+        target: name.into(),
+        scale: 1.0,
+        block_id: None,
+    }
+}
+
 /// Lê as vendas da próxima skin do catálogo, se é hora. Não gasta consulta da Steam: só o CSFloat.
 pub async fn maybe_step(h: &Hunt) {
     let now = h.now();
@@ -392,10 +402,17 @@ pub async fn maybe_step(h: &Hunt) {
         s.learn_at = now;
         (s.saldo, s.ratio.map(|(r, _)| r), s.learn_seen.clone())
     };
+    let pattern_items = match catalog::load_pattern_items(&h.db).await {
+        Ok(items) => items,
+        Err(e) => return tracing::warn!("patterns: catálogo ilegível: {e}"),
+    };
     let names = match catalog::load_items(&h.db).await {
         Ok(items) => {
             // metade das leituras para as skins de catálogo de pattern, metade para descobrir seed novo
-            let (table, rest) = (catalog_names(&items), candidates(items, saldo, ratio, now));
+            let (table, rest) = (
+                catalog_names(&pattern_items),
+                candidates(items, saldo, ratio, now),
+            );
             if (now / GAP) % 2 == 0 {
                 [table, rest].concat()
             } else {
@@ -429,7 +446,11 @@ pub async fn maybe_step(h: &Hunt) {
         return;
     };
     h.lock().learn_seen.insert(name.clone(), now);
-    let sales = match h.csfloat.sales(&name).await {
+    let sales = match crate::research::scope(h.db.clone(), collection_decision(&name), async {
+        h.csfloat.sales(&name).await.map_err(anyhow::Error::from)
+    })
+    .await
+    {
         Ok(s) => s,
         Err(e) => return tracing::warn!("patterns: CSFloat falhou para {name}: {e}"),
     };
@@ -449,6 +470,28 @@ pub async fn maybe_step(h: &Hunt) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collector_attempt_is_attributed_to_the_requested_name() {
+        let (db, _dir) = crate::db::temp_db();
+        let record_db = db.clone();
+        crate::research::scope(
+            db.clone(),
+            collection_decision("AWP | Fade (Factory New)"),
+            async move {
+                crate::research::record_external(record_db).await?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        let (target, source, endpoint): (String, String, String) = db.call(|c| {
+            c.query_row("SELECT d.target,a.source,a.endpoint FROM research_attempts a JOIN research_decisions d ON d.id=a.decision_id", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+        }).await.unwrap();
+        assert_eq!(target, "AWP | Fade (Factory New)");
+        assert_eq!(source, "patterns");
+        assert_eq!(endpoint, "sales");
+    }
 
     #[test]
     fn candidates_use_measured_or_fresh_reference_without_inventing_price_or_sales() {
