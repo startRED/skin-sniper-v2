@@ -1313,10 +1313,15 @@ async fn over_saldo(
 
 /// Aviso no Telegram de um anúncio bom acima do saldo: preço, lucro e quanto falta. Só uma tentativa; o anúncio volta
 /// a ser avaliado no próximo ciclo, mas só avisa de novo se nunca foi gravado como bom.
-fn send_over_saldo_alert(h: &Hunt, opp: &Opportunity, saldo: i64) {
-    let Some(tg) = h.telegram.clone() else {
-        return;
-    };
+pub(super) fn send_over_saldo_alert(
+    h: &Hunt,
+    opp: &Opportunity,
+    saldo: i64,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let tg = h.telegram.clone()?;
+    if !tg.is_configured() {
+        return None;
+    }
     let mut note = format!(
         "Acima do saldo: faltam {} (saldo {}). Não é compra possível agora; cubra o saldo se quiser.",
         brl(opp.price_cents - saldo),
@@ -1336,10 +1341,39 @@ fn send_over_saldo_alert(h: &Hunt, opp: &Opportunity, saldo: i64) {
         eta_hours: opp.sell.mid.eta_hours,
         seal: Some(note),
     };
-    tokio::spawn(async move {
-        match tg.notify(&alert, None).await {
-            Ok(_) | Err(NotifyError::NotConfigured) => {}
-            Err(e) => tracing::warn!("aviso acima do saldo no Telegram falhou: {e}"),
+    let db = h.db.clone();
+    let at = h.now();
+    let record = opp.clone();
+    let handle = tokio::spawn(async move {
+        let id = alert.id.clone();
+        let reserved = db.call(move |c| {
+            let tx = c.transaction()?;
+            tx.execute("INSERT OR IGNORE INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,grp,base_cents,above_saldo) SELECT ?1,?2,?3,?4,?5,g.grp,g.base_cents,1 FROM (SELECT 1) LEFT JOIN ghosts g ON g.listing_id=?6 AND g.approved=1", params![id,record.name,at,record.price_cents,record.sell.mid.price_cents,record.id])?;
+            crate::web::learning_alerts::delivery(&tx,&id,"telegram","pendente",None,at)?;
+            tx.commit()
+        }).await;
+        if let Err(e) = reserved {
+            tracing::warn!("não consegui registrar tentativa de aviso acima do saldo: {e:#}");
+            return;
+        }
+        let (state, reason) = match tg.notify(&alert, None).await {
+            Ok(_) => ("aceito", None),
+            Err(e) => ("falhou", Some(e.to_string())),
+        };
+        if let Err(e) = db
+            .call(move |c| {
+                crate::web::learning_alerts::delivery(
+                    c,
+                    &alert.id,
+                    "telegram",
+                    state,
+                    reason.as_deref(),
+                    at,
+                )
+            })
+            .await
+        {
+            tracing::warn!("não consegui registrar resultado do aviso acima do saldo: {e:#}");
         }
     });
     tracing::info!(
@@ -1349,6 +1383,7 @@ fn send_over_saldo_alert(h: &Hunt, opp: &Opportunity, saldo: i64) {
         brl(opp.sell.mid.profit_cents),
         brl(opp.price_cents - saldo)
     );
+    Some(handle)
 }
 
 /// id, nome, preço, seed, float.
@@ -1423,12 +1458,19 @@ async fn store_opportunity(
                  task=excluded.task, listing_json=excluded.listing_json",
             params![id, json, at, tid, lj],
         )?;
+
+        tx.execute("DELETE FROM alert_outcomes WHERE listing_id=?1", [&id])?;
         // Reserva com prazo: se o processo fechar durante o envio, a próxima consulta tenta de novo.
         let alert = notify && tx.execute(
             "UPDATE opportunities SET notify_pending_at=?2 WHERE id=?1 AND notified_at IS NULL
              AND (notify_pending_at IS NULL OR notify_pending_at <= ?3)",
             params![id, now, now - 60],
         )? == 1;
+        if alert {
+            tx.execute("INSERT OR IGNORE INTO alert_forecasts(listing_id,name,at,price_cents,predicted_cents,grp,base_cents) SELECT ?1,json_extract(?2,'$.name'),?3,json_extract(?2,'$.price_cents'),json_extract(?2,'$.sell.mid.price_cents'),g.grp,g.base_cents FROM (SELECT 1) LEFT JOIN ghosts g ON g.listing_id=?1 AND g.approved=1", params![id,json,now])?;
+            crate::web::learning_alerts::delivery(&tx, &id, "windows", "pendente", None, now)?;
+            crate::web::learning_alerts::delivery(&tx, &id, "telegram", "pendente", None, now)?;
+        }
         tx.commit()?;
         Ok((first, alert, changed))
     })
@@ -1473,6 +1515,7 @@ pub(crate) async fn mark_gone(
                  WHERE id = ?1 AND gone_at IS NULL",
                 params![id, now, reason_json],
             )?;
+            tx.execute("INSERT INTO alert_outcomes VALUES (?1,?2,?3) ON CONFLICT(listing_id) DO UPDATE SET reason=excluded.reason,at=excluded.at", params![id, reason_json.trim_matches('"'), now])?;
         }
         tx.commit()
     })
@@ -1554,45 +1597,60 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>, reserved_a
     tokio::spawn(async move {
         let telegram = async {
             let Some(tg) = tg else {
-                return false;
+                return (false, Some("Telegram sem token ou chat id".to_string()));
             };
             for attempt in 0..3 {
                 match tg.notify(&alert, panel_url.as_deref()).await {
-                    Ok(_) => return true,
-                    Err(NotifyError::NotConfigured) => return false,
-                    Err(NotifyError::Transport(e)) if attempt < 2 => {
-                        tracing::warn!("aviso no Telegram adiado: {e}");
+                    Ok(_) => return (true, None),
+                    Err(NotifyError::Transport(_)) if attempt < 2 => {
                         tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
                     }
-                    Err(e) => {
-                        tracing::warn!("aviso no Telegram falhou: {e}");
-                        return false;
-                    }
+                    Err(e) => return (false, Some(e.to_string())),
                 }
             }
-            false
+            (false, Some("Telegram sem confirmação".to_string()))
         };
-        // Inclui espera pelo mutex e pelo ritmo: o envio inteiro termina antes da reserva de 60 s.
         let telegram = async {
             tokio::time::timeout(std::time::Duration::from_secs(40), telegram)
                 .await
                 .unwrap_or_else(|_| {
-                    tracing::warn!("o Telegram não confirmou o aviso em 40 s");
-                    false
+                    (
+                        false,
+                        Some("O Telegram não confirmou o aviso em 40 s".to_string()),
+                    )
                 })
         };
         let (desktop, telegram) =
             tokio::join!(crate::notify::desktop(&title, &body, &url), telegram);
-        let desktop = desktop.unwrap_or_else(|e| {
-            tracing::warn!("aviso do Windows falhou: {e}");
-            false
-        });
+        let desktop_reason = match &desktop {
+            Ok(true) => None,
+            Ok(false) => Some("Aviso do Windows indisponível neste sistema.".to_string()),
+            Err(reason) => Some(reason.clone()),
+        };
+        let desktop = desktop.unwrap_or(false);
+        let (telegram, telegram_reason) = telegram;
         let delivered = desktop || telegram;
         if delivered {
-            tracing::info!(id = %alert.id, windows = desktop, telegram, "aviso entregue");
+            tracing::info!(id = %alert.id, windows = desktop, telegram, "pedido de aviso aceito");
         }
         if let Err(e) = db
             .call(move |c| {
+                crate::web::learning_alerts::delivery(
+                    c,
+                    &alert.id,
+                    "windows",
+                    if desktop { "aceito" } else { "falhou" },
+                    desktop_reason.as_deref(),
+                    now,
+                )?;
+                crate::web::learning_alerts::delivery(
+                    c,
+                    &alert.id,
+                    "telegram",
+                    if telegram { "aceito" } else { "falhou" },
+                    telegram_reason.as_deref(),
+                    now,
+                )?;
                 c.execute(
             "UPDATE opportunities SET notify_pending_at=NULL, notified_at=COALESCE(notified_at,?2)
              WHERE id=?1 AND notify_pending_at=?3",

@@ -4,6 +4,7 @@
   import { day, money, signed } from './format';
   import type { Learning } from './types';
   import LearningDashboard from './LearningDashboard.svelte';
+  import AlertHistory from './AlertHistory.svelte';
 
   let data = $state<Learning | null>(null);
   let error = $state('');
@@ -80,6 +81,7 @@
     {#if today}
       <p class="today">Hoje: <b>{today.new_listings}</b> anúncios novos · <b>{today.sales}</b> saíram da lista · <b class:up={today.finds > 0}>{today.finds}</b> {today.finds === 1 ? 'achado' : 'achados'}{#if data.since}<span class="muted"> · registro desde {day(data.since)}</span>{/if}</p>
     {/if}
+    {#if data.alerts}<AlertHistory report={data.alerts} />{/if}
     <LearningDashboard {data} />
 
     <details class="more">

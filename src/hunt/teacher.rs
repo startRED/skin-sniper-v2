@@ -123,14 +123,15 @@ pub(crate) async fn store_csfloat(h: &Hunt, name: &str, sales: &[CsfloatSale]) {
             })
             .collect()
     };
-    if rows.is_empty() {
-        return;
-    }
+    let fetched_at = h.now();
+    let oldest_at = sales.iter().map(|s| s.sold_at).min().unwrap_or(0);
     let name = name.to_string();
     let r = h
         .db
         .call(move |c| {
             let tx = c.transaction()?;
+            tx.execute("INSERT OR IGNORE INTO group_sale_windows VALUES (?1,?2,?3)", params![name,fetched_at,oldest_at])?;
+            tx.execute("DELETE FROM group_sale_windows WHERE fetched_at < ?1", [fetched_at - 60*DAY])?;
             for (at, price, base, m, seed, float, paint, grp) in rows {
                 tx.execute(
                     "INSERT OR IGNORE INTO csfloat_sales(name, sold_at, price_usd_cents, base_usd_cents, multiple,

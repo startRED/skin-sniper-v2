@@ -1260,6 +1260,74 @@ async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Ve
 }
 
 #[tokio::test]
+async fn over_saldo_notice_is_recorded_with_result_without_network() {
+    let (db, _dir) = temp_db();
+    let (mut h, _) = hunt_against("http://127.0.0.1:1", db.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let fake = Router::new().route(
+        "/botoffline/sendMessage",
+        axum::routing::post(|| async {
+            Json(json!({"ok":false,"error_code":403,"description":"recusado no teste offline"}))
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, fake).await.unwrap();
+    });
+    let telegram = Arc::new(crate::notify::Telegram::with_base(&base, Duration::ZERO).unwrap());
+    Arc::get_mut(&mut h).unwrap().telegram = Some(telegram.clone());
+    let opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    let id = format!("saldo:{}", opp.id);
+    assert!(super::detect::send_over_saldo_alert(&h, &opp, 1).is_none());
+    assert_eq!(
+        db.call(|c| Ok(crate::web::learning_alerts::report(c, NOW)?.rows.len()))
+            .await
+            .unwrap(),
+        0
+    );
+    // O servidor local recebe somente dados de teste; nenhuma requisição sai para o Telegram.
+    telegram.set_credentials(Some("offline".into()), Some("offline".into()));
+    super::detect::send_over_saldo_alert(&h, &opp, 1)
+        .unwrap()
+        .await
+        .unwrap();
+    db.call(move |c| {
+        c.execute("UPDATE alert_window SET started_at=?1", [NOW - 1])?;
+        c.execute("UPDATE alert_forecasts SET grp='g',base_cents=100,predicted_cents=100 WHERE listing_id=?1",[&id])?;
+        for at in NOW+1..NOW+4 {
+            c.execute("INSERT INTO csfloat_sales(name,sold_at,price_usd_cents,base_usd_cents,multiple,grp) SELECT name,?1,100,100,1,'g' FROM alert_forecasts WHERE listing_id=?2",rusqlite::params![at,id])?;
+        }
+        c.execute("INSERT INTO group_sale_windows SELECT name,?1,?2 FROM alert_forecasts WHERE listing_id=?3",rusqlite::params![NOW+48*3600,NOW-1,id])?;
+        let r = crate::web::learning_alerts::report(c, NOW + 9 * 86400)?;
+        assert_eq!(r.rows.len(), 1);
+        let row = &r.rows[0];
+        assert_eq!(row.id, id);
+        assert!(row.above_saldo);
+        assert_eq!(row.group_check,"o grupo teve venda");
+        assert_eq!(row.price_check,"sustenta");
+        assert!(
+            row.telegram
+                .starts_with("falhou: Telegram recusou: recusado no teste offline")
+        );
+        assert_eq!(r.metrics[3].value, "1 em 7 dias; 0 dentro do saldo");
+        assert!(r.metrics[4].value.starts_with("0 de 0"));
+        assert!(r.metrics[6].value.starts_with("0 de 0"));
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM opportunities", [], |r| r
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
 async fn over_saldo_listing_is_appraised_offline_without_becoming_an_opportunity() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();

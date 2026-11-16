@@ -4,6 +4,7 @@ pub mod api;
 pub mod calibration;
 pub mod guard;
 pub mod learning;
+pub mod learning_alerts;
 pub mod login;
 pub mod sse;
 
@@ -110,6 +111,8 @@ pub fn router(app: AppState) -> Router {
         .route("/api/purchases/{id}/sold", post(calibration::sold))
         .route("/api/calibration", get(calibration::get))
         .route("/api/learning", get(learning::get))
+        .route("/api/learning/test", post(learning_alerts::test_notice))
+        .route("/api/learning/test/answer", post(learning_alerts::answer))
         .route(
             "/api/settings",
             get(api::get_settings).put(api::put_settings),

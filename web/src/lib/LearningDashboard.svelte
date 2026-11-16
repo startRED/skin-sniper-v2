@@ -117,7 +117,7 @@
   .seg button:hover { color: var(--ink); }
   .seg button.active { background: #303a43; color: var(--ink); font-weight: 650; }
   .plot { margin-top: 16px; }
-  svg { display: block; width: 100%; height: 190px; overflow: visible; }
+  svg { display: block; width: 100%; height: 190px; min-width: 0; flex: 1; overflow: hidden; }
   .plot-area { display: flex; gap: 8px; align-items: stretch; }
   .y-axis { width: 48px; flex-shrink: 0; display: flex; flex-direction: column; justify-content: space-between; padding: 18px 0 30px; color: var(--muted); font-size: 11px; text-align: right; }
   .gridline { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
