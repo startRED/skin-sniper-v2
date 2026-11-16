@@ -525,7 +525,7 @@ async fn panel_and_offline_report_match_when_one_read_finds_many() {
             assert_eq!(metric.state, state);
             assert!(offline.contains(&format!("Total por espera 600-3600 s: agenda={expected} controle=0.333333")));
             assert!(metric.value.contains(panel));
-            assert!(metric.value.contains("rodízio 33,3 a cada 100 leituras"));
+            assert!(metric.value.contains("rodízio 33,3 anúncios a cada 100 leituras"));
             assert!(!metric.value.contains("r:a#1-2"));
         }
         Ok(())

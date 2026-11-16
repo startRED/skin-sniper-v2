@@ -156,7 +156,7 @@ function alertExample(): NonNullable<Learning['alerts']> {
       ['Conferência de 48 h', '3 de 14'],
       ['Anúncios novos lidos por hora', '8 a 12/h'],
       ['Preço nas vendas do grupo em 48 h', 'sem prova de preço na base']
-    ].map(([label, baseline], i) => ({ label, baseline, value: i === 0 ? 'Agenda e rodízio leem alvos e intervalos diferentes; o registro ainda não guarda a faixa lida.' : i === 3 ? '3 em 7 dias; 2 dentro do saldo' : i === 4 ? '0 de 2; amostra pequena' : 'não medido neste exemplo', state: 'inconclusivo' }))
+    ].map(([label, baseline], i) => ({ label, baseline, value: i === 0 ? 'Anúncios raros novos dentro do saldo:\nmenos de 10 min: agenda 0,0 anúncios a cada 100 leituras (43 leituras), rodízio 0 leituras (mínimo 30)\n10 min a 1 h: agenda 12 leituras (mínimo 30), rodízio 1 leitura (mínimo 30)\nA comparação só conta quando os dois lados têm 30 leituras na mesma espera.\nOs dois lados podem ter lido skins diferentes na mesma espera; isso é uma associação, não prova a causa.' : i === 3 ? '3 em 7 dias; 2 dentro do saldo' : i === 4 ? '0 de 2; amostra pequena' : 'não medido neste exemplo', state: 'inconclusivo' }))
   };
 }
 function learning(): Learning {
