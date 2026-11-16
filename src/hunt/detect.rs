@@ -1552,10 +1552,14 @@ pub async fn drop_tasks(h: &Hunt, tasks: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn alert_title(profit_cents: i64, name: &str) -> String {
+    format!("{} de lucro estimado · {}", brl(profit_cents), name)
+}
+
 /// Confirma o envio no banco; falha ou reinício permite repetir na próxima conferência do anúncio.
 /// Em segundo plano: o Windows e o Telegram não podem segurar a caça.
 fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>, reserved_at: i64) {
-    let title = format!("{} de lucro · {}", brl(opp.sell.mid.profit_cents), opp.name);
+    let title = alert_title(opp.sell.mid.profit_cents, &opp.name);
     let body = format!(
         "Compre por {} e venda por {}.{} Clique para abrir na Steam.",
         brl(opp.price_cents),
@@ -1667,6 +1671,14 @@ fn send_alert(h: &Hunt, opp: &Opportunity, panel_url: Option<String>, reserved_a
 #[cfg(test)]
 mod tests {
     use super::{proves, rare_multiples};
+
+    #[test]
+    fn alert_title_identifies_estimated_profit() {
+        assert_eq!(
+            super::alert_title(1234, "Skin exemplo"),
+            "R$ 12,34 de lucro estimado · Skin exemplo"
+        );
+    }
 
     #[test]
     fn a_better_seed_does_not_prove_a_worse_one() {
