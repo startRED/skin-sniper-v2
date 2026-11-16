@@ -717,6 +717,7 @@ impl Queue {
         self.snapshots.remove(id);
         self.focused_snapshots.remove(id);
         self.unfocus(id);
+        self.unfocus_shared();
         (self.credit, self.explore, self.explore_turn, self.cursors) = credit;
         for (id, e) in &mut self.entries {
             e.cursor = self.cursors.get(id).copied().unwrap_or(0);
@@ -814,15 +815,19 @@ impl Queue {
         self.dirty.insert(id.to_string());
     }
 
-    /// Consulta enviada que falhou antes do resultado: grava o retrato da escolha uma vez, sem nota nem zero, e
-    /// devolve a espera da faixa (a falha não leu nada).
-    fn failed_read(&mut self, id: &str, now: i64) {
-        self.unfocus(id);
-        // os outros alvos da mesma consulta também não leram: só a espera volta, sem leitura nem falha deles
+    /// Os outros alvos da mesma consulta não leram: só a espera volta, sem leitura nem falha deles.
+    fn unfocus_shared(&mut self) {
         for other in std::mem::take(&mut self.shared) {
             self.unfocus(&other);
             self.focused_snapshots.remove(&other);
         }
+    }
+
+    /// Consulta enviada que falhou antes do resultado: grava o retrato da escolha uma vez, sem nota nem zero, e
+    /// devolve a espera da faixa (a falha não leu nada).
+    fn failed_read(&mut self, id: &str, now: i64) {
+        self.unfocus(id);
+        self.unfocus_shared();
         if let Some(choice) = self.focused_snapshots.remove(id) {
             self.reads.push(Read {
                 new_listings: None,
@@ -2685,6 +2690,40 @@ mod shared_failure_tests {
         let r = &reads[0];
         assert!(r.arm == "r:a" && r.failed && r.fresh == 0 && r.range.is_none());
         assert!(q.stats.get("r:b").is_none_or(|s| s.queries == 0));
+    }
+
+    #[test]
+    fn unsent_shared_query_gives_back_every_target_wait() {
+        let mut q = Queue::default();
+        q.set_tasks(vec![rare("r:a"), rare("r:b"), rare("r:c")]);
+        let keys: Vec<String> = ["r:a", "r:b", "r:c"]
+            .iter()
+            .map(|id| range_key(id, (1, 2)))
+            .collect();
+        for k in &keys {
+            q.range_seen.insert(k.clone(), 6_400);
+        }
+        let credit = (q.credit, q.explore, q.explore_turn, q.cursors.clone());
+        let t = q.next_matching(10_000, |t| t.id == "r:a").unwrap();
+        q.focus(t, 10_000);
+        q.focus_shared(rare("r:b"), 10_000);
+        q.focus_shared(rare("r:c"), 10_000);
+        // o retrato do secundário vem de uma escolha anterior; aqui ele é copiado do principal
+        let snap = q.focused_snapshots["r:a"].clone();
+        for id in ["r:b", "r:c"] {
+            q.focused_snapshots.insert(id.into(), snap.clone());
+        }
+        q.undo_unsent("r:a", 10_001, credit.clone());
+        for k in &keys {
+            assert_eq!(q.range_seen.get(k).copied(), Some(6_400));
+        }
+        assert!(q.focused.is_empty() && q.focused_snapshots.is_empty() && q.shared.is_empty());
+        assert!(q.take_reads().is_empty() && q.failing.is_empty());
+        assert_eq!(
+            (q.credit, q.explore, q.explore_turn, q.cursors.clone()),
+            credit
+        );
+        assert!(q.entries.values().all(|e| e.cursor == 0));
     }
 
     #[test]
