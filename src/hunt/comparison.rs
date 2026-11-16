@@ -1,5 +1,6 @@
 //! Comparação das leituras registradas, por faixa de seed e intervalo de espera.
 
+#[derive(Clone)]
 pub(crate) struct Comparison {
     #[cfg(test)]
     pub range: String,
@@ -30,6 +31,30 @@ impl Comparison {
                 >= i128::from(self.control_fresh) * i128::from(self.policy),
         ))
     }
+}
+
+/// Soma as faixas de seed na mesma banda antes de calcular as médias.
+pub(crate) fn by_wait(rows: &[Comparison]) -> Vec<Comparison> {
+    let mut totals: Vec<Comparison> = Vec::new();
+    for row in rows {
+        if let Some(total) = totals.iter_mut().find(|total| total.band == row.band) {
+            total.policy += row.policy;
+            total.control += row.control;
+            total.policy_fresh += row.policy_fresh;
+            total.control_fresh += row.control_fresh;
+            #[cfg(test)]
+            {
+                total.policy_new_count += row.policy_new_count;
+                total.control_new_count += row.control_new_count;
+                total.policy_new += row.policy_new;
+                total.control_new += row.control_new;
+            }
+        } else {
+            totals.push(row.clone());
+        }
+    }
+    totals.sort_by_key(|row| row.band);
+    totals
 }
 
 pub(crate) fn compare(

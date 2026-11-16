@@ -50,7 +50,7 @@
   <p class="muted">Janela de 7 dias desde {date(report.started_at)}. As conferências de 48 h fecham em {date(report.closes_at)}. Só há melhora se os sete forem cumpridos.</p>
   <ol class="metrics">
     {#each report.metrics as metric}
-      <li><h4>{metric.label}</h4><p>Base: {metric.baseline}</p><p>{metric.value}</p><p class="muted">{metric.state}</p></li>
+      <li><h4>{metric.label}</h4><p>Base: {metric.baseline}</p><p class="metric-value">{metric.value}</p><p class="muted">{metric.state}</p></li>
     {/each}
   </ol>
 </section>
@@ -64,6 +64,7 @@
   .alerts, .metrics { list-style: none; padding: 0; display: grid; gap: 12px; }
   .alerts li, .metrics li { padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); min-width: 0; overflow-wrap: anywhere; }
   dl { display: grid; gap: 5px; margin-top: 8px; } dl div { display: grid; grid-template-columns: 160px 1fr; gap: 8px; } dt { color: var(--muted); } dd { margin: 0; }
+  .metric-value { white-space: pre-line; }
   .metrics { grid-template-columns: repeat(2, minmax(0,1fr)); }
   @media (max-width: 600px) { .metrics { grid-template-columns: 1fr; } dl div { grid-template-columns: 1fr; gap: 0; } }
 </style>

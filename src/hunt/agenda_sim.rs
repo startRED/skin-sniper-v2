@@ -385,7 +385,7 @@ fn comparison_report(c: &rusqlite::Connection, since: i64, until: i64) -> rusqli
     );
     let rows = crate::hunt::comparison::compare(c, since, until)?;
     let mut count = 0;
-    for row in rows {
+    for row in &rows {
         count += 1;
         let label = ["<600", "600-3600", "3600-21600", ">=21600"][row.band as usize];
         out.push_str(&format!("{} | {label} s | agenda={} controle={} | anúncios raros novos dentro do saldo por leitura: ", row.range, row.policy, row.control));
@@ -406,6 +406,19 @@ fn comparison_report(c: &rusqlite::Connection, since: i64, until: i64) -> rusqli
                 "agenda={:.6} controle={:.6}\n",
                 row.policy_new as f64 / row.policy_new_count as f64,
                 row.control_new as f64 / row.control_new_count as f64
+            ));
+        }
+    }
+    for row in crate::hunt::comparison::by_wait(&rows) {
+        let label = ["<600", "600-3600", "3600-21600", ">=21600"][row.band as usize];
+        if let Some((policy, control, _)) = row.rare_rates() {
+            out.push_str(&format!(
+                "Total por espera {label} s: agenda={policy:.6} controle={control:.6}\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "Total por espera {label} s: agenda={} controle={}, aguardando 30 em cada braço\n",
+                row.policy, row.control
             ));
         }
     }
@@ -501,17 +514,18 @@ async fn panel_and_offline_report_match_when_one_read_finds_many() {
         for arm in [0, 1] {
             for i in 0..30 {
                 let fresh = if arm == 0 && i == 0 { 20 } else if arm == 1 && i < 10 { 1 } else { 0 };
-                c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',?1,'r:a#1-2',600,?2,'ok')", rusqlite::params![fresh,arm])?;
+                let range = format!("r:skin{}#1-2", i % 6);
+                c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',?1,?2,600,?3,'ok')", rusqlite::params![fresh,range,arm])?;
             }
         }
-        for (fresh, state, expected) in [(20, "cumprido", "0.666667"), (5, "não cumprido", "0.166667")] {
+        for (fresh, state, expected, panel) in [(20, "cumprido", "0.666667", "66,7"), (5, "não cumprido", "0.166667", "16,7")] {
             c.execute("UPDATE reads SET fresh=?1 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=0)", [fresh])?;
             let offline = comparison_report(c, 1000, 2000)?;
             let metric = &crate::web::learning_alerts::report(c, 2000)?.metrics[0];
             assert_eq!(metric.state, state);
-            assert!(offline.contains(&format!("agenda={expected} controle=0.333333")));
-            assert!(metric.value.contains(&expected.replace('.', ",")));
-            assert!(metric.value.contains("rodízio 0,333333"));
+            assert!(offline.contains(&format!("Total por espera 600-3600 s: agenda={expected} controle=0.333333")));
+            assert!(metric.value.contains(panel));
+            assert!(metric.value.contains("rodízio 33,3 a cada 100 leituras"));
             assert!(!metric.value.contains("r:a#1-2"));
         }
         Ok(())
