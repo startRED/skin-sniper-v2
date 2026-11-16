@@ -182,6 +182,7 @@ Paralelas, conferências, livros e leituras sem escolha comparável deixam os no
 nulos. Migração aditiva conserva linhas antigas com nulos. Não muda escolhas nem corta leituras.
 `outcome` marca a leitura com escolha: `ok`, ou `failed` quando a consulta saiu para a Steam e falhou
 (retrato gravado uma vez, `new_listings` nulo, sem nota; o ajuste ignora essas linhas). Nulo nas demais.
+A falha devolve à faixa a leitura anterior (ou nenhuma), sem mudar o descanso existente: por `data` nula ela volta a concorrer depois do descanso; nos demais erros pode voltar já na próxima escolha, e os registros de falha por faixa mostram a repetição.
 
 Comparação offline independente: `SNIPER_COMPARISON_DB=<cópia> SNIPER_COMPARISON_SINCE=<unix> SNIPER_COMPARISON_UNTIL=<unix> cargo test compare_recorded_reads -- --ignored --nocapture`.
 Abre apenas a cópia em modo somente leitura, sem migração, configurações, caça ou rede.

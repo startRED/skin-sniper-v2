@@ -712,16 +712,20 @@ impl Queue {
         }
         self.snapshots.remove(id);
         self.focused_snapshots.remove(id);
-        // a faixa escolhida não foi lida: volta a contar o estoque desde a leitura anterior
+        self.unfocus(id);
+        (self.credit, self.explore, self.explore_turn, self.cursors) = credit;
+        for (id, e) in &mut self.entries {
+            e.cursor = self.cursors.get(id).copied().unwrap_or(0);
+        }
+    }
+
+    /// A faixa escolhida não foi lida: volta a contar o estoque desde a leitura anterior.
+    fn unfocus(&mut self, id: &str) {
         if let Some(f) = self.focused.remove(id) {
             match f.prev {
                 Some(at) => self.range_seen.insert(f.key, at),
                 None => self.range_seen.remove(&f.key),
             };
-        }
-        (self.credit, self.explore, self.explore_turn, self.cursors) = credit;
-        for (id, e) in &mut self.entries {
-            e.cursor = self.cursors.get(id).copied().unwrap_or(0);
         }
     }
 
@@ -805,8 +809,10 @@ impl Queue {
         self.dirty.insert(id.to_string());
     }
 
-    /// Consulta enviada que falhou antes do resultado: grava o retrato da escolha uma vez, sem nota nem zero.
+    /// Consulta enviada que falhou antes do resultado: grava o retrato da escolha uma vez, sem nota nem zero, e
+    /// devolve a espera da faixa (a falha não leu nada).
     fn failed_read(&mut self, id: &str, now: i64) {
+        self.unfocus(id);
         if let Some(choice) = self.focused_snapshots.remove(id) {
             self.reads.push(Read {
                 new_listings: None,
@@ -2563,5 +2569,44 @@ mod tests {
         assert_eq!((r.fresh, r.new_listings), (0, None));
         assert_eq!(q.stats["r:a"].n, stat.n);
         assert_eq!(q.stats["r:a"].exposure, stat.exposure);
+    }
+
+    #[test]
+    fn sent_failure_gives_back_the_range_wait() {
+        // faixa lida há uma hora e faixa nunca lida: a falha devolve a espera verdadeira às duas
+        for seen in [Some(3600), None] {
+            let mut q = Queue::default();
+            q.set_tasks(vec![Task {
+                seeds: vec![(1, 2)],
+                ..task("r:a", 1.0)
+            }]);
+            let key = range_key("r:a", (1, 2));
+            if let Some(ago) = seen {
+                q.range_seen.insert(key.clone(), 10_000 - ago);
+            }
+            let t = q.next_matching(10_000, Task::rare).unwrap();
+            q.focus(t, 10_000);
+            q.failed_read("r:a", 10_001);
+            let rest = q.failed("r:a", 10_001);
+            assert_eq!(q.range_seen.get(&key).copied(), seen.map(|a| 10_000 - a));
+            assert!(!q.focused.contains_key("r:a"));
+            assert_eq!(q.failing["r:a"], (1, 10_001 + rest));
+            let read = q.take_reads().pop().unwrap();
+            assert!(read.failed);
+            assert_eq!(read.choice.unwrap().gap, seen);
+            // em descanso o alvo não sai; depois do descanso volta e a leitura mede a espera verdadeira
+            assert!(q.next_matching(10_002, Task::rare).is_none());
+            let later = 10_001 + rest;
+            let t = q.next_matching(later, Task::rare).unwrap();
+            q.focus(t, later);
+            q.reward("r:a", later, Found::default());
+            let read = q.take_reads().pop().unwrap();
+            assert_eq!(read.range.unwrap().gap, seen.map(|a| later - (10_000 - a)));
+            assert!(
+                read.choice
+                    .is_some_and(|c| c.gap == seen.map(|a| later - (10_000 - a)))
+            );
+            assert!(!q.failing.contains_key("r:a"));
+        }
     }
 }
