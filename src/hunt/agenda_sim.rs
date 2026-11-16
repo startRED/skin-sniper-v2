@@ -1,7 +1,8 @@
 //! Simulação offline da agenda sobre uma cópia do banco: quantos anúncios novos de seed pagante (≤ saldo) cada
-//! leitura pega. Só roda à mão (`SNIPER_DB=<cópia>/sniper.db cargo test --release agenda_on_a_real_db --
+//! leitura pega. Só roda à mão (`RATIO=5.5 AGENDA_RULE=stock SNIPER_DB=<cópia>/sniper.db cargo test --release agenda_on_a_real_db --
 //! --ignored --nocapture`); abre o banco para escrita (migração, `refit_log`), então use sempre uma cópia.
 //!
+//! Para comparar, repita com AGENDA_RULE=marginal; somente o simulador aceita essa escolha.
 //! Premissas (não medidas, só o que a conta assume):
 //! - cada faixa recebe anúncio novo ≤ saldo como Poisson, em dois mercados: **observado** (anúncios da faixa em
 //!   `observations` que apareceram depois da primeira vez que a faixa foi vista, ÷ o tempo desde então; faixa
@@ -10,7 +11,7 @@
 //! - cada anúncio vive um tempo exponencial de média `L` (três cenários, a vida real do raro barato não foi
 //!   medida: 9 sumiços em 215 vistos);
 //! - uma leitura a cada `LISTINGS_REST_SECS` (o ritmo de hoje), sem falha, todas em alvo raro; a agenda começa
-//!   sem nada aprendido e aprende com o que pega, com os parâmetros do banco ou com a janela que o ajuste adota
+//!   sem nada aprendido e aprende com o que pega, com Params::default (sem settings) ou com a janela que o ajuste adota
 //!   olhando só as releituras de faixa.
 
 use crate::db::Db;
@@ -22,8 +23,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const DAY: i64 = 86_400;
-/// Repetições da semana simulada (sementes do sorteio) somadas em cada linha.
-const SEEDS: u64 = 10;
+/// Repetições dos dois dias simulados (sementes do sorteio) somadas em cada linha.
+const SEEDS: u64 = 3;
 
 /// Gerador determinístico (xorshift): mesma sequência para a agenda antiga e a nova.
 struct Rng(u64);
@@ -55,6 +56,10 @@ pub struct Outcome {
     pub worth: f64,
     pub arrived: u64,
     pub ranges_read: usize,
+    pub agenda_reads: u64,
+    pub agenda_top5: u64,
+    /// Maior intervalo por faixa, incluindo bordas do horizonte, em segundos.
+    pub max_gap: i64,
 }
 
 /// Roda a agenda `days` dias sobre o mercado `rates` (anúncios/s por faixa, na ordem de `Task::seeds`).
@@ -94,6 +99,7 @@ pub fn simulate(
         params,
         ..Queue::default()
     };
+    q.legacy_stock = std::env::var("AGENDA_RULE").as_deref() == Ok("stock");
     q.set_tasks(tasks.to_vec());
     q.set_ranges(ranges.clone());
     let mut out = Outcome {
@@ -102,8 +108,13 @@ pub fn simulate(
         worth: 0.0,
         arrived,
         ranges_read: 0,
+        agenda_reads: 0,
+        agenda_top5: 0,
+        max_gap: 0,
     };
     let mut read_ranges = std::collections::HashSet::new();
+    let mut agenda_counts: HashMap<(String, usize), u64> = HashMap::new();
+    let mut last_read: HashMap<(String, usize), i64> = HashMap::new();
     let mut now = start;
     while now < end {
         let Some(task) = q.next_matching(now, Task::rare) else {
@@ -116,7 +127,14 @@ pub fn simulate(
             .iter()
             .position(|r| *r == narrowed.seeds[0])
             .unwrap();
-        read_ranges.insert((full.id.clone(), i));
+        let key = (full.id.clone(), i);
+        let last = last_read.insert(key.clone(), now).unwrap_or(start);
+        out.max_gap = out.max_gap.max(now - last);
+        if !q.last_exploring {
+            out.agenda_reads += 1;
+            *agenda_counts.entry(key.clone()).or_default() += 1;
+        }
+        read_ranges.insert(key);
         let mut fresh = 0;
         for ad in ads.get_mut(&(full.id.clone(), i)).into_iter().flatten() {
             if !ad.seen && ad.at <= now as f64 && (now as f64) < ad.gone {
@@ -138,6 +156,20 @@ pub fn simulate(
         out.worth += f64::from(fresh) * ranges.get(&full.id).map_or(1.0, |r| r[i].gain);
         now += LISTINGS_REST_SECS;
     }
+    for task in tasks {
+        for i in 0..task.seeds.len() {
+            out.max_gap = out.max_gap.max(
+                end - last_read
+                    .get(&(task.id.clone(), i))
+                    .copied()
+                    .unwrap_or(start),
+            );
+        }
+    }
+    let mut counts: Vec<u64> = agenda_counts.into_values().collect();
+    counts.sort_unstable_by(|a, b| b.cmp(a));
+    out.agenda_top5 = counts.iter().take(5).sum();
+    assert!(out.agenda_top5 <= out.agenda_reads && out.agenda_reads <= out.reads);
     out.ranges_read = read_ranges.len();
     out
 }
@@ -243,15 +275,7 @@ async fn agenda_on_a_real_db() {
     let end: i64 = raw
         .query_row("SELECT MAX(at) FROM reads", [], |r| r.get(0))
         .unwrap();
-    let params: Params = raw
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'value_params'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default();
+    let params = Params::default();
     let h: Arc<Hunt> = Hunt::with_clock(
         HuntDeps {
             settings: crate::settings::SettingsStore::new(db.clone()),
@@ -267,10 +291,14 @@ async fn agenda_on_a_real_db() {
     let learned = h.lock().learned.clone();
     let items = catalog::load_items(&db).await.unwrap();
     let deals = catalog::load_deals(&db, &learned, end).await.unwrap();
-    let (ratio, _) = catalog::load_ratio(&db)
-        .await
-        .unwrap()
-        .expect("razão BRL/USD");
+    let ratio: f64 = std::env::var("RATIO")
+        .expect("RATIO explícita: hipótese BRL/USD, não configuração recuperada")
+        .parse()
+        .expect("RATIO numérica");
+    assert!(ratio.is_finite() && ratio > 0.0);
+    println!(
+        "Hipóteses: saldo={saldo} centavos (default 3608); RATIO={ratio}; Params::default, sem ler settings"
+    );
     let (boost, floors) = (HashMap::new(), HashMap::new());
     let ctx = Ctx {
         ratio,
@@ -282,6 +310,7 @@ async fn agenda_on_a_real_db() {
         deals: &deals,
     };
     let (mut tasks, ranges) = select_ranges(&items, &ctx);
+    tasks.sort_by(|a, b| a.id.cmp(&b.id));
     tasks.retain(Task::rare);
     let observed = observed_rates(&raw, &tasks, saldo, end - 7 * DAY, end);
     let turnover = turnover_rates(&raw, &items, &tasks, saldo);
@@ -298,19 +327,23 @@ async fn agenda_on_a_real_db() {
     let classes: Vec<usize> = ids.iter().map(|id| crate::hunt::value::class(id)).collect();
     let (fit, _, adopted) = crate::hunt::value::tune(&reads, &classes, params);
     println!(
-        "{} alvos, {n_ranges} faixas; parâmetros do banco {params:?}; janela que melhor prevê só as releituras de \
+        "{} alvos, {n_ranges} faixas; parâmetros default {params:?}; janela que melhor prevê só as releituras de \
          faixa: {} s (adotada pelo ajuste: {adopted})",
         tasks.len(),
         fit.window
     );
-    // o banco como está e a janela que o ajuste adota se olhar só as releituras de faixa
+    // Defaults e a janela que o ajuste adota olhando somente as releituras de faixa.
     let fitted = Params {
         window: fit.window,
         ..params
     };
+    println!(
+        "Simulação reduzida: 2 dias × {SEEDS} sorteios; regra={:?}",
+        std::env::var("AGENDA_RULE").unwrap_or_else(|_| "marginal".into())
+    );
     for ((market, rates), (label, params)) in [("observado", &observed), ("giro", &turnover)]
         .into_iter()
-        .flat_map(|m| [(m, ("banco", params)), (m, ("janela das faixas", fitted))])
+        .flat_map(|m| [(m, ("default", params)), (m, ("janela das faixas", fitted))])
     {
         let live = rates.values().flatten().filter(|r| **r > 0.0).count();
         let per_day: f64 = rates.values().flatten().sum::<f64>() * DAY as f64;
@@ -319,20 +352,24 @@ async fn agenda_on_a_real_db() {
         );
         for life in [900.0, 7200.0, 43_200.0] {
             let runs: Vec<Outcome> = (1..=SEEDS)
-                .map(|s| simulate(&tasks, &ranges, rates, params, life, 7, 0x5eed * s))
+                .map(|s| simulate(&tasks, &ranges, rates, params, life, 2, 0x5eed * s))
                 .collect();
             let reads: u64 = runs.iter().map(|o| o.reads).sum();
             let caught: u64 = runs.iter().map(|o| o.caught).sum();
             let arrived: u64 = runs.iter().map(|o| o.arrived).sum();
             let worth: f64 = runs.iter().map(|o| o.worth).sum();
             let ranges_read = runs.iter().map(|o| o.ranges_read).sum::<usize>() / runs.len();
+            let agenda_reads: u64 = runs.iter().map(|o| o.agenda_reads).sum();
+            let top5: u64 = runs.iter().map(|o| o.agenda_top5).sum();
+            let max_gap = runs.iter().map(|o| o.max_gap).max().unwrap();
             println!(
-                "  vida {:>4.0} min: {caught} pegos de {arrived} ({:.1} %), {:.4} anúncio novo/leitura, \
-                 {:.2} centavos/leitura, {ranges_read} faixas lidas",
+                "  leituras={reads}; lucro simulado total={worth:.2} centavos; vida {:>4.0} min: {caught} pegos de {arrived} ({:.1} %), {:.4} anúncio novo/leitura, \
+                 {:.2} centavos/leitura, {ranges_read} faixas lidas; agenda_top5={top5}/{agenda_reads} ({:.2}%); max_gap={max_gap} s",
                 life / 60.0,
                 100.0 * caught as f64 / arrived.max(1) as f64,
                 caught as f64 / reads.max(1) as f64,
                 worth / reads.max(1) as f64,
+                100.0 * top5 as f64 / agenda_reads.max(1) as f64,
             );
         }
     }

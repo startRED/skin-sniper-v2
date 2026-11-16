@@ -276,6 +276,8 @@ struct Progress {
 
 #[derive(Default)]
 pub struct Queue {
+    #[cfg(test)]
+    legacy_stock: bool,
     entries: HashMap<String, Entry>,
     /// Sobrevive à saída do braço da seleção: se ele voltar, retoma de onde parou.
     stats: HashMap<String, Stat>,
@@ -355,12 +357,8 @@ impl Queue {
         self.ranges = ranges;
     }
 
-    /// A faixa do alvo que mais vale ler agora e quanto: peso × lucro × estoque acumulado desde a última leitura
-    /// dela, na mesma janela com que a taxa aprende (`reward`). Vezes a taxa do alvo, são os anúncios novos de seed
-    /// pagante esperados × lucro por anúncio; toda leitura custa uma consulta de anúncios (medido em 13/11: 1,00 a
-    /// 1,03 por leitura), então dividir pelo custo não muda a ordem. Empate fica com a primeira.
-    // Era a vida do anúncio mais barato comum (`life`, 792 s): a faixa relida há 2 min valia 1/6 da parada há dias e
-    // a agenda relia as mesmas 2 faixas a cada 2–3 min (13/11: 1 294 de 2 073 leituras, 5 anúncios novos).
+    /// Índice marginal: peso * lucro * W * (1 - exp(-x) - x exp(-x)), x = gap/W.
+    /// Exposição do aprendizado continua sendo o estoque acumulado, sem a parcela marginal.
     fn best_range(&self, task: &Task, now: i64) -> Option<(usize, f64)> {
         task.seeds
             .iter()
@@ -371,10 +369,24 @@ impl Queue {
                     .range_seen
                     .get(&range_key(&task.id, r))
                     .map(|at| now - at);
-                (
-                    i,
-                    range.weight * range.gain * value::exposure(gap, self.params.window),
-                )
+                let window = self.params.window;
+                let stock = gap.map_or(window, |gap| {
+                    let x = gap.max(0) as f64 / window;
+                    // Série evita cancelamento numérico quando gap/W é pequeno.
+                    let marginal = if x < 1e-3 {
+                        x * x * (0.5 - x / 3.0 + x * x / 8.0)
+                    } else {
+                        -(-x).exp_m1() - x * (-x).exp()
+                    };
+                    window * marginal.max(0.0)
+                });
+                #[cfg(test)]
+                let stock = if self.legacy_stock {
+                    value::exposure(gap, window)
+                } else {
+                    stock
+                };
+                (i, range.weight * range.gain * stock)
             })
             .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
     }
@@ -506,7 +518,7 @@ impl Queue {
         self.entries.values().any(|e| e.task.rare())
     }
 
-    /// Centavos esperados de ler o alvo agora (`value`): nunca visto vale infinito.
+    /// Prioridade da leitura: retorno marginal para raro; centavos esperados nos demais. Nunca visto vale infinito.
     fn value(&self, pool: &value::Pool, id: &str, now: i64) -> f64 {
         let Some(s) = self.stats.get(id).filter(|s| s.seen() > 0) else {
             return f64::INFINITY;
@@ -1843,6 +1855,56 @@ mod agenda_sim;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marginal_frequency_and_control_coverage() {
+        for window in [7200.0, 28800.0, 1e9] {
+            let mut t = task("r:a", 1.0);
+            t.seeds = (0..227).map(|i| (i, i)).collect();
+            let mut q = Queue {
+                params: value::Params {
+                    window,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            q.set_tasks(vec![t.clone()]);
+            q.set_ranges(HashMap::from([(
+                t.id.clone(),
+                (0..227)
+                    .map(|i| Range {
+                        weight: if i == 0 { 25.0 } else { 1.0 },
+                        gain: 1.0,
+                    })
+                    .collect(),
+            )]));
+            let mut counts = [0usize; 227];
+            let mut last = [0usize; 227];
+            let mut max_gap = 0;
+            for step in 1..=10000 {
+                let now = 1_000_000 + step as i64 * 28;
+                let pick = q.next_matching(now, Task::rare).unwrap();
+                let pick = q.focus(pick, now);
+                let i = pick.seeds[0].0 as usize;
+                counts[i] += 1;
+                max_gap = max_gap.max(step - last[i]);
+                last[i] = step;
+                q.reward(&t.id, now, Found::default());
+                q.take_reads();
+            }
+            let ratio = counts[0] as f64 / (counts[1..].iter().sum::<usize>() as f64 / 226.0);
+            println!(
+                "W={window}; ratio={ratio:.4}; max_gap={max_gap}; bound={}",
+                8 * 227
+            );
+            assert!(max_gap <= 8 * 227);
+            assert!((3.5..6.5).contains(&ratio), "frequency ratio={ratio}");
+            assert!(
+                last.iter().all(|s| 10000 - s <= 8 * 227),
+                "control bounds coverage"
+            );
+        }
+    }
 
     #[test]
     fn listings_slot_goes_to_the_rare_targets_and_never_to_the_cheap_one() {

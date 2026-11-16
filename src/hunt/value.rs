@@ -1,8 +1,8 @@
 //! Valor de uma leitura: o único número que a agenda compara para decidir o que consultar agora.
 //!
 //! Alvo raro (o único que a caça lê hoje), por faixa de seed:
-//! `V = taxa × peso × W·(1 − e^(−Δ/W)) × lucro` (anúncios novos de seed pagante esperados × lucro por anúncio,
-//! em centavos; toda leitura custa uma consulta), onde
+//! Escolha marginal: `I = taxa * peso * lucro * W * (1 - exp(-x) - x exp(-x))`, x = gap/W.
+//! A exposição usada para aprender continua sendo o estoque abaixo; docs/projeto.md.
 //! - **taxa**: anúncios novos dentro do saldo por segundo e por peso, medida no alvo e encolhida para a taxa da
 //!   classe enquanto ele tem pouca medida, com otimismo de contagem (`Z·√a`) e teto por seca (`capped`);
 //! - **peso**: anúncios de seed pagante da faixa em 14 dias, vistos + prior de giro (`scheduler::Range`);
