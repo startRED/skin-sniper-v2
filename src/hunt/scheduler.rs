@@ -297,6 +297,8 @@ pub struct Queue {
     focused: HashMap<String, Focus>,
     snapshots: HashMap<String, ChoiceSnapshot>,
     focused_snapshots: HashMap<String, ChoiceSnapshot>,
+    /// Alvos que a consulta em curso focou junto com o principal e ainda não leram (`focus_shared`).
+    shared: Vec<String>,
     pub external: Option<String>,
     pub external_ready: bool,
     pub last_exploring: bool,
@@ -388,6 +390,7 @@ impl Queue {
     }
 
     fn begin_query(&mut self, task: &Task) {
+        self.shared.clear();
         let n = self
             .query_revisions
             .entry(base_name(&task.name).to_string())
@@ -533,6 +536,7 @@ impl Queue {
     pub fn next_matching(&mut self, now: i64, keep: impl Fn(&Task) -> bool) -> Option<Task> {
         self.snapshots.clear();
         self.focused_snapshots.clear();
+        self.shared.clear();
         let external_id = self.external.clone();
         let failing: HashSet<&str> = self
             .failing
@@ -755,6 +759,7 @@ impl Queue {
         new_listings: Option<u32>,
     ) {
         self.failing.remove(id);
+        self.shared.retain(|s| s != id);
         let Some(s) = self.stats.get_mut(id) else {
             return;
         };
@@ -813,6 +818,11 @@ impl Queue {
     /// devolve a espera da faixa (a falha não leu nada).
     fn failed_read(&mut self, id: &str, now: i64) {
         self.unfocus(id);
+        // os outros alvos da mesma consulta também não leram: só a espera volta, sem leitura nem falha deles
+        for other in std::mem::take(&mut self.shared) {
+            self.unfocus(&other);
+            self.focused_snapshots.remove(&other);
+        }
         if let Some(choice) = self.focused_snapshots.remove(id) {
             self.reads.push(Read {
                 new_listings: None,
@@ -922,6 +932,12 @@ impl Queue {
             seeds: vec![range],
             ..task
         }
+    }
+
+    /// `focus` de um alvo que vai junto na consulta de outro: a falha dela devolve a espera dele também.
+    fn focus_shared(&mut self, task: Task, now: i64) -> Task {
+        self.shared.push(task.id.clone());
+        self.focus(task, now)
     }
 
     pub(super) fn record_scan(&mut self, id: &str, now: i64) {
@@ -1518,7 +1534,7 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
                 other.clone()
             };
             if same_query(task, &focused) {
-                targets.push(s.queue.focus(other, h.now()));
+                targets.push(s.queue.focus_shared(other, h.now()));
             }
         }
     }
@@ -2608,5 +2624,83 @@ mod tests {
             );
             assert!(!q.failing.contains_key("r:a"));
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_failure_tests {
+    use super::*;
+
+    fn rare(id: &str) -> Task {
+        Task {
+            id: id.into(),
+            name: id.into(),
+            code: "G1234567".into(),
+            wear: Some(2),
+            seeds: vec![(1, 2)],
+            float: None,
+            score: 1.0,
+        }
+    }
+
+    /// Dois alvos na mesma consulta, cada faixa lida há uma hora; devolve a fila já focada e as chaves.
+    fn shared_query() -> (Queue, String, String) {
+        let mut q = Queue::default();
+        q.set_tasks(vec![rare("r:a"), rare("r:b")]);
+        let (ka, kb) = (range_key("r:a", (1, 2)), range_key("r:b", (1, 2)));
+        q.range_seen.insert(ka.clone(), 6_400);
+        q.range_seen.insert(kb.clone(), 6_400);
+        let t = q.next_matching(10_000, |t| t.id == "r:a").unwrap();
+        q.focus(t, 10_000);
+        q.focus_shared(rare("r:b"), 10_000);
+        (q, ka, kb)
+    }
+
+    #[test]
+    fn next_query_failure_does_not_restore_previous_shared_target() {
+        let (mut q, _, kb) = shared_query();
+        let c = rare("r:c");
+        let kd = range_key("r:d", (1, 2));
+        q.range_seen.insert(kd.clone(), 6_400);
+        q.begin_query(&c);
+        q.focus(c, 10_001);
+        q.focus_shared(rare("r:d"), 10_001);
+        q.failed_read("r:c", 10_002);
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(10_000));
+        assert!(q.focused.contains_key("r:b"));
+        assert_eq!(q.range_seen.get(&kd).copied(), Some(6_400));
+        assert!(!q.focused.contains_key("r:d"));
+    }
+
+    #[test]
+    fn sent_shared_failure_gives_back_every_target_wait() {
+        let (mut q, ka, kb) = shared_query();
+        q.failed_read("r:a", 10_001);
+        assert_eq!(q.range_seen.get(&ka).copied(), Some(6_400));
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(6_400));
+        assert!(q.focused.is_empty());
+        assert!(q.focused_snapshots.is_empty());
+        let reads = q.take_reads();
+        assert_eq!(reads.len(), 1);
+        let r = &reads[0];
+        assert!(r.arm == "r:a" && r.failed && r.fresh == 0 && r.range.is_none());
+        assert!(q.stats.get("r:b").is_none_or(|s| s.queries == 0));
+    }
+
+    #[test]
+    fn sent_shared_success_keeps_reading_every_target() {
+        let (mut q, ka, kb) = shared_query();
+        q.reward("r:a", 10_001, Found::default());
+        q.reward("r:b", 10_001, Found::default());
+        assert_eq!(q.range_seen.get(&ka).copied(), Some(10_000));
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(10_000));
+        assert!(q.focused.contains_key("r:a") && q.focused.contains_key("r:b"));
+        assert!(q.take_reads().iter().all(|r| !r.failed));
+        // falha depois da leitura do secundário não desfaz o que ele leu
+        let (mut q, _, kb) = shared_query();
+        q.reward("r:b", 10_001, Found::default());
+        q.failed_read("r:a", 10_002);
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(10_000));
+        assert!(q.focused.contains_key("r:b"));
     }
 }
