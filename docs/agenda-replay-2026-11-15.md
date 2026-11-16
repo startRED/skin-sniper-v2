@@ -20,7 +20,7 @@ No retrato atual de `arm_stats`, Acid Fade (`r:G182820FD013004`) tem 1.684 consu
 
 ## Limites
 
-O código calcula valor pela taxa otimista por alvo, multiplicada pelo peso e ganho da faixa e pelo estoque acumulado (exposição). O prêmio esperado favorece alvos com maior retorno; maximizar retorno monetário é diferente de maximizar contagem de anúncios novos. A concentração observada não demonstra toda a cadeia causal sem os pesos históricos.
+O código de 15/11 calcula valor pela taxa otimista por alvo, multiplicada pelo peso e ganho da faixa e pelo estoque acumulado (exposição); em 16/11, a escolha passou a usar o índice marginal (ver `docs/projeto.md`). O prêmio esperado favorece alvos com maior retorno; maximizar retorno monetário é diferente de maximizar contagem de anúncios novos. A concentração observada não demonstra toda a cadeia causal sem os pesos históricos.
 
 `reads` guarda instante, alvo, anúncios novos, ganho, intervalo, peso, controle e crédito monetário observado (`worth`), distinto do valor usado para escolher, mas não identifica a faixa nem registra o conjunto de candidatas e ganhos históricos. `research_decisions` guarda alvo, origem, política, escala e bloco, sem reconstruir esse conjunto. `arm_stats` é apenas o estado atual. A simulação `agenda_sim` gera chegadas Poisson e vidas exponenciais; não é replay contrafactual dos anúncios observados.
 
