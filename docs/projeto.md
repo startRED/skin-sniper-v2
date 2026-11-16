@@ -174,6 +174,27 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 
 ## Caça
 
+Registro para comparação: `reads` recebe `choice_range` (alvo + início + fim),
+`choice_gap` (intervalo real na escolha), `choice_control`, `eligible_ranges`
+(quantidade de faixas elegíveis), `oldest_range` e `oldest_gap` (mais velha elegível;
+intervalo nulo se nunca vista). O retrato é consumido uma vez no resultado principal.
+Paralelas, conferências, livros e leituras sem escolha comparável deixam os novos campos
+nulos. Migração aditiva conserva linhas antigas com nulos. Não muda escolhas nem corta leituras.
+
+Comparação offline independente: `SNIPER_COMPARISON_DB=<cópia> cargo test compare_recorded_reads -- --ignored --nocapture`.
+Abre apenas a cópia em modo somente leitura, sem migração, configurações, caça ou rede.
+Cada faixa exata e banda (`<600`, `600-3600`, `3600-21600`, `>=21600` segundos)
+precisa de 30 leituras em CADA braço; abaixo disso informa dados insuficientes.
+`fresh` mede anúncios raros novos dentro do saldo por leitura, creditados uma vez.
+`new_listings` guarda todos os novos devolvidos pelo registro, sem recorte de saldo.
+Falha de registro mantém nulo, nunca zero; leituras antigas também ficam nulas.
+O relatório mostra as duas medidas separadamente por braço/faixa/banda, cada uma com
+mínimo de 30 leituras válidas em cada braço; nulos não entram na medida de todos os novos.
+Testes offline cobrem totais distintos (4 novos contra 1 no saldo), nulos e o limiar 29/30.
+Primeiras leituras são excluídas. Bandas ainda contêm esperas diferentes, e seleção,
+saldo e mercado podem variar. O relatório mostra associação com a agenda, sem causalidade.
+
+
 1. **Catálogo e descoberta:** ao subir, importa `assets/catalog/curated.json` sem apagar medições anteriores.
    Só os nomes da curadoria participam das novas seleções; itens removidos continuam no banco para histórico
    e acompanhamento de oportunidades ativas. Nome-base, desgaste e variante são distintos; códigos gerados

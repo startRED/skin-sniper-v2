@@ -337,3 +337,149 @@ async fn agenda_on_a_real_db() {
         }
     }
 }
+
+#[test]
+fn comparison_requires_thirty_in_each_arm_and_exact_bands() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER);").unwrap();
+    for gap in [599, 600, 3599, 3600, 21599, 21600] {
+        for arm in [0, 1] {
+            for _ in 0..30 {
+                c.execute(
+                    "INSERT INTO reads VALUES('r:a#1-2',?1,?2,1,4)",
+                    rusqlite::params![gap, arm],
+                )
+                .unwrap();
+            }
+        }
+    }
+    c.execute(
+        "DELETE FROM reads WHERE rowid=(SELECT min(rowid) FROM reads)",
+        [],
+    )
+    .unwrap();
+    let report = comparison_report(&c).unwrap();
+    assert!(report.contains("dados insuficientes"));
+    assert!(report.contains("600-3600"));
+    assert!(report.contains("3600-21600"));
+    assert!(report.contains(">=21600"));
+    assert!(report.contains("<600 s | agenda=29 controle=30 | anúncios raros novos dentro do saldo por leitura: dados insuficientes"));
+    assert!(report.contains("600-3600 s | agenda=60 controle=60 | anúncios raros"));
+    assert!(report.contains("3600-21600 s | agenda=60 controle=60 | anúncios raros"));
+    assert!(report.contains(">=21600 s | agenda=30 controle=30 | anúncios raros"));
+    assert!(report.contains("agenda=1.000000 controle=1.000000"));
+    c.execute("INSERT INTO reads VALUES('r:b#1-2',21600,0,7,NULL)", [])
+        .unwrap();
+    c.execute("INSERT INTO reads VALUES('r:a#1-3',21600,1,7,NULL)", [])
+        .unwrap();
+    let report = comparison_report(&c).unwrap();
+    assert_eq!(report.matches("dados insuficientes").count(), 6);
+}
+
+/// Associação observacional por faixa e banda; nunca inicia a caça nem lê configurações.
+fn comparison_report(c: &rusqlite::Connection) -> rusqlite::Result<String> {
+    let mut out = String::from(
+        "Associação com a agenda, sem causalidade. Bandas não igualam esperas, saldo ou mercado.\n",
+    );
+    let mut stmt = c.prepare(
+        "WITH r AS (
+        SELECT choice_range AS faixa, choice_control AS controle, fresh, new_listings,
+        CASE WHEN choice_gap<600 THEN 0 WHEN choice_gap<3600 THEN 1
+        WHEN choice_gap<21600 THEN 2 ELSE 3 END AS banda
+        FROM reads WHERE choice_range IS NOT NULL AND choice_gap>=0
+        AND choice_control IN (0,1))
+        SELECT faixa,banda,
+        sum(CASE WHEN controle=0 THEN 1 ELSE 0 END),
+        sum(CASE WHEN controle=1 THEN 1 ELSE 0 END),
+        sum(CASE WHEN controle=0 THEN fresh ELSE 0 END),
+        sum(CASE WHEN controle=1 THEN fresh ELSE 0 END),
+        count(CASE WHEN controle=0 THEN new_listings END),
+        count(CASE WHEN controle=1 THEN new_listings END),
+        coalesce(sum(CASE WHEN controle=0 THEN new_listings END),0),
+        coalesce(sum(CASE WHEN controle=1 THEN new_listings END),0)
+        FROM r GROUP BY faixa,banda ORDER BY faixa,banda",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, i64>(7)?,
+            r.get::<_, i64>(8)?,
+            r.get::<_, i64>(9)?,
+        ))
+    })?;
+    let mut count = 0;
+    for row in rows {
+        let (range, band, policy, control, pf, cf, pn, cn, pt, ct) = row?;
+        count += 1;
+        let label = ["<600", "600-3600", "3600-21600", ">=21600"][band as usize];
+        for (metric, policy, control, pf, cf) in [
+            (
+                "anúncios raros novos dentro do saldo por leitura",
+                policy,
+                control,
+                pf,
+                cf,
+            ),
+            ("anúncios novos por leitura", pn, cn, pt, ct),
+        ] {
+            out.push_str(&format!(
+                "{range} | {label} s | agenda={policy} controle={control} | {metric}: "
+            ));
+            if policy < 30 || control < 30 {
+                out.push_str("dados insuficientes (mínimo 30 CADA braço)\n");
+            } else {
+                out.push_str(&format!(
+                    "agenda={:.6} controle={:.6}\n",
+                    pf as f64 / policy as f64,
+                    cf as f64 / control as f64
+                ));
+            }
+        }
+    }
+    if count == 0 {
+        out.push_str("dados insuficientes: nenhuma faixa/banda comparável registrada\n");
+    }
+    Ok(out)
+}
+
+#[test]
+#[ignore = "exige caminho explícito de cópia offline; somente leitura"]
+fn compare_recorded_reads() {
+    let path = std::env::var("SNIPER_COMPARISON_DB")
+        .expect("informe SNIPER_COMPARISON_DB com uma cópia offline");
+    let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap();
+    println!("{}", comparison_report(&c).unwrap());
+}
+
+#[test]
+fn comparison_distinguishes_total_new_from_affordable_and_missing() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER);").unwrap();
+    for arm in [0, 1] {
+        for _ in 0..30 {
+            c.execute("INSERT INTO reads VALUES('r:a#1-2',600,?1,1,4)", [arm])
+                .unwrap();
+        }
+    }
+    let report = comparison_report(&c).unwrap();
+    assert!(report.contains("anúncios novos por leitura: agenda=4.000000 controle=4.000000"));
+    assert!(report.contains(
+        "anúncios raros novos dentro do saldo por leitura: agenda=1.000000 controle=1.000000"
+    ));
+    c.execute("UPDATE reads SET new_listings=NULL WHERE rowid=1", [])
+        .unwrap();
+    let report = comparison_report(&c).unwrap();
+    assert!(
+        report.contains("agenda=29 controle=30 | anúncios novos por leitura: dados insuficientes")
+    );
+    assert!(report.contains(
+        "anúncios raros novos dentro do saldo por leitura: agenda=1.000000 controle=1.000000"
+    ));
+}
