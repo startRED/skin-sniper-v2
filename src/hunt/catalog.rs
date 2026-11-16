@@ -1090,7 +1090,15 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 // Banco
 
+pub(crate) async fn load_pattern_items(db: &Db) -> Result<Vec<Item>> {
+    load_items_filtered(db, false).await
+}
+
 pub async fn load_items(db: &Db) -> Result<Vec<Item>> {
+    load_items_filtered(db, true).await
+}
+
+async fn load_items_filtered(db: &Db, curated: bool) -> Result<Vec<Item>> {
     let now = crate::db::now_unix();
     db.call(move |c| {
         c.prepare(
@@ -1099,10 +1107,10 @@ pub async fn load_items(db: &Db) -> Result<Vec<Item>> {
                     (SELECT median_cents FROM price_points p WHERE p.name=i.name
                      AND p.ts >= ?1 AND p.ts <= ?2 AND p.purchases > 0 ORDER BY ts DESC LIMIT 1)
              FROM items i LEFT JOIN catalog_references r ON r.name = i.name
-             WHERE r.name IS NOT NULL OR NOT EXISTS(SELECT 1 FROM catalog_references)
+             WHERE ?3 = 0 OR r.name IS NOT NULL OR NOT EXISTS(SELECT 1 FROM catalog_references)
              ORDER BY COALESCE(r.rank, i.rank, 1000000), i.name",
         )?
-        .query_map(params![now - 7 * DAY, now], |r| {
+        .query_map(params![now - 7 * DAY, now, curated], |r| {
             Ok(Item {
                 name: r.get(0)?,
                 code: r.get(1)?,
