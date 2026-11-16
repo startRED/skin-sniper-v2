@@ -13,8 +13,10 @@ let browser;
 try {
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('O painel de exemplo não iniciou.')), 30000);
+    let output = '';
     vite.stdout.on('data', chunk => {
-      if (chunk.toString().replace(/\x1b\[[0-9;]*m/g, '').includes('Local:')) { clearTimeout(timeout); resolve(); }
+      output += chunk.toString();
+      if (output.replace(/\x1b\[[0-9;]*m/g, '').includes('Local:')) { clearTimeout(timeout); resolve(); }
     });
     vite.once('exit', code => { clearTimeout(timeout); reject(new Error(`Servidor saiu: ${code}`)); });
     vite.once('error', reject);
