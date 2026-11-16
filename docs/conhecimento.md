@@ -115,6 +115,18 @@ parâmetro incorreto ou bloqueio de taxa. Três sondas anônimas espaçadas resp
 As duas primeiras omitiram o sort; a terceira reproduziu também sort field=0/direction=0.
 Duas sondas adicionais, também espaçadas: listagens com filtro seed 58–59 (200, 58356 bytes) e
 histórico do mesmo nome (200, 270361 bytes). As cinco consultas esgotaram o limite autorizado.
+Diagnóstico de `QueryListingsForItem`, sem consultas extras: WARN em cada tentativa nula,
+INFO quando a tentativa 2 recupera e nos demais sucessos com filtro seed/float. Ambos são gravados com o filtro INFO padrão.
+`attempt` vale 1 ou 2; `via_alt` identifica a saída. `elapsed_with_wait_ms` mede a tentativa
+incluindo a espera na fila e leitura do corpo, não o tempo da Steam nem os 5 s entre tentativas.
+`query` contém apenas código G validado (até 256 caracteres), `start`/`count` inteiros,
+`seed_min`/`seed_max` convertidos de strings inteiras, `float_min`/`float_max` finitos e
+`exterior` restrito a WearCategory0–4. Campos inválidos são omitidos.
+`response` contém `status` HTTP e `bytes` lidos; `top_keys` só admite data/success/error/message,
+`success` só booleano ou número. `total_count`/`start` inteiros e `more` booleano/inteiro vêm de
+`data`; `returned` é o tamanho de `data.listings` quando é array. Campos ausentes não viram zero.
+Não registra parâmetros brutos, nomes, URLs, cabeçalhos, cookies nem corpo cru.
+
 Não foi capturado corpo nulo ao vivo. `testdata/steam_actions_null_contract.json` é
 contrato reconstruído do diagnóstico, não captura bruta. Uma página vazia real já tem
 fixture em `steam_actions_karambit_doppler.json` e continua válida.

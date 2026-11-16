@@ -1333,7 +1333,20 @@ impl SteamClient {
                 .header("x-valve-request-type", "queryAction")
                 .header("accept", "application/json, text/javascript, */*");
             let response = self
-                .send_checked(ep, req, true, Some(envelope_problem), attempt == 0)
+                .send_checked(
+                    ep,
+                    req,
+                    true,
+                    ResponseCheck {
+                        check: Some(envelope_problem),
+                        reset_on_success: attempt == 0,
+                        diagnostic: (method == "QueryListingsForItem").then(|| ListingDiagnostic {
+                            query: listing_query_diagnostic(qp),
+                            attempt: attempt + 1,
+                            started: Instant::now(),
+                        }),
+                    },
+                )
                 .await;
             if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1429,7 +1442,7 @@ impl SteamClient {
             .get(self.url(path))
             .query(query)
             .header("accept", "application/json");
-        let result = self.send_alt(ep, &req, None, true).await?;
+        let result = self.send_alt(ep, &req, ResponseCheck::plain()).await?;
         let (parts, body) = match result {
             Ok(response) => response,
             Err(e) => return Some(Err(e)),
@@ -1486,7 +1499,8 @@ impl SteamClient {
         req: RequestBuilder,
         auth: bool,
     ) -> Result<(Parts, Vec<u8>)> {
-        self.send_checked(ep, req, auth, None, true).await
+        self.send_checked(ep, req, auth, ResponseCheck::plain())
+            .await
     }
 
     /// Como `send`, mas `check(status, corpo)` pode dizer que a resposta (200) não é o envelope esperado:
@@ -1496,8 +1510,7 @@ impl SteamClient {
         ep: Endpoint,
         mut req: RequestBuilder,
         auth: bool,
-        check: Option<EnvelopeCheck>,
-        reset_on_success: bool,
+        options: ResponseCheck,
     ) -> Result<(Parts, Vec<u8>)> {
         if self.public_only && matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
             return Err(Error::PublicOnly);
@@ -1567,7 +1580,7 @@ impl SteamClient {
                 Slot::Main => break,
                 Slot::Wait(w) => tokio::time::sleep(w).await,
                 Slot::Alt => {
-                    if let Some(r) = self.send_alt(ep, &req, check, reset_on_success).await {
+                    if let Some(r) = self.send_alt(ep, &req, options.clone()).await {
                         return r;
                     }
                 }
@@ -1614,9 +1627,7 @@ impl SteamClient {
                 return Err(Error::Transport(e));
             }
         };
-        let result = self
-            .finish(ep, resp, sent_by, check, reset_on_success, false)
-            .await;
+        let result = self.finish(ep, resp, sent_by, options, false).await;
         crate::research::finish(attempt, research_outcome(&result)).await;
         result
     }
@@ -1661,8 +1672,7 @@ impl SteamClient {
         &self,
         ep: Endpoint,
         req: &RequestBuilder,
-        check: Option<EnvelopeCheck>,
-        reset_on_success: bool,
+        options: ResponseCheck,
     ) -> Option<Result<(Parts, Vec<u8>)>> {
         self.alt.as_ref()?;
         let mut request = req.try_clone()?.build().ok()?;
@@ -1714,9 +1724,7 @@ impl SteamClient {
                 None
             }
             Ok(r) => {
-                let result = self
-                    .finish(ep, r, None, check, reset_on_success, true)
-                    .await;
+                let result = self.finish(ep, r, None, options, true).await;
                 crate::research::finish(attempt, research_outcome(&result)).await;
                 Some(result)
             }
@@ -1739,8 +1747,7 @@ impl SteamClient {
         ep: Endpoint,
         resp: reqwest::Response,
         sent_by: Option<String>,
-        check: Option<EnvelopeCheck>,
-        reset_on_success: bool,
+        options: ResponseCheck,
         via_alt: bool,
     ) -> Result<(Parts, Vec<u8>)> {
         let now = Instant::now();
@@ -1816,7 +1823,7 @@ impl SteamClient {
             }
             body.extend_from_slice(&chunk);
         }
-        let bad_envelope = check.and_then(|f| f(status.as_u16(), &body));
+        let bad_envelope = options.check.and_then(|f| f(status.as_u16(), &body));
         // `{"data":null}` com 200 costuma ser recusa daquela consulta (filtro de seed a frio): conta uma vez por
         // consulta, só na repetição, e o disjuntor abre com 3 consultas nulas seguidas. Antes a 1ª tentativa e a
         // repetição contavam as duas; em 12/11/2026, ~10 por hora pausavam toda a leitura de seed/float.
@@ -1828,6 +1835,25 @@ impl SteamClient {
                     v.as_object().is_some_and(|o| o.len() == 1)
                         && v.get("data") == Some(&Value::Null)
                 });
+        if let Some(diagnostic) = &options.diagnostic {
+            let response = listing_response_diagnostic(status.as_u16(), &body);
+            let elapsed_with_wait_ms = diagnostic.started.elapsed().as_millis() as u64;
+            let query = &diagnostic.query;
+            let attempt = diagnostic.attempt;
+            if null_data {
+                tracing::warn!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, "Steam listings: data nula");
+            } else if bad_envelope.is_none() && status.is_success() {
+                if attempt == 2 {
+                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, "Steam listings: recuperação");
+                } else if query.get("seed_min").is_some()
+                    || query.get("seed_max").is_some()
+                    || query.get("float_min").is_some()
+                    || query.get("float_max").is_some()
+                {
+                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, "Steam listings: sucesso filtrado");
+                }
+            }
+        }
         {
             let mut g = self.inner.lock().unwrap();
             let i = if via_alt {
@@ -1846,11 +1872,11 @@ impl SteamClient {
             if status.is_server_error()
                 || status == StatusCode::FORBIDDEN
                 || (bad_envelope.is_some() && !null_data)
-                || (null_data && !reset_on_success)
+                || (null_data && !options.reset_on_success)
             {
                 g.breakers[ep.idx()].on_fail(now);
             } else if null_data {
-            } else if reset_on_success {
+            } else if options.reset_on_success {
                 g.breakers[ep.idx()].on_ok();
             }
         }
@@ -1943,6 +1969,112 @@ fn envelope_problem(status: u16, body: &[u8]) -> Option<String> {
     ))
 }
 
+#[derive(Clone)]
+struct ListingDiagnostic {
+    query: Value,
+    attempt: u8,
+    started: Instant,
+}
+
+#[derive(Clone)]
+struct ResponseCheck {
+    check: Option<EnvelopeCheck>,
+    reset_on_success: bool,
+    diagnostic: Option<ListingDiagnostic>,
+}
+
+impl ResponseCheck {
+    fn plain() -> Self {
+        Self {
+            check: None,
+            reset_on_success: true,
+            diagnostic: None,
+        }
+    }
+}
+
+fn listing_query_diagnostic(qp: &Value) -> Value {
+    let q = &qp[0];
+    let mut out = serde_json::Map::new();
+    if let Some(code) = q["strItemName"]
+        .as_str()
+        .filter(|s| s.len() <= 256 && super::listings::is_item_code(s))
+    {
+        out.insert("code".into(), code.into());
+    }
+    for key in ["start", "count"] {
+        if let Some(n) = q[key].as_i64() {
+            out.insert(key.into(), n.into());
+        }
+    }
+    for (key, source) in [("seed_min", "int_min"), ("seed_max", "int_max")] {
+        if let Some(n) = q["propertyFilters"]["1"][source]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            out.insert(key.into(), n.into());
+        }
+    }
+    for key in ["float_min", "float_max"] {
+        if let Some(n) = q["propertyFilters"]["2"][key]
+            .as_f64()
+            .filter(|n| n.is_finite())
+        {
+            out.insert(key.into(), n.into());
+        }
+    }
+    if let Some(values) = q["filters"]["Exterior"].as_array() {
+        let allowed = [
+            "WearCategory0",
+            "WearCategory1",
+            "WearCategory2",
+            "WearCategory3",
+            "WearCategory4",
+        ];
+        let exterior: Vec<Value> = allowed
+            .into_iter()
+            .filter(|w| values.iter().any(|v| v.as_str() == Some(w)))
+            .map(Value::from)
+            .collect();
+        if !exterior.is_empty() {
+            out.insert("exterior".into(), exterior.into());
+        }
+    }
+    Value::Object(out)
+}
+
+fn listing_response_diagnostic(status: u16, body: &[u8]) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("status".into(), status.into());
+    out.insert("bytes".into(), body.len().into());
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        let keys: Vec<Value> = ["data", "success", "error", "message"]
+            .into_iter()
+            .filter(|k| v.get(k).is_some())
+            .map(Value::from)
+            .collect();
+        out.insert("top_keys".into(), keys.into());
+        if let Some(success) = v.get("success").filter(|v| v.is_boolean() || v.is_number()) {
+            out.insert("success".into(), success.clone());
+        }
+        for key in ["total_count", "start"] {
+            if let Some(n) = v["data"][key].as_i64() {
+                out.insert(key.into(), n.into());
+            }
+        }
+        if let Some(more) = v["data"]
+            .get("more")
+            .filter(|v| v.is_boolean() || v.is_i64())
+        {
+            out.insert("more".into(), more.clone());
+        }
+        if let Some(listings) = v["data"]["listings"].as_array() {
+            out.insert("returned".into(), listings.len().into());
+        }
+    }
+    Value::Object(out)
+}
+
 /// Confere o corpo de uma resposta 200; `Some(diagnóstico)` = fora do formato esperado.
 type EnvelopeCheck = fn(u16, &[u8]) -> Option<String>;
 
@@ -2000,7 +2132,7 @@ mod tests {
                 .header("authorization", "Bearer must-not-send")
         };
         c.send(Endpoint::Legacy, request(), true).await.unwrap();
-        c.send_alt(Endpoint::History, &request(), None, true)
+        c.send_alt(Endpoint::History, &request(), ResponseCheck::plain())
             .await
             .unwrap()
             .unwrap();
@@ -2023,8 +2155,7 @@ mod tests {
             c.send_alt(
                 Endpoint::Listings,
                 &c.request(Method::POST, "/public"),
-                None,
-                true
+                ResponseCheck::plain()
             )
             .await,
             Some(Err(Error::PublicOnly))
@@ -3272,5 +3403,89 @@ fn jittered(now: Instant, spacing: Duration) -> Instant {
         now + d
     } else {
         now.checked_sub(d).unwrap_or(now)
+    }
+}
+
+#[cfg(test)]
+mod listing_diagnostic_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn listing_diagnostic_real_response_and_safe_query() {
+        let body = include_bytes!("../../testdata/steam_actions_fiveseven_seed904.json");
+        let q = listing_query_diagnostic(
+            &json!([{"strItemName":"G180320BF063004","start":0,"count":20,"filters":{"Exterior":["WearCategory1"]},"propertyFilters":{"1":{"int_min":"904","int_max":"904"},"2":{"float_min":0.1,"float_max":0.2}}}]),
+        );
+        assert_eq!(q["code"], "G180320BF063004");
+        assert_eq!(q["seed_min"], 904);
+        assert_eq!(q["float_max"], 0.2);
+        assert_eq!(q["exterior"], json!(["WearCategory1"]));
+        let r = listing_response_diagnostic(200, body);
+        assert_eq!(r["status"], 200);
+        assert_eq!(r["bytes"], body.len());
+        assert_eq!(r["returned"], 18);
+        assert_eq!(r["total_count"], 18);
+        assert_eq!(r["more"], false);
+        assert_eq!(r["start"], 0);
+    }
+    #[test]
+    fn listing_diagnostic_rejects_arbitrary_secrets() {
+        let q = listing_query_diagnostic(
+            &json!([{"strItemName":"secret","start":"secret","count":"secret","filters":{"Exterior":["secret"]},"propertyFilters":{"1":{"int_min":"secret"},"2":{"float_min":"secret"}},"cookie":"secret"}]),
+        );
+        assert!(!q.to_string().contains("secret"));
+        let r=listing_response_diagnostic(200,br#"{"secret":"secret","success":"secret","data":{"total_count":"secret","start":"secret","more":"secret","listings":"secret"}}"#);
+        assert!(!r.to_string().contains("secret"));
+        assert!(r.get("returned").is_none());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn filtered_success_is_visible_at_info_without_secrets() {
+        use axum::{Router, routing::get};
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Capture(Arc::new(Mutex::new(Vec::new())));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let app = Router::new().route(
+            "/market/actions",
+            get(|| async { include_str!("../../testdata/steam_actions_fiveseven_seed904.json") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = SteamClient::with_base(&format!("http://{addr}")).unwrap();
+        let query = json!([{ "strItemName": "G180320BF063004", "propertyFilters": {"1": {"int_min": "904", "int_max": "904"}}, "cookie": "segredo-teste" }]);
+        client
+            .action(Endpoint::Listings, "QueryListingsForItem", &query)
+            .await
+            .unwrap();
+        let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("Steam listings: sucesso filtrado"), "{log}");
+        assert!(
+            log.contains("G180320BF063004")
+                && log.contains("904")
+                && log.contains("returned")
+                && log.contains("18"),
+            "{log}"
+        );
+        assert!(!log.contains("segredo-teste"), "{log}");
     }
 }
