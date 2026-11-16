@@ -115,12 +115,23 @@ parâmetro incorreto ou bloqueio de taxa. Três sondas anônimas espaçadas resp
 As duas primeiras omitiram o sort; a terceira reproduziu também sort field=0/direction=0.
 Duas sondas adicionais, também espaçadas: listagens com filtro seed 58–59 (200, 58356 bytes) e
 histórico do mesmo nome (200, 270361 bytes). As cinco consultas esgotaram o limite autorizado.
-Diagnóstico de `QueryListingsForItem`, sem consultas extras: WARN em cada tentativa nula,
-INFO em toda recuperação na tentativa 2, sem amostragem. Sucessos filtrados de primeira tentativa
+Diagnóstico de `QueryListingsForItem`, sem consultas extras e enquanto houver orçamento: WARN em cada
+tentativa nula e INFO em toda recuperação na tentativa 2, sem amostragem. Sucessos filtrados de primeira tentativa
 são amostrados globalmente por cliente: primeiro, sétimo, décimo terceiro e assim por diante
-(20 linhas em 115 sucessos). Nulos e recuperações não avançam o contador. A amostra pode não
-conter determinada skin; os pares nulo + recuperação ficam preservados e comparáveis pelo
-código, filtro e tentativa. Todos esses registros passam pelo filtro INFO padrão.
+(20 linhas em 115 sucessos). Nulos e recuperações não avançam o contador da amostragem. A amostra pode não
+conter determinada skin; os pares nulo + recuperação emitidos são comparáveis pelo
+código, filtro e tentativa. Todos esses registros passam pelo filtro INFO padrão. Esses três níveis
+compartilham o orçamento de 2000 linhas por execução; a amostragem de 1/6 continua enquanto há crédito.
+Ao atingir o limite, uma INFO adicional avisa que o diagnóstico parou; o orçamento só reinicia com um novo
+processo, não por cliente, fila ou 429. Os avisos originais do scheduler “data nula: o alvo descansa” e
+“consulta falhou” ficam fora desse orçamento.
+
+A revisão principal informou 25529 linhas em 12 dias e estimou 1300 linhas/dia, 0,2 MB/dia e retenção
+de 75 para 16 dias com rotação de 3 arquivos de 5 MiB. Essas estimativas são atribuídas à revisão:
+25529/12 dá cerca de 2127 linhas/dia, portanto não confirma 1300. Em 8,2 horas, a revisão informou
+225 nulas na tentativa 1, 92 na tentativa 2 e 133 recuperações: 450 linhas, cerca de 55 por hora;
+mais cerca de 19 linhas de sucesso amostrado por hora, segundo a revisão principal, levam à estimativa informada de aproximadamente 1800 linhas novas por dia. O limite é por
+linhas, não por bytes.
 `attempt` vale 1 ou 2; `via_alt` identifica a saída. `elapsed_with_wait_ms` mede a tentativa
 incluindo a espera na fila e leitura do corpo, não o tempo da Steam nem os 5 s entre tentativas.
 `response_elapsed_ms` mede do envio ao fim da leitura do corpo, antes do parse, sem a fila

@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,26 @@ use serde_json::Value;
 pub const BASE: &str = "https://steamcommunity.com";
 /// Moeda que o painel espera (BRL).
 pub const CURRENCY_BRL: i32 = 7;
+
+// Preserva histórico durante coleta temporária de cerca de um dia.
+const DIAGNOSTIC_LIMIT: usize = 2000;
+static DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn emit_diagnostic(counter: &AtomicUsize, limit: usize, emit: impl FnOnce()) {
+    let mut n = counter.load(Ordering::Relaxed);
+    while n < limit {
+        match counter.compare_exchange_weak(n, n + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => {
+                emit();
+                if n + 1 == limit {
+                    tracing::info!("Steam listings: diagnóstico de anúncios parou por orçamento");
+                }
+                return;
+            }
+            Err(current) => n = current,
+        }
+    }
+}
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -1859,10 +1880,14 @@ impl SteamClient {
             let query = &diagnostic.query;
             let attempt = diagnostic.attempt;
             if null_data {
-                tracing::warn!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: data nula");
+                emit_diagnostic(&DIAGNOSTIC_COUNT, DIAGNOSTIC_LIMIT, || {
+                    tracing::warn!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: data nula");
+                });
             } else if bad_envelope.is_none() && status.is_success() {
                 if attempt == 2 {
-                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: recuperação");
+                    emit_diagnostic(&DIAGNOSTIC_COUNT, DIAGNOSTIC_LIMIT, || {
+                        tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: recuperação");
+                    });
                 } else if (query.get("seed_min").is_some()
                     || query.get("seed_max").is_some()
                     || query.get("float_min").is_some()
@@ -1871,7 +1896,9 @@ impl SteamClient {
                         &mut self.inner.lock().unwrap().filtered_success_sample,
                     )
                 {
-                    tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: sucesso filtrado");
+                    emit_diagnostic(&DIAGNOSTIC_COUNT, DIAGNOSTIC_LIMIT, || {
+                        tracing::info!(%query, %response, attempt, via_alt, elapsed_with_wait_ms, response_elapsed_ms, "Steam listings: sucesso filtrado");
+                    });
                 }
             }
         }
@@ -3450,6 +3477,32 @@ mod listing_diagnostic_tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn diagnostic_budget_stops_at_limit() {
+        let output = Capture(Arc::new(Mutex::new(Vec::new())));
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        for i in 0..10 {
+            emit_diagnostic(&counter, 3, || tracing::info!("diagnóstico teste"));
+            if i == 2 {
+                let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+                assert_eq!(log.lines().count(), 4);
+                assert!(log.lines().last().unwrap().contains("orçamento"));
+            }
+        }
+        let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(log.lines().count(), 4);
+        assert_eq!(log.matches("diagnóstico teste").count(), 3);
+        assert_eq!(log.matches("parou por orçamento").count(), 1);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
 
     #[test]
