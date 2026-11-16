@@ -174,6 +174,32 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 
 ## Caça
 
+Registro para comparação: `reads` recebe `choice_range` (alvo + início + fim),
+`choice_gap` (intervalo real na escolha), `choice_control`, `eligible_ranges`
+(quantidade de faixas elegíveis), `oldest_range` e `oldest_gap` (mais velha elegível;
+intervalo nulo se nunca vista). O retrato é consumido uma vez no resultado principal.
+Paralelas, conferências, livros e leituras sem escolha comparável deixam os novos campos
+nulos. Migração aditiva conserva linhas antigas com nulos. Não muda escolhas nem corta leituras.
+`outcome` marca a leitura com escolha: `ok`, ou `failed` quando a consulta saiu para a Steam e falhou
+(retrato gravado uma vez, `new_listings` nulo, sem nota; o ajuste ignora essas linhas). Nulo nas demais.
+A falha devolve à faixa a leitura anterior (ou nenhuma), sem mudar o descanso existente: por `data` nula ela volta a concorrer depois do descanso; nos demais erros pode voltar já na próxima escolha, e os registros de falha por faixa mostram a repetição.
+
+Comparação offline independente: `SNIPER_COMPARISON_DB=<cópia> SNIPER_COMPARISON_SINCE=<unix> SNIPER_COMPARISON_UNTIL=<unix> cargo test compare_recorded_reads -- --ignored --nocapture`.
+Abre apenas a cópia em modo somente leitura, sem migração, configurações, caça ou rede.
+Só conta leituras `ok` com `at` no período comum (início e fim inclusivos), o mesmo para os dois
+braços, e o relatório informa o período. Falhas não viram zero; vazio bem-sucedido conta zero.
+Cada faixa exata e banda (`<600`, `600-3600`, `3600-21600`, `>=21600` segundos)
+precisa de 30 leituras em CADA braço; abaixo disso informa dados insuficientes.
+`fresh` mede anúncios raros novos dentro do saldo por leitura, creditados uma vez.
+`new_listings` guarda todos os novos devolvidos pelo registro, sem recorte de saldo.
+Falha de registro mantém nulo, nunca zero; leituras antigas também ficam nulas.
+O relatório mostra as duas medidas separadamente por braço/faixa/banda, cada uma com
+mínimo de 30 leituras válidas em cada braço; nulos não entram na medida de todos os novos.
+Testes offline cobrem totais distintos (4 novos contra 1 no saldo), nulos e o limiar 29/30.
+Primeiras leituras são excluídas. Bandas ainda contêm esperas diferentes, e seleção,
+saldo e mercado podem variar. O relatório mostra associação com a agenda, sem causalidade.
+
+
 1. **Catálogo e descoberta:** ao subir, importa `assets/catalog/curated.json` sem apagar medições anteriores.
    Só os nomes da curadoria participam das novas seleções; itens removidos continuam no banco para histórico
    e acompanhamento de oportunidades ativas. Nome-base, desgaste e variante são distintos; códigos gerados

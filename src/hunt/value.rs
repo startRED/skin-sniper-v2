@@ -402,7 +402,8 @@ async fn step(h: &Hunt, now: i64) -> anyhow::Result<()> {
                 .collect::<rusqlite::Result<_>>()?;
             let rows: Vec<ReadRow> = c
                 .prepare(
-                    "SELECT at, arm, fresh, weight, gap FROM reads WHERE at >= ?1 ORDER BY at, rowid",
+                    "SELECT at, arm, fresh, weight, gap FROM reads WHERE at >= ?1 AND outcome IS NOT 'failed'
+                     ORDER BY at, rowid",
                 )?
                 .query_map([since], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))

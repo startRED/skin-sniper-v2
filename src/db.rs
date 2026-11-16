@@ -202,6 +202,14 @@ const MIGRATIONS: &[&str] = &[
     "UPDATE arm_stats SET r = 0, exposure = 0 WHERE id LIKE 'r:%';",
     crate::web::learning_alerts::SCHEMA,
     crate::web::learning_alerts::FOLLOWUP_SCHEMA,
+    "ALTER TABLE reads ADD COLUMN choice_range TEXT;
+     ALTER TABLE reads ADD COLUMN choice_gap INTEGER;
+     ALTER TABLE reads ADD COLUMN choice_control INTEGER;
+     ALTER TABLE reads ADD COLUMN eligible_ranges INTEGER;
+     ALTER TABLE reads ADD COLUMN oldest_range TEXT;
+     ALTER TABLE reads ADD COLUMN oldest_gap INTEGER;
+     ALTER TABLE reads ADD COLUMN new_listings INTEGER;
+     ALTER TABLE reads ADD COLUMN outcome TEXT;",
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -604,5 +612,25 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{t}: só a de 59 dias fica");
         }
+    }
+    #[test]
+    fn comparison_migration_preserves_old_reads() {
+        let mut c = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.execute("INSERT INTO reads(at,arm,fresh) VALUES(1,'r:a',2)", [])
+            .unwrap();
+        c.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64)
+            .unwrap();
+        migrate(&mut c).unwrap();
+        let row: (i64, Option<String>, Option<u32>, Option<String>) = c
+            .query_row(
+                "SELECT fresh, choice_range, new_listings, outcome FROM reads",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (2, None, None, None));
     }
 }
