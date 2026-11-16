@@ -493,6 +493,118 @@ mod tests {
         assert_eq!(endpoint, "sales");
     }
 
+    const NOW: i64 = 1_800_000_000;
+    fn clock() -> i64 {
+        NOW
+    }
+
+    /// Skins de tabela fora da curadoria: o coletor lê, a caça (`candidates`, `select_ranges`) não admite.
+    #[tokio::test]
+    async fn pattern_targets_reach_the_collector_but_not_hunt() {
+        const TARGETS: [&str; 3] = [
+            "AWP | Fade (Factory New)",
+            "Glock-18 | Fade (Factory New)",
+            "P250 | Plum Netting (Field-Tested)",
+        ];
+        const CONTROL: &str = "AK-47 | Redline (Field-Tested)";
+        let table: HashSet<String> = table_skins().into_iter().collect();
+        assert!(TARGETS.iter().all(|t| table.contains(skin_base(t))));
+        assert!(!table.contains(skin_base(CONTROL)));
+
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            // metadados fortes em todos (código, piso, giro): só a curadoria separa o controle dos alvos
+            for (i, name) in TARGETS.iter().chain([&CONTROL]).enumerate() {
+                c.execute(
+                    "INSERT INTO items(name,g_code,floor_usd_cents,sales_per_day,dispersion,history_at,updated_at)
+                     VALUES (?1,?2,1000,10,0.2,?3,1)",
+                    params![name, format!("G{i:08X}1"), NOW - 100],
+                )?;
+            }
+            c.execute("INSERT INTO catalog_references(name,observed_at,rank) VALUES (?1,1,0)", [CONTROL])?;
+            // proteção offline: a decisão de pesquisa é gravada antes de qualquer envio; abortá-la impede o HTTP
+            c.execute_batch("CREATE TRIGGER offline BEFORE INSERT ON research_decisions BEGIN SELECT RAISE(ABORT,'offline'); END")
+        })
+        .await
+        .unwrap();
+
+        let wide = catalog::load_pattern_items(&db).await.unwrap();
+        let curated = catalog::load_items(&db).await.unwrap();
+        let mut found = catalog_names(&wide);
+        found.sort();
+        assert_eq!(found, {
+            let mut t = TARGETS.map(String::from).to_vec();
+            t.sort();
+            t
+        });
+
+        let (floors, learned, deals, boost) = Default::default();
+        let ctx = catalog::Ctx {
+            ratio: 5.0,
+            saldo: 1_000_000,
+            now: NOW,
+            boost: &boost,
+            floors: &floors,
+            learned: &learned,
+            deals: &deals,
+        };
+        let selected = |items: &[Item]| -> Vec<String> {
+            let mut v: Vec<String> = catalog::select_ranges(items, &ctx)
+                .0
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            v.sort();
+            v
+        };
+        // com a leitura ampla a caça os admitiria: a curadoria é o que os barra
+        let (wide_hunt, wide_rest) = (selected(&wide), candidates(wide, 0, None, NOW));
+        assert!(TARGETS.iter().all(|t| wide_hunt.iter().any(|n| n == t)));
+        assert!(TARGETS.iter().all(|t| wide_rest.iter().any(|n| n == t)));
+        assert_eq!(selected(&curated), [CONTROL]);
+        assert_eq!(candidates(curated, 0, None, NOW), [CONTROL]);
+
+        // o coletor real, um alvo vencido por vez; os demais nomes lidos agora
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let h = Hunt::with_clock(
+            crate::hunt::HuntDeps {
+                settings: crate::settings::SettingsStore::new(db.clone()),
+                db: db.clone(),
+                steam: std::sync::Arc::new(
+                    crate::steam::client::SteamClient::with_base("http://127.0.0.1:1").unwrap(),
+                ),
+                csfloat: std::sync::Arc::new(
+                    crate::csfloat::CsfloatClient::with_base("http://127.0.0.1:1").unwrap(),
+                ),
+                events,
+                telegram: None,
+            },
+            clock,
+        );
+        for target in TARGETS {
+            {
+                let mut s = h.lock();
+                s.learn_at = NOW - GAP;
+                s.learn_seen = TARGETS
+                    .iter()
+                    .chain([&CONTROL])
+                    .filter(|n| **n != target)
+                    .map(|n| (n.to_string(), NOW))
+                    .collect();
+            }
+            maybe_step(&h).await;
+            assert_eq!(h.lock().learn_seen.get(target), Some(&NOW), "{target}");
+        }
+        let sent: i64 = db
+            .call(|c| c.query_row("SELECT count(*) FROM research_decisions", [], |r| r.get(0)))
+            .await
+            .unwrap();
+        assert_eq!(
+            sent, 0,
+            "nenhuma decisão (nem envio) passou da proteção offline"
+        );
+    }
+
     #[test]
     fn candidates_use_measured_or_fresh_reference_without_inventing_price_or_sales() {
         let item = Item {

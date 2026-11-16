@@ -1267,20 +1267,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pattern_research_reaches_unlisted_names_without_admitting_them_to_hunt() {
-        let (db, _dir) = crate::db::temp_db();
-        db.call(|c| {
-            for name in ["AWP | Fade (Factory New)", "Glock-18 | Fade (Factory New)", "P250 | Plum Netting (Field-Tested)", "AWP | PAW (Field-Tested)"] {
-                c.execute("INSERT INTO items(name,updated_at) VALUES (?1,1)", [name])?;
-            }
-            c.execute("INSERT INTO catalog_references(name,observed_at,rank) VALUES ('AWP | PAW (Field-Tested)',1,0)", [])?;
-            Ok(())
-        }).await.unwrap();
-        assert_eq!(load_items(&db).await.unwrap().len(), 1);
-        assert_eq!(load_pattern_items(&db).await.unwrap().len(), 4);
-    }
-
-    #[tokio::test]
     async fn history_triage_rejects_old_empty_or_future_sales_points() {
         let (db, _dir) = crate::db::temp_db();
         let now = crate::db::now_unix();
