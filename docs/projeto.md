@@ -226,7 +226,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 1,00 e 10 % depois da taxa
      (hoje ≈ R$ 7,57). Abaixo disso a taxa come o lucro: até 06/11, 9 000 consultas em skins de R$ 1,60–8,50 deram
      um achado de R$ 0,32. Os 30 % são hipótese, não medida.
-3. **Ritmo:** grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
+3. **Ritmo:** teste limitado aprovado pelo Erick em 15/11/2026 em lugar do teto anterior de ~100 consultas/h: descanso de anúncios começa em 28 s,
+   reduz 2 s após cada 6 h de operação sem 429 em Listings, até o piso autorizado de 20 s.
+   Qualquer 429 em Listings, na principal ou extra, volta a 28 s e impede redução por 24 h desde
+   o último 429. Depois desse prazo, espera mais 6 h limpas (interpretação conservadora).
+   Degrau e prazo sobrevivem ao reinício; a janela de 6 h recomeça ao abrir, sem contar tempo fechado.
+   A 20 s, o teto aritmético é 180 leituras/h antes das demais esperas; não foi medido como seguro.
+   Grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
    sessão/login/compra. São divisões operacionais baseadas nas respostas medidas, não cotas oficiais da Valve.
    Sessão e compra não herdam o 429 de uma varredura de anúncios. Entre duas consultas quaisquer há no mínimo 3 s, de
    qualquer balde ou saída: nunca rajada. As leituras de mercado somadas (todos os endpoints) têm ainda um piso de 12 s (300/h), inclusive
@@ -301,7 +307,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
    (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
    de ligar não tem com o que comparar. **Descanso da leitura de anúncios (10/11):** alvo raro ou de float só é
-   escolhido 28 s depois da última leitura de anúncios (era 24 s, depois 36 s e 42 s). **Descanso do alvo que
+   escolhido após o descanso adaptativo do item 3 desde a última leitura de anúncios. **Descanso do alvo que
    falha (12/11):** alvo cuja consulta volta `data` nula descansa 5 min, dobrando a cada falha seguida até 1 h, e
    volta ao normal na primeira leitura que der certo; antes era escolhido de novo ~80 s depois e dois alvos
    gastavam 36 % das tentativas de anúncios falhando (`conhecimento.md` 1.3.1). **Foco em seed e float (11/11):**
@@ -329,8 +335,8 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    em 6 dias foram 5 235 anúncios de comum avaliados para 1 achado de R$ 0,93. Ela gastava 150 das ~277 consultas
    por hora do app (livro 94, interface antiga 48, busca 8; medido em 11/11, 04:00–10:30Z). Saem junto: os alvos
    `barato` do painel, a exploração de alvo novo e os pedidos de compra sugeridos (leem o livro dos alvos comuns).
-   O código continua (os testes ligam a caça). Total esperado: ~86 anúncios/h + ~11 de descoberta ≈ 100/h, o teto
-   pedido pelo Erick; não é número seguro medido — as 8 janelas livres desde 06/11 (123 a 262 consultas/h de
+   O código continua (os testes ligam a caça). O teto anterior de ~100 consultas/h foi substituído pelo teste limitado do item 3.
+   Nenhum desses ritmos foi comprovado como seguro — as 8 janelas livres desde 06/11 (123 a 262 consultas/h de
    anúncios + histórico) terminaram todas em 429 depois de 1 a 7 h, sem relação com o ritmo.
    Em 10/11, ~200 leituras de anúncios/h por 3 h terminaram em 429 desse balde por horas, com o livro respondendo;
    124–153/h tinham rodado 3–4 h sem 429. O número é hipótese de poucas horas. O achado ativo é conferido a cada

@@ -518,7 +518,65 @@ impl Breaker {
 
 type PaceHook = Arc<dyn Fn(String) + Send + Sync>;
 
+// Janela monotônica reinicia ao abrir; o hold usa prazo civil para sobreviver ao fechamento.
+struct ListingsRest {
+    seconds: i64,
+    clean_since: Instant,
+    hold_until: i64,
+}
+
+impl ListingsRest {
+    fn new(now: Instant) -> Self {
+        Self {
+            seconds: 28,
+            clean_since: now,
+            hold_until: 0,
+        }
+    }
+
+    fn current(&mut self, now: Instant, unix: i64) -> i64 {
+        if unix < self.hold_until {
+            self.clean_since = now;
+        } else if self.hold_until != 0 {
+            self.hold_until = 0;
+            self.clean_since = now;
+        } else {
+            let steps = now.saturating_duration_since(self.clean_since).as_secs() / (6 * 3600);
+            if steps > 0 {
+                self.seconds = (self.seconds - 2 * steps.min(4) as i64).max(20);
+                self.clean_since += Duration::from_secs(steps * 6 * 3600);
+            }
+        }
+        self.seconds
+    }
+
+    fn limited(&mut self, now: Instant, unix: i64) {
+        self.seconds = 28;
+        self.clean_since = now;
+        self.hold_until = unix.saturating_add(24 * 3600);
+    }
+
+    fn restore(saved: &str, now: Instant) -> Self {
+        let fields: Vec<_> = saved.split('|').collect();
+        if fields.len() == 3
+            && fields[0] == "rest"
+            && let (Ok(seconds), Ok(hold_until)) =
+                (fields[1].parse::<i64>(), fields[2].parse::<i64>())
+            && [20, 22, 24, 26, 28].contains(&seconds)
+            && hold_until >= 0
+        {
+            return Self {
+                seconds: if hold_until > 0 { 28 } else { seconds },
+                clean_since: now,
+                hold_until,
+            };
+        }
+        Self::new(now)
+    }
+}
+
 struct Inner {
+    listings_rest: ListingsRest,
     limiter: Limiter,
     /// Sessão e ações do usuário não herdam a pausa das consultas de anúncios.
     control: Limiter,
@@ -679,6 +737,7 @@ impl SteamClient {
             public_only: true,
             base: base.trim_end_matches('/').to_string(),
             inner: Mutex::new(Inner {
+                listings_rest: ListingsRest::new(Instant::now()),
                 limiter: Limiter::new(Instant::now()),
                 control: Limiter::new(Instant::now()),
                 breakers: [Breaker::new(); Endpoint::ALL.len()],
@@ -1164,11 +1223,13 @@ impl SteamClient {
             .filter(|t| *t > now)
             .map_or(0, |t| unix_in(t - now));
         format!(
-            "{};{};{};{}",
+            "{};{};{};{};rest|{}|{}",
             g.limiter.saved(now, anon),
             g.side.saved(now, 0),
             g.alt_limiter.saved(now, 0),
-            g.control.saved(now, 0)
+            g.control.saved(now, 0),
+            g.listings_rest.seconds,
+            g.listings_rest.hold_until
         )
     }
 
@@ -1185,6 +1246,7 @@ impl SteamClient {
                 limiter.restore(saved, now);
             }
         }
+        g.listings_rest = ListingsRest::restore(lanes.next().unwrap_or_default(), now);
         g.align_read_pauses(now);
     }
 
@@ -1192,6 +1254,18 @@ impl SteamClient {
     /// campo é o fim das leituras sem login).
     pub fn on_pace_change(&self, f: impl Fn(String) + Send + Sync + 'static) {
         self.inner.lock().unwrap().on_pace = Some(Arc::new(f));
+    }
+
+    /// Chamar antes do lock da caça: o callback só agenda a gravação do snapshot.
+    pub fn listings_rest_secs(&self) -> i64 {
+        let mut g = self.inner.lock().unwrap();
+        let old = (g.listings_rest.seconds, g.listings_rest.hold_until);
+        let now = Instant::now();
+        let rest = g.listings_rest.current(now, unix_in(Duration::ZERO));
+        if old != (g.listings_rest.seconds, g.listings_rest.hold_until) {
+            Self::notify_pace(&mut g, now);
+        }
+        rest
     }
 
     pub fn checkpoint_pace(&self) {
@@ -1621,6 +1695,10 @@ impl SteamClient {
                 let retry = retry_after(&r);
                 let mut g = self.inner.lock().unwrap();
                 g.calls[1].limited += 1;
+                if ep == Endpoint::Listings {
+                    g.listings_rest
+                        .limited(Instant::now(), unix_in(Duration::ZERO));
+                }
                 g.alt_limiter.on_429(Instant::now(), retry);
                 Self::notify_pace(&mut g, Instant::now());
                 drop(g);
@@ -1696,6 +1774,9 @@ impl SteamClient {
             if logged_read {
                 // Trocar o login não libera cota: a próxima leitura anônima também espera a pausa.
                 g.anon_reads_until = Some(now + ANON_AFTER_429);
+            }
+            if ep == Endpoint::Listings {
+                g.listings_rest.limited(now, unix_in(Duration::ZERO));
             }
             g.bucket(ep).on_429(now, retry);
             g.align_read_pauses(now);
@@ -2436,6 +2517,89 @@ mod tests {
         assert!((1795..=1805).contains(&ago.as_secs()), "{ago:?}");
     }
 
+    #[test]
+    fn listings_rest_boundaries_floor_and_repeated_hold() {
+        let t = Instant::now();
+        let mut r = ListingsRest::new(t);
+        for (elapsed, expected) in [
+            (21599, 28),
+            (21600, 26),
+            (43199, 26),
+            (43200, 24),
+            (64800, 22),
+            (86400, 20),
+            (108000, 20),
+        ] {
+            assert_eq!(
+                r.current(t + Duration::from_secs(elapsed), elapsed as i64),
+                expected
+            );
+        }
+        r.limited(t + Duration::from_secs(108000), 108000);
+        assert_eq!(r.seconds, 28);
+        r.limited(t + Duration::from_secs(109000), 109000);
+        assert_eq!(r.hold_until, 195400);
+        assert_eq!(r.current(t + Duration::from_secs(195399), 195399), 28);
+        assert_eq!(r.current(t + Duration::from_secs(195400), 195400), 28);
+        assert_eq!(r.current(t + Duration::from_secs(216999), 216999), 28);
+        assert_eq!(r.current(t + Duration::from_secs(217000), 217000), 26);
+    }
+
+    #[test]
+    fn listings_rest_restart_preserves_step_and_hold_but_not_closed_time() {
+        let t = Instant::now();
+        let mut r = ListingsRest::restore("rest|22|0", t);
+        assert_eq!(r.current(t + Duration::from_secs(21599), 999999), 22);
+        assert_eq!(r.current(t + Duration::from_secs(21600), 1000000), 20);
+        let mut r = ListingsRest::restore("rest|28|90000", t);
+        assert_eq!(r.current(t, 90001), 28);
+        assert_eq!(r.current(t + Duration::from_secs(21599), 111600), 28);
+        assert_eq!(r.current(t + Duration::from_secs(21600), 111601), 26);
+        for bad in [
+            "",
+            "old",
+            "rest|19|0",
+            "rest|23|0",
+            "rest|26|-1",
+            "rest|28|x",
+        ] {
+            assert_eq!(ListingsRest::restore(bad, t).seconds, 28);
+        }
+        let c = SteamClient::new().unwrap();
+        c.restore_pace("0|6000|60000;0|6000|60000;0|6000|60000;0|6000|60000");
+        assert_eq!(c.listings_rest_secs(), 28);
+        c.restore_pace("0|6000|60000;0|6000|60000;0|6000|60000;0|6000|60000;rest|24|0");
+        let saved = SteamClient::saved_pace(&mut c.inner.lock().unwrap(), t);
+        let again = SteamClient::new().unwrap();
+        again.restore_pace(&saved);
+        assert_eq!(again.listings_rest_secs(), 24);
+    }
+
+    #[tokio::test]
+    async fn listings_429_resets_rest_and_checkpoints() {
+        let app = Router::new().route("/busy", get(|| async { (AxStatus::TOO_MANY_REQUESTS, "") }));
+        let c = fast(&serve(app).await);
+        c.inner.lock().unwrap().listings_rest.seconds = 20;
+        let saved = Arc::new(Mutex::new(String::new()));
+        let hook = saved.clone();
+        c.on_pace_change(move |v| *hook.lock().unwrap() = v);
+        let _ = c.get_json(Endpoint::Listings, "/busy", &[]).await;
+        assert_eq!(c.listings_rest_secs(), 28);
+        let snapshot = saved.lock().unwrap().clone();
+        let again = SteamClient::new().unwrap();
+        again.restore_pace(&snapshot);
+        assert!(
+            again.inner.lock().unwrap().listings_rest.hold_until >= unix_in(Duration::ZERO) + 86399
+        );
+    }
+
+    #[test]
+    fn listings_rest_has_a_separate_persistent_state() {
+        let c = SteamClient::new().unwrap();
+        let saved = SteamClient::saved_pace(&mut c.inner.lock().unwrap(), Instant::now());
+        assert_eq!(saved.split(';').nth(4), Some("rest|28|0"));
+    }
+
     #[tokio::test]
     async fn pace_saved_on_429_survives_restart() {
         let app = Router::new().route("/busy", get(|| async { (AxStatus::TOO_MANY_REQUESTS, "") }));
@@ -2849,6 +3013,7 @@ mod tests {
             .unwrap()
             .with_alt(alt_marked());
         c.set_gap_for_test(Duration::from_millis(200));
+        c.inner.lock().unwrap().listings_rest.seconds = 20;
         for _ in 0..2 {
             c.action(Endpoint::Listings, "Q", &qp).await.unwrap();
         }
@@ -2859,6 +3024,8 @@ mod tests {
                 "a principal não pausa pelo 429 da extra"
             );
             assert!(g.alt_limiter.paused_until.is_some());
+            assert_eq!(g.listings_rest.seconds, 28);
+            assert!(g.listings_rest.hold_until >= unix_in(Duration::ZERO) + 86399);
         }
         assert_eq!(c.stats().paused_until, None, "a caça segue pela principal");
         // Extra desligada (nada escutando): descansa, a principal segue e nenhum breaker abre.
