@@ -502,7 +502,8 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
      1. **Controle.** 1 leitura em 8 (`EXPLORE_SHARE` = 12,5 %) ignora o valor e lê a faixa lida há mais tempo.
         Toda leitura grava `worth` = anúncios novos × lucro da faixa e `gain` (lucro previsto dos avisos); o
         placar "Agenda × rodízio cego (7 dias)" compara o que cada braço rende por leitura. Se a agenda não
-        ganhar do rodízio, o aprendizado não está servindo.
+        ganhar do rodízio, o aprendizado não está servindo. O painel também compara, por faixa de seed e de
+        espera, a proporção de leituras com raro novo no saldo; mostra as contagens até haver 30 por braço.
      2. **Previsão.** O app repete as leituras dos últimos 7 dias (`reads`; páginas do mesmo alvo em até 90 s
         contam como uma) prevendo cada uma só com as anteriores, para `W` {0,5; 1; 2; 4; 8 h} × `m` {0,5; 1; 2;
         4; 8; 16} × `H` {24; 72; 168 h}, e mede o erro (perda de Poisson). Troca os parâmetros só com ≥ 1 000 leituras

@@ -6,6 +6,7 @@
 
 pub mod bootstrap;
 pub mod catalog;
+pub(crate) mod comparison;
 pub mod detect;
 pub mod explore;
 pub mod ledger;

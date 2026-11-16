@@ -383,41 +383,22 @@ fn comparison_report(c: &rusqlite::Connection, since: i64, until: i64) -> rusqli
         "Período comum: {since}..={until} (unix, inclusivo).\n\
          Associação com a agenda, sem causalidade. Bandas não igualam esperas, saldo ou mercado.\n"
     );
-    let mut stmt = c.prepare(
-        "WITH r AS (
-        SELECT choice_range AS faixa, choice_control AS controle, fresh, new_listings,
-        CASE WHEN choice_gap<600 THEN 0 WHEN choice_gap<3600 THEN 1
-        WHEN choice_gap<21600 THEN 2 ELSE 3 END AS banda
-        FROM reads WHERE choice_range IS NOT NULL AND choice_gap>=0
-        AND choice_control IN (0,1) AND outcome='ok' AND at BETWEEN ?1 AND ?2)
-        SELECT faixa,banda,
-        sum(CASE WHEN controle=0 THEN 1 ELSE 0 END),
-        sum(CASE WHEN controle=1 THEN 1 ELSE 0 END),
-        sum(CASE WHEN controle=0 THEN fresh ELSE 0 END),
-        sum(CASE WHEN controle=1 THEN fresh ELSE 0 END),
-        count(CASE WHEN controle=0 THEN new_listings END),
-        count(CASE WHEN controle=1 THEN new_listings END),
-        coalesce(sum(CASE WHEN controle=0 THEN new_listings END),0),
-        coalesce(sum(CASE WHEN controle=1 THEN new_listings END),0)
-        FROM r GROUP BY faixa,banda ORDER BY faixa,banda",
-    )?;
-    let rows = stmt.query_map([since, until], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, i64>(5)?,
-            r.get::<_, i64>(6)?,
-            r.get::<_, i64>(7)?,
-            r.get::<_, i64>(8)?,
-            r.get::<_, i64>(9)?,
-        ))
-    })?;
+    let rows = crate::hunt::comparison::compare(c, since, until)?;
     let mut count = 0;
     for row in rows {
-        let (range, band, policy, control, pf, cf, pn, cn, pt, ct) = row?;
+        let crate::hunt::comparison::Comparison {
+            range,
+            band,
+            policy,
+            control,
+            policy_fresh: pf,
+            control_fresh: cf,
+            policy_new_count: pn,
+            control_new_count: cn,
+            policy_new: pt,
+            control_new: ct,
+            ..
+        } = row;
         count += 1;
         let label = ["<600", "600-3600", "3600-21600", ">=21600"][band as usize];
         for (metric, policy, control, pf, cf) in [

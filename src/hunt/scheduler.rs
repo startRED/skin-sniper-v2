@@ -2663,16 +2663,21 @@ mod shared_failure_tests {
 
     #[test]
     fn next_query_failure_does_not_restore_previous_shared_target() {
-        let (mut q, _, kb) = shared_query();
-        let c = rare("r:c");
+        let (mut q, ka, kb) = shared_query();
+        q.set_tasks(vec![rare("r:a"), rare("r:b"), rare("r:c"), rare("r:d")]);
+        q.reward("r:a", 10_001, Found::default());
+        q.reward("r:b", 10_001, Found::default());
+        let kc = range_key("r:c", (1, 2));
         let kd = range_key("r:d", (1, 2));
+        q.range_seen.insert(kc.clone(), 6_400);
         q.range_seen.insert(kd.clone(), 6_400);
-        q.begin_query(&c);
-        q.focus(c, 10_001);
-        q.focus_shared(rare("r:d"), 10_001);
-        q.failed_read("r:c", 10_002);
+        let c = q.next_matching(10_002, |t| t.id == "r:c").unwrap();
+        q.focus(c, 10_002);
+        q.focus_shared(rare("r:d"), 10_002);
+        q.failed_read("r:c", 10_003);
+        assert_eq!(q.range_seen.get(&ka).copied(), Some(10_000));
         assert_eq!(q.range_seen.get(&kb).copied(), Some(10_000));
-        assert!(q.focused.contains_key("r:b"));
+        assert_eq!(q.range_seen.get(&kc).copied(), Some(6_400));
         assert_eq!(q.range_seen.get(&kd).copied(), Some(6_400));
         assert!(!q.focused.contains_key("r:d"));
     }
