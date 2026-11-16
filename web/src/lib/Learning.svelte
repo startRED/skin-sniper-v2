@@ -113,7 +113,7 @@
 
         {#if hv}
           <div class="grp">
-            <h3 title="A agenda lê a faixa de seed onde ler agora mais acrescenta: quanto mais tempo sem leitura e mais lucro as vendas daquele seed provam, antes ela volta. Reler a mesma faixa logo em seguida quase não conta.">Agenda de leituras</h3>
+            <h3 title="A agenda lê o grupo de padrões (seeds) onde ler agora mais acrescenta. Entram na conta: quantos anúncios novos costumam aparecer ali, o lucro que as vendas daquele padrão provam e o tempo desde a última leitura. Reler o mesmo grupo logo em seguida quase não conta.">Agenda de leituras</h3>
             <dl class="stats">
               {@render kv('Um achado dura', `~${life(hv.life_s)}`, hv.lives ? `Medido em ${hv.lives} sumiços` : 'Valor padrão, ainda sem medida')}
               {#if hv.reads}

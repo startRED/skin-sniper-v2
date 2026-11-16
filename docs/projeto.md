@@ -49,7 +49,7 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo (o chaveiro entra 
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
 | `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado; recalibração do comum |
-| `hunt/value.rs` | valor de uma leitura (taxa de anúncio novo × estoque acumulado × retorno) e o ajuste horário dos parâmetros |
+| `hunt/value.rs` | mede estoque acumulado (exposure) no aprendizado; escolhe a faixa pelo índice marginal e ajusta os parâmetros a cada hora (Aprendizado, item 6) |
 | `research.rs` | atribuição de decisões e tentativas, cota persistente de pesquisa |
 | `hunt/explore.rs`, `hunt/trial.rs` | candidatas fora do ranking, continuidade de ativos e comparação por blocos |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
