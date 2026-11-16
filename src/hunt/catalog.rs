@@ -8,7 +8,7 @@
 //! 4. seleção por nota = vendas/dia × lucro possível × fator aprendido (`Queue::boosts`), mais uma consulta de grupo raro por
 //!    skin com tabela (todos os desgastes numa consulta). A nota só escolhe quem
 //!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
-//!    caber no saldo.
+//!    caber no saldo ao virar oportunidade; preço atual não exclui alvo raro.
 //!
 //! O catálogo público curado é carregado antes da caça; a varredura renova os dados Steam de uma amostra.
 
@@ -44,7 +44,7 @@ pub const RARE_MAX_TASKS: usize = 24;
 const SKIN_RANK_BASE: i64 = 100_000;
 /// Piso visto numa consulta vale por tanto tempo (depois a tarefa é conferida de novo).
 pub const FLOOR_TTL: i64 = 6 * 3600;
-/// A seleção é refeita a cada tanto, para o piso visto tirar quem não cabe no saldo.
+/// A seleção é refeita periodicamente; piso acima do saldo só exclui alvos de desconto.
 pub const RESELECT_SECS: i64 = 900;
 /// Quanto o piso pode ficar abaixo da mediana de vendas e ainda ser plausível: a hipótese que dá o piso mínimo
 /// de desconto (`min_discount_floor`) antes de haver histórico. Com histórico vale a dispersão do item.
@@ -336,7 +336,7 @@ pub async fn load_deals(db: &Db, learned: &Learned, now: i64) -> Result<Deals> {
 }
 
 /// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 1 venda/dia e lucro possível ≥ mínimo, por nota
-/// (até `WATCH_MAX`). Raro: uma tarefa por skin com tabela (todos os desgastes) cujo piso cabe no saldo (até
+/// (até `WATCH_MAX`). Raro: uma tarefa por skin com prova (todos os desgastes), inclusive acima do saldo (até
 /// `RARE_MAX_TASKS`, os que mais vendem primeiro), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
 pub(super) fn common_candidates(items: &[Item], c: &Ctx) -> Vec<Task> {
@@ -397,7 +397,6 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
         let plain = !i.name.contains("StatTrak™") && !i.name.starts_with("Souvenir");
         if plain
             && wear_of(&i.name).is_some()
-            && f <= c.saldo
             && seen_names.insert(i.name.as_str())
             && !rare_ranges(&i.name, c.learned).is_empty()
         {
@@ -414,15 +413,11 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
     }
     let mut rare: Vec<(f64, i64, Task, f64, Vec<Range>)> = by_code
         .into_iter()
-        .filter_map(|(code, (f, name, _, spd))| {
+        .map(|(code, (f, name, _, spd))| {
             let id = format!("r:{code}");
             let seeds = rare_ranges(name, c.learned);
             let seen = observed(c.floors, &id, c.now);
-            // todas as faixas conferidas, todas com anúncio e o menor não cabe: nada a caçar aqui agora
-            let out = seen.fresh >= seeds.len()
-                && seen.empty == 0
-                && seen.floor.is_some_and(|f| f > c.saldo);
-            (!out).then(|| {
+            {
                 // Por faixa: seeds × giro (anúncios novos esperados, a menos de uma constante que a agenda aprende)
                 // e o lucro esperado de um anúncio novo: chance de ser compra × (vender pela mediana da prova do
                 // seed − comprar no piso comum). Sem prova (tabela, instalação nova) cada seed vale 1 centavo.
@@ -464,7 +459,7 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
                     1.0
                 };
                 (worth, seen.floor.unwrap_or(f), task, weight, ranges)
-            })
+            }
         })
         .collect();
     // Quem mais vale primeiro: giro (anúncios novos por hora e revenda mais rápida) × lucro por anúncio novo.
@@ -1609,7 +1604,7 @@ mod tests {
             "acima do saldo"
         );
         assert!(names.contains("AWP | Duality (Field-Tested)"));
-        // raros: uma tarefa por skin que cabe (todos os desgastes na mesma consulta), sem repetir e sem os caros
+        // Raros: uma tarefa por skin, sem repetir, inclusive acima do saldo.
         let ids: Vec<&str> = rare.iter().map(|t| t.id.as_str()).collect();
         assert!(
             rare.iter()
@@ -1631,7 +1626,7 @@ mod tests {
             assert_eq!(has(want), 1, "{want}: {rn:?}");
         }
         for no in ["Glock-18 | Fade (", "AK-47 | Case Hardened ("] {
-            assert_eq!(has(no), 0, "não cabe no saldo: {no}");
+            assert_eq!(has(no), 1, "raro caro continua elegível: {no}");
         }
         assert!(rare.iter().all(|t| !t.name.contains("StatTrak")));
         let moon = rare
@@ -1676,7 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn rare_floor_seen_above_balance_drops_the_task_until_it_gets_stale() {
+    fn rare_floor_seen_above_balance_keeps_the_task() {
         let (items, saldo) = catalog_fixture();
         let boost = NO_BOOST();
         let heat = "Desert Eagle | Heat Treated (Field-Tested)";
@@ -1693,8 +1688,8 @@ mod tests {
         let mut floors: HashMap<String, (Option<i64>, i64)> = (0..n)
             .map(|k| (format!("{id}#{k}-{k}"), (Some(28_000), 1_793_769_000)))
             .collect();
-        // todas as faixas conferidas, todas caras: sai
-        assert_eq!(id_of(&select(&items, &ctx(saldo, &boost, &floors))), None);
+        // Todas as faixas caras continuam elegíveis para encontrar anúncio novo barato.
+        assert!(id_of(&select(&items, &ctx(saldo, &boost, &floors))).is_some());
         // uma faixa ainda sem consulta (ou vazia): continua, mas com peso menor que um raro ainda não visto
         floors.remove(&format!("{id}#0-0"));
         let tasks = select(&items, &ctx(saldo, &boost, &floors));
@@ -1717,6 +1712,113 @@ mod tests {
         let mut late = ctx(saldo, &boost, &floors);
         late.now += FLOOR_TTL;
         assert!(id_of(&select(&items, &late)).is_some());
+    }
+
+    #[test]
+    #[ignore = "medição offline no banco fixo somente leitura"]
+    fn catalog_funnel_read_only_snapshot() {
+        let mut db = rusqlite::Connection::open_with_flags(
+            "file:E:/Documentos/ProjetosIA/SkinSniperV2/app/data/sniper.db?mode=ro",
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        let tx = db.transaction().unwrap();
+        let now = crate::db::now_unix();
+        let sales: Vec<patterns::SaleRow> = tx.prepare(
+            "SELECT name, seed, multiple, float, sold_at FROM csfloat_sales WHERE multiple > 0 ORDER BY name, sold_at, seed"
+        ).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap().collect::<Result<_, _>>().unwrap();
+        let learned = patterns::learn(&patterns::comps(&sales));
+        let items: Vec<Item> = tx.prepare(
+            "SELECT i.name,i.g_code,i.floor_usd_cents,COALESCE(r.rank,i.rank,1000000),i.sales_per_day,i.dispersion,i.history_at,r.usd_cents,r.observed_at,
+            (SELECT median_cents FROM price_points p WHERE p.name=i.name AND p.ts>=?1 AND p.ts<=?2 AND p.purchases>0 ORDER BY ts DESC LIMIT 1)
+            FROM items i LEFT JOIN catalog_references r ON r.name=i.name WHERE r.name IS NOT NULL OR NOT EXISTS(SELECT 1 FROM catalog_references) ORDER BY COALESCE(r.rank,i.rank,1000000),i.name"
+        ).unwrap().query_map(params![now-7*DAY,now], |r| Ok(Item {
+            name:r.get(0)?,code:r.get(1)?,floor_usd_cents:r.get(2)?,rank:r.get(3)?,sales_per_day:r.get(4)?,dispersion:r.get(5)?,history_at:r.get(6)?,reference_usd_cents:r.get(7)?,reference_at:r.get(8)?,history_price_cents:r.get(9)?,
+        })).unwrap().collect::<Result<_, _>>().unwrap();
+        let boost = HashMap::new();
+        let floors = HashMap::new();
+        // Hipóteses diagnósticas, sem ler settings: saldo R$41,91 e câmbio 5,5.
+        let c = Ctx {
+            now,
+            learned: &learned,
+            ..ctx(4191, &boost, &floors)
+        };
+        // Reproduz o corte antigo na MESMA snapshot; pisos observados vazios em ambos.
+        let old_items: Vec<_> = items
+            .iter()
+            .filter(|i| i.triage_brl(now, c.ratio).is_some_and(|f| f <= c.saldo))
+            .cloned()
+            .collect();
+        let baseline = select(&old_items, &c);
+        let old: Vec<_> = baseline.iter().filter(|t| t.rare()).collect();
+        let old_seeds: usize = old
+            .iter()
+            .flat_map(|t| &t.seeds)
+            .map(|(lo, hi)| usize::from(hi - lo + 1))
+            .sum();
+        println!(
+            "baseline_selected={}/{} (pisos vazios)",
+            old.len(),
+            old_seeds
+        );
+        let tasks = select(&items, &c);
+        let selected: Vec<_> = tasks.iter().filter(|t| t.rare()).collect();
+        let seeds: usize = selected
+            .iter()
+            .map(|t| {
+                t.seeds
+                    .iter()
+                    .map(|(lo, hi)| usize::from(hi - lo + 1))
+                    .sum::<usize>()
+            })
+            .sum();
+        let table = table_skins();
+        let proven_table = table
+            .iter()
+            .filter(|base| learned.get(*base).is_some_and(|m| !m.is_empty()))
+            .count();
+        println!("proven_table={proven_table}");
+        let with_sales = table
+            .iter()
+            .filter(|base| sales.iter().any(|r| skin_base(&r.0) == **base))
+            .count();
+        println!(
+            "snapshot={now} sales={} table={} with_sales={} learned={:?} selected={}/{} items={}",
+            sales.len(),
+            table.len(),
+            with_sales,
+            patterns::size(&learned),
+            selected.len(),
+            seeds,
+            items.len()
+        );
+        for (base, proof) in &learned {
+            let known: std::collections::BTreeSet<_> = proof.keys().map(|k| k.0).collect();
+            let chosen: std::collections::BTreeSet<_> = selected
+                .iter()
+                .filter(|t| skin_base(&t.name) == base)
+                .flat_map(|t| t.seeds.iter().flat_map(|&(lo, hi)| lo..=hi))
+                .collect();
+            let excluded: Vec<_> = known.difference(&chosen).collect();
+            if !excluded.is_empty() {
+                println!("learned_seeds_not_selected={base}: {excluded:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rare_reference_above_balance_keeps_the_task() {
+        let (items, saldo) = catalog_fixture();
+        let boost = NO_BOOST();
+        let floors = HashMap::new();
+        let ids = |balance| {
+            select(&items, &ctx(balance, &boost, &floors))
+                .into_iter()
+                .filter(Task::rare)
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(1), ids(saldo));
     }
 
     #[test]
