@@ -286,11 +286,50 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
     let rate = if hours > 0.0 { new as f64 / hours } else { 0.0 };
     let test = latest_test(c)?;
     let screen_answer: Option<bool> = c.query_row("SELECT appeared FROM notice_tests WHERE answered_at IS NOT NULL AND at>=?1 ORDER BY answered_at DESC,id DESC LIMIT 1", [start], |r|r.get(0)).optional()?;
+    let comparison = crate::hunt::comparison::compare(c, start, now.min(end - 1))?;
+    let mut comparable = false;
+    let mut passes = true;
+    let mut details = Vec::new();
+    for row in crate::hunt::comparison::by_wait(&comparison) {
+        let wait = [
+            "menos de 10 min",
+            "10 min a 1 h",
+            "1 h a 6 h",
+            "6 h ou mais",
+        ][row.band as usize];
+        match row.rare_rates() {
+            None => details.push(format!(
+                "{wait}: agenda {} de 30 leituras, rodízio {} de 30",
+                row.policy, row.control
+            )),
+            Some((policy, control, better)) => {
+                comparable = true;
+                passes &= better;
+                let number = |value: f64| format!("{:.1}", value * 100.0).replace('.', ",");
+                details.push(format!("{wait}: agenda {} a cada 100 leituras ({} leituras), rodízio {} a cada 100 leituras ({} leituras)", number(policy), row.policy, number(control), row.control));
+            }
+        }
+    }
+    let value = if details.is_empty() {
+        "Ainda não há leituras comparáveis: agenda 0 de 30 leituras, rodízio 0 de 30.".into()
+    } else {
+        format!(
+            "Média de anúncios raros novos dentro do saldo:\n{}\nOs dois lados podem ter lido skins diferentes na mesma espera; isso é uma associação, não prova a causa.",
+            details.join("\n")
+        )
+    };
     let mut metrics = vec![Metric {
         label: "Raros novos no saldo por leitura".into(),
-        baseline: "5% agenda × 36% rodízio: não comparáveis".into(),
-        value: "Agenda e rodízio leem alvos e intervalos diferentes; o registro ainda não guarda a faixa lida.".into(),
-        state: "inconclusivo".into(),
+        baseline: "Antes: 5% agenda × 36% rodízio, medidos sem igualar a espera; não comparáveis com este número".into(),
+        value,
+        state: if !comparable {
+            "inconclusivo"
+        } else if passes {
+            "cumprido"
+        } else {
+            "não cumprido"
+        }
+        .into(),
     }];
     let mut add =
         |label: &str, baseline: &str, value: String, enough: bool, passes: bool, closed: bool| {
@@ -460,6 +499,71 @@ pub async fn answer(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn comparison_combines_seed_ranges_with_the_same_wait() {
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            c.execute("UPDATE alert_window SET started_at=1000", [])?;
+            for arm in [0, 1] {
+                for i in 0..30 {
+                    let range = format!("r:skin{}#1-2", i % 6);
+                    c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',?1,?2,600,?3,'ok')", params![arm + 1, range, arm])?;
+                }
+            }
+            let metric = &report(c, 2000)?.metrics[0];
+            assert_eq!(metric.state, "não cumprido");
+            assert!(metric.value.contains("10 min a 1 h: agenda 100,0 a cada 100 leituras"));
+            assert!(metric.value.contains("rodízio 200,0 a cada 100 leituras"));
+            assert!(!metric.value.contains("Comparação"));
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn comparison_counts_valid_reads_and_reports_all_three_states() {
+        let (db, _dir) = crate::db::temp_db();
+        db.call(|c| {
+            c.execute("UPDATE alert_window SET started_at=1000", [])?;
+            for arm in [0, 1] {
+                for i in 0..29 {
+                    c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',?1,'r:a#1-2',600,?2,'ok')", params![i < 10,arm])?;
+                }
+            }
+            // Registros antigos e falhas não completam o mínimo.
+            c.execute("INSERT INTO reads(at,arm,fresh) VALUES(1001,'r:a',99)", [])?;
+            // Antes do início e depois de agora também ficam fora.
+            for at in [999, 2001, 1000 + 7 * DAY] {
+                c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(?1,'r:a',99,'r:a#1-2',600,0,'ok')", [at])?;
+            }
+            c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',99,'r:a#1-2',600,0,'failed')", [])?;
+            let metric = &report(c, 2000)?.metrics[0];
+            assert_eq!(metric.state, "inconclusivo");
+            assert_eq!(metric.value, "Média de anúncios raros novos dentro do saldo:\n10 min a 1 h: agenda 29 de 30 leituras, rodízio 29 de 30\nOs dois lados podem ter lido skins diferentes na mesma espera; isso é uma associação, não prova a causa.");
+            assert_eq!(metric.baseline, "Antes: 5% agenda × 36% rodízio, medidos sem igualar a espera; não comparáveis com este número");
+            for arm in [0, 1] {
+                c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',0,'r:a#1-2',600,?1,'ok')", [arm])?;
+            }
+            let metric = &report(c, 2000)?.metrics[0];
+            assert_eq!(metric.state, "cumprido");
+            assert_eq!(metric.value, "Média de anúncios raros novos dentro do saldo:\n10 min a 1 h: agenda 33,3 a cada 100 leituras (30 leituras), rodízio 33,3 a cada 100 leituras (30 leituras)\nOs dois lados podem ter lido skins diferentes na mesma espera; isso é uma associação, não prova a causa.");
+            // Vários anúncios na mesma leitura entram todos na média.
+            c.execute("UPDATE reads SET fresh=7 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=0 AND fresh=1)", [])?;
+            assert!(report(c, 2000)?.metrics[0].value.contains("53,3 a cada 100 leituras"));
+            c.execute("UPDATE reads SET fresh=8 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=1 AND fresh=0)", [])?;
+            let metric = &report(c, 2000)?.metrics[0];
+            assert_eq!(metric.state, "não cumprido");
+            assert_eq!(metric.value, "Média de anúncios raros novos dentro do saldo:\n10 min a 1 h: agenda 53,3 a cada 100 leituras (30 leituras), rodízio 60,0 a cada 100 leituras (30 leituras)\nOs dois lados podem ter lido skins diferentes na mesma espera; isso é uma associação, não prova a causa.");
+            // Uma faixa favorável não esconde outra em que a agenda ficou abaixo.
+            for arm in [0, 1] {
+                for _ in 0..30 {
+                    c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:b',?1,'r:b#1-2',3600,?2,'ok')", params![arm == 0, arm])?;
+                }
+            }
+            assert_eq!(report(c, 2000)?.metrics[0].state, "não cumprido");
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn above_saldo_notice_counts_in_total_but_cannot_complete_the_balance_goal() {
         let (db, _dir) = crate::db::temp_db();
         db.call(|c| {
@@ -519,7 +623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agenda_comparison_is_always_inconclusive_even_when_its_rate_wins() {
+    async fn old_reads_without_choices_cannot_make_a_comparison() {
         let (db, _dir) = crate::db::temp_db();
         db.call(|c| {
             c.execute("UPDATE alert_window SET started_at=1000", [])?;
@@ -529,8 +633,7 @@ mod tests {
                 let m = &r.metrics[0];
                 assert_eq!(m.state, "inconclusivo");
                 assert!(m.baseline.contains("não comparáveis"));
-                assert!(m.value.contains("alvos e intervalos diferentes"));
-                assert!(m.value.contains("não guarda a faixa lida"));
+                assert!(m.value.contains("agenda 0 de 30 leituras, rodízio 0 de 30"));
             }
             Ok(())
         }).await.unwrap();
