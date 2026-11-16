@@ -45,11 +45,11 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo (o chaveiro entra 
 | `pricing/combo.rs` | melhor combinação de anúncios que cabe no saldo (mochila em centavos) |
 | `hunt/catalog.rs` | descoberta e seleção do que vigiar dado o saldo |
 | `hunt/bootstrap.rs` | catálogo curado embutido, referências públicas separadas e renovação diária sem Steam |
-| `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador |
+| `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador; escolhe a faixa rara pelo índice marginal (`best_range`) |
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
 | `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado; recalibração do comum |
-| `hunt/value.rs` | mede estoque acumulado (exposure) no aprendizado; escolhe a faixa pelo índice marginal e ajusta os parâmetros a cada hora (Aprendizado, item 6) |
+| `hunt/value.rs` | mede o estoque acumulado (exposure) no aprendizado e ajusta os parâmetros a cada hora (Aprendizado, item 6) |
 | `research.rs` | atribuição de decisões e tentativas, cota persistente de pesquisa |
 | `hunt/explore.rs`, `hunt/trial.rs` | candidatas fora do ranking, continuidade de ativos e comparação por blocos |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
@@ -240,7 +240,7 @@ saldo e mercado podem variar. O relatório mostra associação com a agenda, sem
      mantendo o limite de 24 skins. Ausência de vendas não autoriza inventar prêmio nem admitir candidato.
      A medição offline do funil está em `medida-catalogo-2026-11-15.md`.
    - **Agenda que aprende:** cada alvo (skin × desgaste × modo: `barato`, `seed` ou `float`) recebe a leitura
-     quando o **índice marginal dela agora** é o maior, usando taxa, peso, espera e retorno (fórmula, ajuste e medidas no item 6 do Aprendizado). Sinal =
+     conforme a prioridade calculada: no modo `seed`, a faixa de alvo raro usa o índice marginal; nos demais modos, usam-se os centavos esperados, calculados pelo rendimento e pelo estoque acumulado durante a espera (ajuste e medidas no item 6 do Aprendizado). Sinal =
      anúncio **novo** que cabe no saldo (na leitura só pelo livro, a queda do menor anúncio); reavaliar o mesmo
      anúncio não conta de novo. Alvo nunca lido vai na
      frente; empate vai para o lido há mais tempo. Regras que não mudam: 12,5 % das consultas vão sempre ao alvo
