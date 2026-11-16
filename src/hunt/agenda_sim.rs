@@ -386,43 +386,27 @@ fn comparison_report(c: &rusqlite::Connection, since: i64, until: i64) -> rusqli
     let rows = crate::hunt::comparison::compare(c, since, until)?;
     let mut count = 0;
     for row in rows {
-        let crate::hunt::comparison::Comparison {
-            range,
-            band,
-            policy,
-            control,
-            policy_fresh: pf,
-            control_fresh: cf,
-            policy_new_count: pn,
-            control_new_count: cn,
-            policy_new: pt,
-            control_new: ct,
-            ..
-        } = row;
         count += 1;
-        let label = ["<600", "600-3600", "3600-21600", ">=21600"][band as usize];
-        for (metric, policy, control, pf, cf) in [
-            (
-                "anúncios raros novos dentro do saldo por leitura",
-                policy,
-                control,
-                pf,
-                cf,
-            ),
-            ("anúncios novos por leitura", pn, cn, pt, ct),
-        ] {
-            out.push_str(&format!(
-                "{range} | {label} s | agenda={policy} controle={control} | {metric}: "
-            ));
-            if policy < 30 || control < 30 {
-                out.push_str("dados insuficientes (mínimo 30 CADA braço)\n");
-            } else {
-                out.push_str(&format!(
-                    "agenda={:.6} controle={:.6}\n",
-                    pf as f64 / policy as f64,
-                    cf as f64 / control as f64
-                ));
+        let label = ["<600", "600-3600", "3600-21600", ">=21600"][row.band as usize];
+        out.push_str(&format!("{} | {label} s | agenda={} controle={} | anúncios raros novos dentro do saldo por leitura: ", row.range, row.policy, row.control));
+        match row.rare_rates() {
+            Some((policy, control, _)) => {
+                out.push_str(&format!("agenda={policy:.6} controle={control:.6}\n"))
             }
+            None => out.push_str("dados insuficientes (mínimo 30 CADA braço)\n"),
+        }
+        out.push_str(&format!(
+            "{} | {label} s | agenda={} controle={} | anúncios novos por leitura: ",
+            row.range, row.policy_new_count, row.control_new_count
+        ));
+        if row.policy_new_count < 30 || row.control_new_count < 30 {
+            out.push_str("dados insuficientes (mínimo 30 CADA braço)\n");
+        } else {
+            out.push_str(&format!(
+                "agenda={:.6} controle={:.6}\n",
+                row.policy_new as f64 / row.policy_new_count as f64,
+                row.control_new as f64 / row.control_new_count as f64
+            ));
         }
     }
     if count == 0 {
@@ -507,4 +491,29 @@ fn comparison_uses_only_the_common_period_and_skips_failures() {
     assert!(report.contains("agenda=29 controle=29"));
     assert_eq!(report.matches("dados insuficientes").count(), 2);
     assert!(!report.contains("agenda=0."));
+}
+
+#[tokio::test]
+async fn panel_and_offline_report_match_when_one_read_finds_many() {
+    let (db, _dir) = crate::db::temp_db();
+    db.call(|c| {
+        c.execute("UPDATE alert_window SET started_at=1000", [])?;
+        for arm in [0, 1] {
+            for i in 0..30 {
+                let fresh = if arm == 0 && i == 0 { 20 } else if arm == 1 && i < 10 { 1 } else { 0 };
+                c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',?1,'r:a#1-2',600,?2,'ok')", rusqlite::params![fresh,arm])?;
+            }
+        }
+        for (fresh, state, expected) in [(20, "cumprido", "0.666667"), (5, "não cumprido", "0.166667")] {
+            c.execute("UPDATE reads SET fresh=?1 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=0)", [fresh])?;
+            let offline = comparison_report(c, 1000, 2000)?;
+            let metric = &crate::web::learning_alerts::report(c, 2000)?.metrics[0];
+            assert_eq!(metric.state, state);
+            assert!(offline.contains(&format!("agenda={expected} controle=0.333333")));
+            assert!(metric.value.contains(&expected.replace('.', ",")));
+            assert!(metric.value.contains("rodízio 0,333333"));
+            assert!(!metric.value.contains("r:a#1-2"));
+        }
+        Ok(())
+    }).await.unwrap();
 }

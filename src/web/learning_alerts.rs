@@ -290,42 +290,33 @@ pub(crate) fn report(c: &Connection, now: i64) -> rusqlite::Result<Report> {
     let mut comparable = false;
     let mut passes = true;
     let mut details = Vec::new();
-    for row in comparison {
+    for (index, row) in comparison.into_iter().enumerate() {
         let wait = [
             "menos de 10 min",
             "10 min a 1 h",
             "1 h a 6 h",
             "6 h ou mais",
         ][row.band as usize];
-        if row.policy < 30 || row.control < 30 {
-            details.push(format!(
-                "{} ({wait}): agenda {}, rodízio {} de 30",
-                row.range, row.policy, row.control
-            ));
-        } else {
-            comparable = true;
-            passes &= i128::from(row.policy_hits) * i128::from(row.control)
-                >= i128::from(row.control_hits) * i128::from(row.policy);
-            let percent = |hits: i64, reads: i64| {
-                format!("{:.1}%", 100.0 * hits as f64 / reads as f64).replace('.', ",")
-            };
-            details.push(format!(
-                "{} ({wait}): agenda {} ({}/{}), rodízio {} ({}/{})",
-                row.range,
-                percent(row.policy_hits, row.policy),
-                row.policy_hits,
+        match row.rare_rates() {
+            None => details.push(format!(
+                "Comparação {} ({wait}): agenda {} de 30 leituras, rodízio {} de 30",
+                index + 1,
                 row.policy,
-                percent(row.control_hits, row.control),
-                row.control_hits,
                 row.control
-            ));
+            )),
+            Some((policy, control, better)) => {
+                comparable = true;
+                passes &= better;
+                let number = |value: f64| format!("{value:.6}").replace('.', ",");
+                details.push(format!("Comparação {} ({wait}): agenda {} por leitura ({} leituras), rodízio {} por leitura ({} leituras)", index + 1, number(policy), row.policy, number(control), row.control));
+            }
         }
     }
     let value = if details.is_empty() {
-        "Ainda não há leituras comparáveis: agenda 0, rodízio 0 de 30.".into()
+        "Ainda não há leituras comparáveis: agenda 0 de 30 leituras, rodízio 0 de 30.".into()
     } else {
         format!(
-            "Leituras com raro novo no saldo: {}. Associação por faixa de espera; saldo e mercado podem variar.",
+            "Média de anúncios raros novos dentro do saldo: {}. Associação por faixa de espera; saldo e mercado podem variar.",
             details.join("; ")
         )
     };
@@ -528,17 +519,17 @@ mod tests {
             c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',99,'r:a#1-2',600,0,'failed')", [])?;
             let metric = &report(c, 2000)?.metrics[0];
             assert_eq!(metric.state, "inconclusivo");
-            assert!(metric.value.contains("agenda 29, rodízio 29 de 30"));
+            assert!(metric.value.contains("agenda 29 de 30 leituras, rodízio 29 de 30"));
             for arm in [0, 1] {
                 c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',0,'r:a#1-2',600,?1,'ok')", [arm])?;
             }
             let metric = &report(c, 2000)?.metrics[0];
             assert_eq!(metric.state, "cumprido");
-            assert!(metric.value.contains("33,3%"));
-            // Várias descobertas na mesma leitura contam como uma leitura com achado.
+            assert!(metric.value.contains("0,333333"));
+            // Vários anúncios na mesma leitura entram todos na média.
             c.execute("UPDATE reads SET fresh=7 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=0 AND fresh=1)", [])?;
-            assert!(report(c, 2000)?.metrics[0].value.contains("33,3%"));
-            c.execute("UPDATE reads SET fresh=1 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=1 AND fresh=0)", [])?;
+            assert!(report(c, 2000)?.metrics[0].value.contains("0,533333"));
+            c.execute("UPDATE reads SET fresh=8 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=1 AND fresh=0)", [])?;
             assert_eq!(report(c, 2000)?.metrics[0].state, "não cumprido");
             // Uma faixa favorável não esconde outra em que a agenda ficou abaixo.
             for arm in [0, 1] {
@@ -621,7 +612,7 @@ mod tests {
                 let m = &r.metrics[0];
                 assert_eq!(m.state, "inconclusivo");
                 assert!(m.baseline.contains("não comparáveis"));
-                assert!(m.value.contains("agenda 0, rodízio 0 de 30"));
+                assert!(m.value.contains("agenda 0 de 30 leituras, rodízio 0 de 30"));
             }
             Ok(())
         }).await.unwrap();

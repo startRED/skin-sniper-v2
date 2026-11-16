@@ -1,13 +1,12 @@
 //! Comparação das leituras registradas, por faixa de seed e intervalo de espera.
 
 pub(crate) struct Comparison {
+    #[cfg(test)]
     pub range: String,
     pub band: i64,
     pub policy: i64,
     pub control: i64,
-    #[cfg(test)]
     pub policy_fresh: i64,
-    #[cfg(test)]
     pub control_fresh: i64,
     #[cfg(test)]
     pub policy_new_count: i64,
@@ -17,8 +16,20 @@ pub(crate) struct Comparison {
     pub policy_new: i64,
     #[cfg(test)]
     pub control_new: i64,
-    pub policy_hits: i64,
-    pub control_hits: i64,
+}
+
+impl Comparison {
+    pub fn rare_rates(&self) -> Option<(f64, f64, bool)> {
+        if self.policy < 30 || self.control < 30 {
+            return None;
+        }
+        Some((
+            self.policy_fresh as f64 / self.policy as f64,
+            self.control_fresh as f64 / self.control as f64,
+            i128::from(self.policy_fresh) * i128::from(self.control)
+                >= i128::from(self.control_fresh) * i128::from(self.policy),
+        ))
+    }
 }
 
 pub(crate) fn compare(
@@ -41,20 +52,17 @@ pub(crate) fn compare(
         count(CASE WHEN controle=0 THEN new_listings END),
         count(CASE WHEN controle=1 THEN new_listings END),
         coalesce(sum(CASE WHEN controle=0 THEN new_listings END),0),
-        coalesce(sum(CASE WHEN controle=1 THEN new_listings END),0),
-        sum(CASE WHEN controle=0 AND fresh>0 THEN 1 ELSE 0 END),
-        sum(CASE WHEN controle=1 AND fresh>0 THEN 1 ELSE 0 END)
+        coalesce(sum(CASE WHEN controle=1 THEN new_listings END),0)
         FROM r GROUP BY faixa,banda ORDER BY faixa,banda",
     )?;
     let rows = stmt.query_map([since, until], |r| {
         Ok(Comparison {
+            #[cfg(test)]
             range: r.get(0)?,
             band: r.get(1)?,
             policy: r.get(2)?,
             control: r.get(3)?,
-            #[cfg(test)]
             policy_fresh: r.get(4)?,
-            #[cfg(test)]
             control_fresh: r.get(5)?,
             #[cfg(test)]
             policy_new_count: r.get(6)?,
@@ -64,8 +72,6 @@ pub(crate) fn compare(
             policy_new: r.get(8)?,
             #[cfg(test)]
             control_new: r.get(9)?,
-            policy_hits: r.get(10)?,
-            control_hits: r.get(11)?,
         })
     })?;
     rows.collect()
