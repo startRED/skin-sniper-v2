@@ -14,7 +14,7 @@ try {
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('O painel de exemplo não iniciou.')), 30000);
     vite.stdout.on('data', chunk => {
-      if (chunk.toString().includes('Local:')) { clearTimeout(timeout); resolve(); }
+      if (chunk.toString().replace(/\x1b\[[0-9;]*m/g, '').includes('Local:')) { clearTimeout(timeout); resolve(); }
     });
     vite.once('exit', code => { clearTimeout(timeout); reject(new Error(`Servidor saiu: ${code}`)); });
     vite.once('error', reject);
@@ -44,8 +44,10 @@ try {
     await dailyAlerts.screenshot({ path: new URL(`${name}-meta-avisos.png`, output).pathname.replace(/^\/(\w:)/, '$1') });
     const comparison = page.locator('.metrics > li').first();
     assert.match(await comparison.innerText(), /não comparáveis/);
-    assert.match(await comparison.innerText(), /alvos e intervalos diferentes/);
-    assert.match(await comparison.innerText(), /não guarda a faixa lida/);
+    assert.match(await comparison.innerText(), /agenda 0,0 anúncios a cada 100 leituras \(43 leituras\), rodízio 0 leituras \(mínimo 30\)/);
+    assert.match(await comparison.innerText(), /agenda 12 leituras \(mínimo 30\), rodízio 1 leitura \(mínimo 30\)/);
+    assert.match(await comparison.innerText(), /os dois lados têm 30 leituras na mesma espera/);
+    assert.match(await comparison.innerText(), /associação, não prova a causa/);
     assert.equal(await comparison.locator('.muted').innerText(), 'inconclusivo');
     await comparison.screenshot({ path: new URL(`${name}-comparacao.png`, output).pathname.replace(/^\/(\w:)/, '$1') });
     await page.evaluate(() => scrollTo(0, 0));
