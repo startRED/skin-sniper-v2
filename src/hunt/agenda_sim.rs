@@ -341,12 +341,12 @@ async fn agenda_on_a_real_db() {
 #[test]
 fn comparison_requires_thirty_in_each_arm_and_exact_bands() {
     let c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER);").unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER, at INTEGER DEFAULT 10, outcome TEXT DEFAULT 'ok');").unwrap();
     for gap in [599, 600, 3599, 3600, 21599, 21600] {
         for arm in [0, 1] {
             for _ in 0..30 {
                 c.execute(
-                    "INSERT INTO reads VALUES('r:a#1-2',?1,?2,1,4)",
+                    "INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:a#1-2',?1,?2,1,4)",
                     rusqlite::params![gap, arm],
                 )
                 .unwrap();
@@ -358,7 +358,7 @@ fn comparison_requires_thirty_in_each_arm_and_exact_bands() {
         [],
     )
     .unwrap();
-    let report = comparison_report(&c).unwrap();
+    let report = comparison_report(&c, 0, 100).unwrap();
     assert!(report.contains("dados insuficientes"));
     assert!(report.contains("600-3600"));
     assert!(report.contains("3600-21600"));
@@ -368,18 +368,20 @@ fn comparison_requires_thirty_in_each_arm_and_exact_bands() {
     assert!(report.contains("3600-21600 s | agenda=60 controle=60 | anúncios raros"));
     assert!(report.contains(">=21600 s | agenda=30 controle=30 | anúncios raros"));
     assert!(report.contains("agenda=1.000000 controle=1.000000"));
-    c.execute("INSERT INTO reads VALUES('r:b#1-2',21600,0,7,NULL)", [])
+    c.execute("INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:b#1-2',21600,0,7,NULL)", [])
         .unwrap();
-    c.execute("INSERT INTO reads VALUES('r:a#1-3',21600,1,7,NULL)", [])
+    c.execute("INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:a#1-3',21600,1,7,NULL)", [])
         .unwrap();
-    let report = comparison_report(&c).unwrap();
+    let report = comparison_report(&c, 0, 100).unwrap();
     assert_eq!(report.matches("dados insuficientes").count(), 6);
 }
 
-/// Associação observacional por faixa e banda; nunca inicia a caça nem lê configurações.
-fn comparison_report(c: &rusqlite::Connection) -> rusqlite::Result<String> {
-    let mut out = String::from(
-        "Associação com a agenda, sem causalidade. Bandas não igualam esperas, saldo ou mercado.\n",
+/// Associação observacional por faixa e banda no período `since..=until` (unix, inclusivo), igual para os
+/// dois braços; consultas que falharam ficam fora. Nunca inicia a caça nem lê configurações.
+fn comparison_report(c: &rusqlite::Connection, since: i64, until: i64) -> rusqlite::Result<String> {
+    let mut out = format!(
+        "Período comum: {since}..={until} (unix, inclusivo).\n\
+         Associação com a agenda, sem causalidade. Bandas não igualam esperas, saldo ou mercado.\n"
     );
     let mut stmt = c.prepare(
         "WITH r AS (
@@ -387,7 +389,7 @@ fn comparison_report(c: &rusqlite::Connection) -> rusqlite::Result<String> {
         CASE WHEN choice_gap<600 THEN 0 WHEN choice_gap<3600 THEN 1
         WHEN choice_gap<21600 THEN 2 ELSE 3 END AS banda
         FROM reads WHERE choice_range IS NOT NULL AND choice_gap>=0
-        AND choice_control IN (0,1))
+        AND choice_control IN (0,1) AND outcome='ok' AND at BETWEEN ?1 AND ?2)
         SELECT faixa,banda,
         sum(CASE WHEN controle=0 THEN 1 ELSE 0 END),
         sum(CASE WHEN controle=1 THEN 1 ELSE 0 END),
@@ -399,7 +401,7 @@ fn comparison_report(c: &rusqlite::Connection) -> rusqlite::Result<String> {
         coalesce(sum(CASE WHEN controle=1 THEN new_listings END),0)
         FROM r GROUP BY faixa,banda ORDER BY faixa,banda",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([since, until], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
@@ -451,35 +453,77 @@ fn comparison_report(c: &rusqlite::Connection) -> rusqlite::Result<String> {
 #[test]
 #[ignore = "exige caminho explícito de cópia offline; somente leitura"]
 fn compare_recorded_reads() {
-    let path = std::env::var("SNIPER_COMPARISON_DB")
-        .expect("informe SNIPER_COMPARISON_DB com uma cópia offline");
-    let c = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .unwrap();
-    println!("{}", comparison_report(&c).unwrap());
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("informe {k}"));
+    let at = |k: &str| var(k).parse::<i64>().expect("timestamp unix em segundos");
+    let (since, until) = (at("SNIPER_COMPARISON_SINCE"), at("SNIPER_COMPARISON_UNTIL"));
+    assert!(since <= until, "período vazio");
+    let c = rusqlite::Connection::open_with_flags(
+        var("SNIPER_COMPARISON_DB"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    println!("{}", comparison_report(&c, since, until).unwrap());
 }
 
 #[test]
 fn comparison_distinguishes_total_new_from_affordable_and_missing() {
     let c = rusqlite::Connection::open_in_memory().unwrap();
-    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER);").unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER, at INTEGER DEFAULT 10, outcome TEXT DEFAULT 'ok');").unwrap();
     for arm in [0, 1] {
         for _ in 0..30 {
-            c.execute("INSERT INTO reads VALUES('r:a#1-2',600,?1,1,4)", [arm])
+            c.execute("INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:a#1-2',600,?1,1,4)", [arm])
                 .unwrap();
         }
     }
-    let report = comparison_report(&c).unwrap();
+    let report = comparison_report(&c, 0, 100).unwrap();
     assert!(report.contains("anúncios novos por leitura: agenda=4.000000 controle=4.000000"));
     assert!(report.contains(
         "anúncios raros novos dentro do saldo por leitura: agenda=1.000000 controle=1.000000"
     ));
     c.execute("UPDATE reads SET new_listings=NULL WHERE rowid=1", [])
         .unwrap();
-    let report = comparison_report(&c).unwrap();
+    let report = comparison_report(&c, 0, 100).unwrap();
     assert!(
         report.contains("agenda=29 controle=30 | anúncios novos por leitura: dados insuficientes")
     );
     assert!(report.contains(
         "anúncios raros novos dentro do saldo por leitura: agenda=1.000000 controle=1.000000"
     ));
+}
+
+#[test]
+fn comparison_uses_only_the_common_period_and_skips_failures() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER, at INTEGER, outcome TEXT);").unwrap();
+    let add = |at: i64, arm: i64, fresh: i64, new: Option<i64>, outcome: &str| {
+        c.execute(
+            "INSERT INTO reads VALUES('r:a#1-2',600,?1,?2,?3,?4,?5)",
+            rusqlite::params![arm, fresh, new, at, outcome],
+        )
+        .unwrap();
+    };
+    for arm in [0, 1] {
+        // vazios bem-sucedidos contam como zero; o achado fica na borda inicial do período
+        for _ in 0..29 {
+            add(150, arm, 0, Some(0), "ok");
+        }
+        add(100, arm, 3, Some(3), "ok");
+        add(200, arm, 0, Some(0), "ok");
+        for _ in 0..40 {
+            // fora do período: não entram nem completam o mínimo
+            add(99, arm, 9, Some(9), "ok");
+            add(201, arm, 9, Some(9), "ok");
+            // falha enviada dentro do período: nem zero nem leitura
+            add(150, arm, 0, None, "failed");
+        }
+    }
+    let report = comparison_report(&c, 100, 200).unwrap();
+    assert!(report.starts_with("Período comum: 100..=200"));
+    assert!(report.contains("agenda=31 controle=31 | anúncios raros novos dentro do saldo por leitura: agenda=0.096774 controle=0.096774"));
+    assert!(report.contains("anúncios novos por leitura: agenda=0.096774 controle=0.096774"));
+    // período que corta as bordas: 29 por braço, abaixo do mínimo, sem conclusão
+    let report = comparison_report(&c, 101, 199).unwrap();
+    assert!(report.contains("agenda=29 controle=29"));
+    assert_eq!(report.matches("dados insuficientes").count(), 2);
+    assert!(!report.contains("agenda=0."));
 }

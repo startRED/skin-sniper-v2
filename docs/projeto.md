@@ -180,9 +180,13 @@ Registro para comparação: `reads` recebe `choice_range` (alvo + início + fim)
 intervalo nulo se nunca vista). O retrato é consumido uma vez no resultado principal.
 Paralelas, conferências, livros e leituras sem escolha comparável deixam os novos campos
 nulos. Migração aditiva conserva linhas antigas com nulos. Não muda escolhas nem corta leituras.
+`outcome` marca a leitura com escolha: `ok`, ou `failed` quando a consulta saiu para a Steam e falhou
+(retrato gravado uma vez, `new_listings` nulo, sem nota; o ajuste ignora essas linhas). Nulo nas demais.
 
-Comparação offline independente: `SNIPER_COMPARISON_DB=<cópia> cargo test compare_recorded_reads -- --ignored --nocapture`.
+Comparação offline independente: `SNIPER_COMPARISON_DB=<cópia> SNIPER_COMPARISON_SINCE=<unix> SNIPER_COMPARISON_UNTIL=<unix> cargo test compare_recorded_reads -- --ignored --nocapture`.
 Abre apenas a cópia em modo somente leitura, sem migração, configurações, caça ou rede.
+Só conta leituras `ok` com `at` no período comum (início e fim inclusivos), o mesmo para os dois
+braços, e o relatório informa o período. Falhas não viram zero; vazio bem-sucedido conta zero.
 Cada faixa exata e banda (`<600`, `600-3600`, `3600-21600`, `>=21600` segundos)
 precisa de 30 leituras em CADA braço; abaixo disso informa dados insuficientes.
 `fresh` mede anúncios raros novos dentro do saldo por leitura, creditados uma vez.

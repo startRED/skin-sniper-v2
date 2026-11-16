@@ -208,7 +208,8 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE reads ADD COLUMN eligible_ranges INTEGER;
      ALTER TABLE reads ADD COLUMN oldest_range TEXT;
      ALTER TABLE reads ADD COLUMN oldest_gap INTEGER;
-     ALTER TABLE reads ADD COLUMN new_listings INTEGER;",
+     ALTER TABLE reads ADD COLUMN new_listings INTEGER;
+     ALTER TABLE reads ADD COLUMN outcome TEXT;",
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -623,13 +624,13 @@ mod tests {
         c.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64)
             .unwrap();
         migrate(&mut c).unwrap();
-        let row: (i64, Option<String>, Option<u32>) = c
+        let row: (i64, Option<String>, Option<u32>, Option<String>) = c
             .query_row(
-                "SELECT fresh, choice_range, new_listings FROM reads",
+                "SELECT fresh, choice_range, new_listings, outcome FROM reads",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert_eq!(row, (2, None, None));
+        assert_eq!(row, (2, None, None, None));
     }
 }

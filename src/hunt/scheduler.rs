@@ -159,6 +159,8 @@ pub struct Read {
     pub gain: i64,
     pub range: Option<RangeRead>,
     pub choice: Option<ChoiceSnapshot>,
+    /// Consulta enviada que falhou: fica no registro só para a comparação, fora do ajuste.
+    pub failed: bool,
 }
 
 /// Retrato da escolha; só a primeira resposta da leitura principal o consome.
@@ -798,8 +800,25 @@ impl Queue {
             gain: found.gain_cents.max(0),
             range,
             choice,
+            failed: false,
         });
         self.dirty.insert(id.to_string());
+    }
+
+    /// Consulta enviada que falhou antes do resultado: grava o retrato da escolha uma vez, sem nota nem zero.
+    fn failed_read(&mut self, id: &str, now: i64) {
+        if let Some(choice) = self.focused_snapshots.remove(id) {
+            self.reads.push(Read {
+                new_listings: None,
+                at: now,
+                arm: id.to_string(),
+                fresh: 0,
+                gain: 0,
+                range: None,
+                choice: Some(choice),
+                failed: true,
+            });
+        }
     }
 
     /// Centavos esperados de uma leitura com o estoque cheio e o motivo em palavras do dia a dia.
@@ -1120,6 +1139,9 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         },
         Err(e) => (Err(e), 0),
     };
+    if result.is_err() && attempts > 0 {
+        h.lock().queue.failed_read(&task.id, h.now());
+    }
     match result {
         Ok(()) => {
             set_idle_message(h);
@@ -1664,8 +1686,8 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
         for r in reads {
             let range = r.range;
             tx.execute(
-                "INSERT INTO reads(at, arm, fresh, gain, gap, weight, control, worth, choice_range, choice_gap, choice_control, eligible_ranges, oldest_range, oldest_gap, new_listings)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO reads(at, arm, fresh, gain, gap, weight, control, worth, choice_range, choice_gap, choice_control, eligible_ranges, oldest_range, oldest_gap, new_listings, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 rusqlite::params![
                     r.at,
                     r.arm,
@@ -1682,6 +1704,7 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
                     r.choice.as_ref().map(|x| &x.oldest_range),
                     r.choice.as_ref().and_then(|x| x.oldest_gap),
                     r.new_listings,
+                    r.choice.as_ref().map(|_| if r.failed { "failed" } else { "ok" }),
                 ],
             )?;
         }
@@ -2213,6 +2236,7 @@ mod tests {
             gain: 0,
             range: None,
             choice: None,
+            failed: false,
         };
         assert_eq!(q.take_reads(), vec![read]);
         assert!(q.take_reads().is_empty());
@@ -2516,5 +2540,28 @@ mod tests {
         );
         q.reward("r:a", 107, Found::default());
         assert!(q.take_reads().pop().unwrap().choice.is_none());
+    }
+
+    #[test]
+    fn sent_failure_records_choice_once_without_touching_stats() {
+        let mut q = Queue::default();
+        let rare = |id: &str| Task {
+            seeds: vec![(1, 2), (5, 6)],
+            ..task(id, 1.0)
+        };
+        q.set_tasks(vec![rare("r:a")]);
+        let t = q.next_matching(100, Task::rare).unwrap();
+        q.focus(t, 100);
+        let stat = q.stats["r:a"].clone();
+        q.failed_read("r:a", 101);
+        q.failed("r:a", 101);
+        q.failed_read("r:a", 102);
+        let reads = q.take_reads();
+        assert_eq!(reads.len(), 1);
+        let r = &reads[0];
+        assert!(r.failed && r.choice.is_some() && r.range.is_none());
+        assert_eq!((r.fresh, r.new_listings), (0, None));
+        assert_eq!(q.stats["r:a"].n, stat.n);
+        assert_eq!(q.stats["r:a"].exposure, stat.exposure);
     }
 }
