@@ -149,6 +149,10 @@ pub struct Opportunity {
     /// Raro: selo "comprovado" / "ainda não comprovado" e o preço sugerido (`pricing::premium`).
     #[serde(default)]
     pub seal: Option<Box<crate::pricing::premium::Seal>>,
+    /// Compra de exploração (piso seguro): o prêmio estimado ainda não se sustenta no limite inferior, mas vendido
+    /// como comum perde centavos. Conta no teto de exploração enquanto não for vendida (`hunt::detect`).
+    #[serde(default)]
+    pub explore: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,6 +197,9 @@ pub struct Purchase {
     pub seed: Option<i64>,
     #[serde(default)]
     pub group: Option<String>,
+    /// Veio de uma oportunidade de exploração (`Opportunity::explore`).
+    #[serde(default)]
+    pub explore: bool,
     /// Quanto vale hoje (`hunt::detect::value_now`); só em `GET /api/purchases`, nunca guardado.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now: Option<Sell>,

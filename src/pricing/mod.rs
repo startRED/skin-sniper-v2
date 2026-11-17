@@ -5,6 +5,7 @@ pub mod combo;
 pub mod fees;
 pub mod groups;
 pub mod premium;
+pub mod rarity;
 pub mod sell;
 
 /// `1234` → `R$ 12,34`; negativo → `-R$ 1,20`.

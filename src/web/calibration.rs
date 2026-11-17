@@ -129,6 +129,7 @@ pub async fn bought(
                 float: o.float,
                 seed: o.seed,
                 group: o.group,
+                explore: o.explore,
                 now: None,
             };
             c.execute(

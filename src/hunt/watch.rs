@@ -113,7 +113,10 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
                     (None, Some(g)) => rare_multiples(h, &t.name, &g.key),
                     (None, None) => vec![],
                 };
-                (multiples.len() >= RARE_MIN_SALES).then_some(RareEvidence { multiples })
+                (multiples.len() >= RARE_MIN_SALES).then_some(RareEvidence {
+                    multiples,
+                    ..Default::default()
+                })
             } else {
                 None
             };
