@@ -645,12 +645,19 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
     e, depois da trava, o campo "Vendi por". A oportunidade comprada não é apagada pela limpeza de 7 dias. A data
     da trava é estimada (7 dias arredondados para a hora cheia, regra tirada de uma compra só); confirmação pelo
     inventário não existe, porque o app não tem login.
-  - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo
-    lentas ou caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo); cada skin no máximo 1×/24 h,
-    sem gastar consulta da Steam. A
-    mesma vaga prioriza nomes vigiados cujo cache de vendas falta ou venceu (6 h), a cada 15 s enquanto a última
-    consulta não falhou. A cota e a pausa do CSFloat continuam obrigatórias; falhas por nome esperam 10 min.
-    Cada leitura refaz a prova; quando os seeds pagantes de uma skin crescem, a seleção é refeita na hora.
+  - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo lentas ou
+    caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo): a vez é da lista atendida há mais tempo
+    (nome das duas conta na de tabela); cada skin das listas no máximo 1×/24 h (a vigiada relê quando o cache de 6
+    h vence), sem gastar consulta da Steam. Entre os nomes vencidos lê primeiro o nunca lido e depois o lido há
+    mais tempo, dentro da lista da vez (a outra só entra quando a da vez não tem nome vencido), e ao reiniciar
+    retoma a volta gravada em `pattern_seen`, que só anota o nome que o CSFloat respondeu (pausa e cota devolvem a
+    vez na hora; rede fora do ar adia o nome só até reiniciar): pela ordem de giro ele relia o topo todo dia e não
+    chegava ao fim da lista (17/11: só os 124 primeiros dos 338 nomes de tabela; 940 nomes ao todo, mais do que as
+    vagas de um dia). A mesma vaga prioriza nomes vigiados cujo cache de vendas falta ou venceu (6 h), a cada 15 s
+    enquanto a última consulta não falhou. A cota e a pausa do CSFloat continuam obrigatórias; falha de um nome
+    vigiado espera 10 min, e a vaga seguinte à falha de um vigiado é das listas (se elas têm nome vencido), para
+    que vigiados falhando sem parar não tomem todas as vagas. Cada leitura refaz a prova; quando os seeds pagantes
+    de uma skin crescem, a seleção é refeita na hora.
   - **Medido em 12/11** (45 759 vendas guardadas; teste `catalog_on_a_real_db`, só leitura): 15 skins e 231
     seeds pagantes. Por piso comum: até US$ 2 — Glock-18 High Beam (4 seeds), Sawed-Off Amber Fade (8), USP-S
     Tropical Breeze (1); US$ 3–5 — P2000 Amber Fade (5), Desert Eagle Serpent Strike (2), MP7 Amberline (5),

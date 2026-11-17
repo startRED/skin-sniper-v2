@@ -348,6 +348,38 @@ pub(crate) async fn load_cache(h: &Hunt) -> Result<()> {
     Ok(())
 }
 
+/// Retoma a volta do coletor depois de reiniciar: sem isto ele recomeçava do topo do giro a cada reinício.
+pub(crate) async fn load_seen(h: &Hunt) -> Result<()> {
+    let seen: Vec<(String, i64)> =
+        h.db.call(|c| {
+            c.prepare("SELECT name, at FROM pattern_seen")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .await?;
+    h.lock().learn_seen.extend(seen);
+    Ok(())
+}
+
+/// Quando a lista foi atendida pela última vez: a tentativa mais recente entre os nomes dela.
+fn served(list: &[String], seen: &HashMap<String, i64>) -> i64 {
+    list.iter()
+        .filter_map(|n| seen.get(n))
+        .copied()
+        .max()
+        .unwrap_or(0)
+}
+
+/// O próximo nome de uma lista: o nunca lido e, depois, o lido há mais tempo; empate segue a ordem da lista.
+/// Pela ordem da lista o coletor relia todo dia o topo do giro e não chegava ao resto (17/11: só os 124 primeiros
+/// dos 338 nomes de tabela foram pedidos; as 16 skins de tabela sem venda começam na posição 145).
+fn next_due(names: Vec<String>, seen: &HashMap<String, i64>, now: i64) -> Option<String> {
+    names
+        .into_iter()
+        .filter(|n| seen.get(n).is_none_or(|at| now - at >= REFETCH))
+        .min_by_key(|n| seen.get(n).copied().unwrap_or(0))
+}
+
 pub(crate) async fn cache_sales(h: &Hunt, name: &str, sales: &[crate::csfloat::CsfloatSale]) {
     let at = h.now();
     let n = name.to_string();
@@ -408,49 +440,101 @@ pub async fn maybe_step(h: &Hunt) {
     };
     let names = match catalog::load_items(&h.db).await {
         Ok(items) => {
-            // metade das leituras para as skins de catálogo de pattern, metade para descobrir seed novo
-            let (table, rest) = (
-                catalog_names(&pattern_items),
-                candidates(items, saldo, ratio, now),
-            );
-            if (now / GAP) % 2 == 0 {
-                [table, rest].concat()
+            // metade das leituras para as skins de catálogo de pattern, metade para descobrir seed novo: a vez é
+            // da lista atendida há mais tempo. Pela paridade do relógio, vagas atrasadas ou reinícios na mesma
+            // fase deixavam uma lista sem vez. Nome das duas listas conta só na de tabela: lido, ele atendia as
+            // duas de uma vez e o empate dava a vez sempre à tabela.
+            let table = catalog_names(&pattern_items);
+            let rest: Vec<String> = candidates(items, saldo, ratio, now)
+                .into_iter()
+                .filter(|n| !table.contains(n))
+                .collect();
+            if served(&table, &seen) <= served(&rest, &seen) {
+                [table, rest]
             } else {
-                [rest, table].concat()
+                [rest, table]
             }
         }
         Err(e) => return tracing::warn!("patterns: catálogo ilegível: {e}"),
     };
     let name = {
         let s = h.lock();
-        // A mesma vaga aquece qualquer nome vigiado, inclusive os de giro baixo/sem piso do catálogo.
-        s.queue
+        let stale = |n: &String| {
+            s.csfloat_cache
+                .get(n)
+                .is_none_or(|(at, _)| now - at >= super::catalog::HISTORY_TTL)
+        };
+        let watched: Vec<String> = s
+            .queue
             .tasks()
             .into_iter()
             .filter(|t| s.queue.external.as_ref() != Some(&t.id))
             .map(|t| t.name)
-            .filter(|n| {
-                seen.get(n).is_none_or(|at| now - at >= 600)
-                    && s.csfloat_cache
-                        .get(n)
-                        .is_none_or(|(at, _)| now - at >= super::catalog::HISTORY_TTL)
-            })
-            .min_by_key(|n| (seen.get(n).copied().unwrap_or(0), n.clone()))
-            .or_else(|| {
-                names
-                    .into_iter()
-                    .find(|n| seen.get(n).is_none_or(|at| now - at >= REFETCH))
-            })
+            .collect();
+        // A última tentativa foi de um vigiado que segue sem cache (falhou): esta vaga é das listas (dele só se
+        // elas não têm nome vencido), senão vigiados falhando sem parar tomavam todas as vagas.
+        let failed_last = seen
+            .iter()
+            .max_by_key(|(n, at)| (**at, (*n).clone()))
+            .is_some_and(|(n, _)| watched.contains(n) && stale(n));
+        // A mesma vaga aquece qualquer nome vigiado, inclusive os de giro baixo/sem piso do catálogo.
+        let warm = watched
+            .iter()
+            .filter(|n| seen.get(*n).is_none_or(|at| now - at >= 600) && stale(n))
+            .min_by_key(|n| (seen.get(*n).copied().unwrap_or(0), (*n).clone()))
+            .cloned();
+        // a lista da vez primeiro; a outra só quando a da vez não tem nome vencido
+        let listed = || {
+            names
+                .into_iter()
+                .find_map(|list| next_due(list, &seen, now))
+        };
+        if failed_last {
+            listed().or(warm)
+        } else {
+            warm.or_else(listed)
+        }
     };
     let Some(name) = name else {
         return;
     };
-    h.lock().learn_seen.insert(name.clone(), now);
-    let sales = match crate::research::scope(h.db.clone(), collection_decision(&name), async {
+    let prev = h.lock().learn_seen.insert(name.clone(), now);
+    let result = crate::research::scope(h.db.clone(), collection_decision(&name), async {
         h.csfloat.sales(&name).await.map_err(anyhow::Error::from)
     })
-    .await
-    {
+    .await;
+    use crate::steam::client::Error;
+    match result.as_ref().err().map(|e| e.downcast_ref::<Error>()) {
+        // Sem resposta (rede, ou o registro da tentativa falhou): o nome não conta como lido no banco, mas fica
+        // adiado na memória, para um nome que sempre falha não tomar todas as vagas.
+        // shortcut: o adiamento vale até reiniciar (24 h; 10 min se vigiado); com o programa ligado por dias
+        // seguidos, trocar por uma espera curta própria.
+        Some(Some(Error::Transport(_))) => {}
+        // Pausa ou cota do CSFloat (e decisão não gravada) recusam antes do envio: a vez volta para o nome, senão
+        // uma pausa longa percorria a lista inteira sem coletar nada.
+        Some(Some(Error::RateLimited { .. }) | None) => {
+            let mut s = h.lock();
+            match prev {
+                Some(at) => s.learn_seen.insert(name.clone(), at),
+                None => s.learn_seen.remove(&name),
+            };
+        }
+        // O CSFloat respondeu sobre o nome (vendas ou erro): a vez foi gasta e sobrevive ao reinício.
+        _ => {
+            let n = name.clone();
+            if let Err(e) = h.db.call(move |c| {
+                c.execute(
+                    "INSERT INTO pattern_seen(name, at) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET at = excluded.at",
+                    params![n, now],
+                )
+            })
+            .await
+            {
+                tracing::warn!("patterns: a volta do coletor não persistiu: {e:#}");
+            }
+        }
+    }
+    let sales = match result {
         Ok(s) => s,
         Err(e) => return tracing::warn!("patterns: CSFloat falhou para {name}: {e}"),
     };
@@ -494,11 +578,9 @@ mod tests {
     }
 
     const NOW: i64 = 1_800_000_000;
-    fn clock() -> i64 {
-        NOW
-    }
 
-    /// Skins de tabela fora da curadoria: o coletor lê, a caça (`candidates`, `select_ranges`) não admite.
+    /// Skins de tabela fora da curadoria: entram na lista do coletor, a caça (`candidates`, `select_ranges`) não
+    /// admite. O coletor pedindo esses nomes: `sales_collector_resumes_after_restart_and_reaches_the_tail`.
     #[tokio::test]
     async fn pattern_targets_reach_the_collector_but_not_hunt() {
         const TARGETS: [&str; 3] = [
@@ -522,8 +604,7 @@ mod tests {
                 )?;
             }
             c.execute("INSERT INTO catalog_references(name,observed_at,rank) VALUES (?1,1,0)", [CONTROL])?;
-            // proteção offline: a decisão de pesquisa é gravada antes de qualquer envio; abortá-la impede o HTTP
-            c.execute_batch("CREATE TRIGGER offline BEFORE INSERT ON research_decisions BEGIN SELECT RAISE(ABORT,'offline'); END")
+            Ok(())
         })
         .await
         .unwrap();
@@ -563,46 +644,6 @@ mod tests {
         assert!(TARGETS.iter().all(|t| wide_rest.iter().any(|n| n == t)));
         assert_eq!(selected(&curated), [CONTROL]);
         assert_eq!(candidates(curated, 0, None, NOW), [CONTROL]);
-
-        // o coletor real, um alvo vencido por vez; os demais nomes lidos agora
-        let (events, _) = tokio::sync::broadcast::channel(16);
-        let h = Hunt::with_clock(
-            crate::hunt::HuntDeps {
-                settings: crate::settings::SettingsStore::new(db.clone()),
-                db: db.clone(),
-                steam: std::sync::Arc::new(
-                    crate::steam::client::SteamClient::with_base("http://127.0.0.1:1").unwrap(),
-                ),
-                csfloat: std::sync::Arc::new(
-                    crate::csfloat::CsfloatClient::with_base("http://127.0.0.1:1").unwrap(),
-                ),
-                events,
-                telegram: None,
-            },
-            clock,
-        );
-        for target in TARGETS {
-            {
-                let mut s = h.lock();
-                s.learn_at = NOW - GAP;
-                s.learn_seen = TARGETS
-                    .iter()
-                    .chain([&CONTROL])
-                    .filter(|n| **n != target)
-                    .map(|n| (n.to_string(), NOW))
-                    .collect();
-            }
-            maybe_step(&h).await;
-            assert_eq!(h.lock().learn_seen.get(target), Some(&NOW), "{target}");
-        }
-        let sent: i64 = db
-            .call(|c| c.query_row("SELECT count(*) FROM research_decisions", [], |r| r.get(0)))
-            .await
-            .unwrap();
-        assert_eq!(
-            sent, 0,
-            "nenhuma decisão (nem envio) passou da proteção offline"
-        );
     }
 
     #[test]

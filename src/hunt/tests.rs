@@ -417,6 +417,10 @@ struct Bodies {
     listing_queries: AtomicUsize,
     csfloat: Value,
     csfloat_names: Mutex<Vec<String>>,
+    /// O CSFloat responde 429 (pausa).
+    csfloat_429: AtomicBool,
+    /// O CSFloat responde 500 (erro para o nome pedido).
+    csfloat_500: AtomicBool,
     /// Livro de ofertas (captura real do Negev; o menor anúncio é trocado pelos testes).
     book: Mutex<Value>,
     book_queries: AtomicUsize,
@@ -441,6 +445,8 @@ async fn serve() -> (String, Arc<Bodies>) {
         listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
         csfloat_names: Mutex::new(vec![]),
+        csfloat_429: AtomicBool::new(false),
+        csfloat_500: AtomicBool::new(false),
         book: Mutex::new(fixture("steam_orderbook_negev_2026-11.json")),
         book_queries: AtomicUsize::new(0),
         listings_429: AtomicBool::new(false),
@@ -597,8 +603,15 @@ async fn serve() -> (String, Arc<Bodies>) {
             "/history/{name}/sales",
             get(
                 |AxState(b): AxState<Arc<Bodies>>, Path(n): Path<String>| async move {
+                    use axum::response::IntoResponse;
                     b.csfloat_names.lock().unwrap().push(n);
-                    Json(b.csfloat.clone())
+                    if b.csfloat_429.load(Ordering::Relaxed) {
+                        return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+                    }
+                    if b.csfloat_500.load(Ordering::Relaxed) {
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    Json(b.csfloat.clone()).into_response()
                 },
             ),
         )
@@ -937,6 +950,166 @@ async fn refused_history_waits_per_name_then_recovers_without_faking_freshness()
     assert!(h.lock().history_retry_after.contains_key(ST_MOON));
     assert!(!points_for(&h, MOON, NOW).await.unwrap().is_empty());
     assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 3);
+}
+
+static COLLECTOR_NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(NOW);
+fn collector_clock() -> i64 {
+    COLLECTOR_NOW.load(Ordering::SeqCst)
+}
+
+/// O coletor de verdade contra o servidor local: reiniciar não zera a volta, cada lista recebe a sua vez (mesmo com
+/// vagas atrasadas), o nome nunca lido vem antes de reler o topo do giro, pausa e rede fora do ar não contam como
+/// leitura (nem o registro de pesquisa que falha antes do envio) e vigiados falhando sem parar deixam as listas
+/// avançar.
+#[tokio::test]
+async fn sales_collector_resumes_after_restart_and_reaches_the_tail() {
+    // (nome, vendas/dia, curado): três skins de tabela (a primeira também curada: conta só na lista de tabela) e
+    // uma curada fora das tabelas
+    const NAMES: [(&str, f64, bool); 4] = [
+        ("AWP | Fade (Factory New)", 10.0, true),
+        ("Glock-18 | Fade (Factory New)", 9.0, false),
+        ("M4A1-S | Fade (Factory New)", 8.0, false),
+        ("AK-47 | Redline (Field-Tested)", 20.0, true),
+    ];
+    const GAP: i64 = 120;
+    const DAY: i64 = 24 * 3600;
+    let [t1, t2, t3, r1] = NAMES.map(|n| n.0);
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    db.call(|c| {
+        for (i, (name, sales, curated)) in NAMES.iter().enumerate() {
+            c.execute(
+                "INSERT INTO items(name,g_code,floor_usd_cents,sales_per_day,dispersion,history_at,updated_at)
+                 VALUES (?1,?2,1000,?3,0.2,?4,1)",
+                rusqlite::params![name, format!("G{i:08X}1"), sales, NOW - 100],
+            )?;
+            if *curated {
+                c.execute(
+                    "INSERT INTO catalog_references(name,observed_at,rank) VALUES (?1,1,0)",
+                    [name],
+                )?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // um programa recém-ligado sobre o mesmo banco, na hora de uma vaga
+    let boot = |at: i64, base: &str| {
+        let (base, db) = (base.to_string(), db.clone());
+        async move {
+            COLLECTOR_NOW.store(at, Ordering::SeqCst);
+            let h = Hunt::with_clock(
+                HuntDeps {
+                    settings: SettingsStore::new(db.clone()),
+                    db,
+                    steam: Arc::new(SteamClient::with_base(&base).unwrap()),
+                    csfloat: Arc::new(CsfloatClient::with_base(&base).unwrap()),
+                    events: broadcast::channel(16).0,
+                    telegram: None,
+                },
+                collector_clock,
+            );
+            patterns::load_seen(&h).await.unwrap();
+            h.lock().learn_at = at - GAP;
+            h
+        }
+    };
+    let step = |at: i64| {
+        let boot = boot(at, &base);
+        async move {
+            let h = boot.await;
+            patterns::maybe_step(&h).await;
+            h
+        }
+    };
+    let asked = || std::mem::take(&mut *bodies.csfloat_names.lock().unwrap());
+    let watch = |h: &Hunt, names: &[&str]| {
+        let tasks = names.iter().map(|name| Task {
+            id: format!("d:{name}"),
+            name: name.to_string(),
+            code: "G180420B6053004".into(),
+            wear: Some(2),
+            seeds: vec![],
+            float: None,
+            score: 1.0,
+        });
+        h.lock().queue.set_tasks(tasks.collect());
+    };
+
+    // pausa do CSFloat: o pedido volta 429 e o nome não gasta a vez; religado, é ele de novo
+    bodies.csfloat_429.store(true, Ordering::Relaxed);
+    let paused = step(NOW).await;
+    bodies.csfloat_429.store(false, Ordering::Relaxed);
+    paused.lock().learn_at = NOW - GAP;
+    patterns::maybe_step(&paused).await;
+    assert!(paused.lock().learn_seen.is_empty());
+    assert_eq!(asked(), [t1], "em pausa o cliente recusa sem enviar");
+    // rede fora do ar (porta morta): o nome fica adiado só na memória daquele programa; no banco não conta
+    let offline = boot(NOW, "http://127.0.0.1:1").await;
+    patterns::maybe_step(&offline).await;
+    assert_eq!(offline.lock().learn_seen.get(t1), Some(&NOW));
+    // o registro da pesquisa falha antes do envio: sem a decisão a vez volta; sem a tentativa o nome fica adiado só
+    // na memória; nos dois casos nada sai para o CSFloat
+    for (table, mark) in [
+        ("research_decisions", None),
+        ("research_attempts", Some(&NOW)),
+    ] {
+        db.call(move |c| {
+            c.execute_batch(&format!(
+                "CREATE TRIGGER broken BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'quebrado'); END"
+            ))
+        })
+        .await
+        .unwrap();
+        let broken = step(NOW).await;
+        assert_eq!(broken.lock().learn_seen.get(t1), mark, "{table}");
+        db.call(|c| c.execute_batch("DROP TRIGGER broken"))
+            .await
+            .unwrap();
+    }
+    assert!(asked().is_empty());
+    let kept: i64 = db
+        .call(|c| c.query_row("SELECT count(*) FROM pattern_seen", [], |r| r.get(0)))
+        .await
+        .unwrap();
+    assert_eq!(kept, 0, "sem resposta do CSFloat nada é anotado");
+
+    // vagas atrasadas (a cada 240 s, sempre na mesma paridade do relógio) e um reinício por vaga: as listas se
+    // alternam mesmo assim; quando a lista da vez não tem nome vencido a vaga cai para a outra
+    for gaps in [0, 2, 4, 6, 8] {
+        step(NOW + gaps * GAP).await;
+    }
+    assert_eq!(
+        asked(),
+        [t1, r1, t2, t3],
+        "depois de reiniciar o topo não é relido, e nada é lido duas vezes em 24 h"
+    );
+    // listas sem nome vencido e a última tentativa foi de um vigiado que falhou: ele não fica preso, tenta de novo
+    let h = boot(NOW + 12 * GAP, &base).await;
+    watch(&h, &[MOON]);
+    h.lock()
+        .learn_seen
+        .insert(MOON.into(), NOW + 12 * GAP - 600);
+    patterns::maybe_step(&h).await;
+    assert_eq!(asked(), [MOON]);
+    // um dia depois, a vez é do resto (atendido há mais tempo), mesmo com nome de tabela lido antes dele
+    step(NOW + DAY + 6 * GAP).await;
+    step(NOW + DAY + 8 * GAP).await;
+    assert_eq!(asked(), [r1, t1]);
+
+    // três vigiados falhando sem parar (o CSFloat responde 500 a tudo): a vaga seguinte a cada falha é das listas,
+    // que continuam avançando; 10 min depois o primeiro vigiado tenta de novo
+    const MW_MOON: &str = "Glock-18 | Moonrise (Minimal Wear)";
+    let failing = NOW + 3 * DAY;
+    bodies.csfloat_500.store(true, Ordering::Relaxed);
+    let h = boot(failing, &base).await;
+    watch(&h, &[MOON, ST_MOON, MW_MOON]);
+    for slot in 0..8 {
+        COLLECTOR_NOW.store(failing + slot * GAP, Ordering::SeqCst);
+        patterns::maybe_step(&h).await;
+    }
+    assert_eq!(asked(), [MW_MOON, r1, ST_MOON, t2, MOON, t3, MW_MOON, t1]);
 }
 
 #[tokio::test]
