@@ -259,6 +259,7 @@ impl Hunt {
         scheduler::load_pace(self).await?;
         patterns::load(self).await?;
         patterns::load_cache(self).await?;
+        patterns::load_seen(self).await?;
         explore::load(self).await?;
         {
             let mut s = self.lock();
