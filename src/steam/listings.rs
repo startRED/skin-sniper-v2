@@ -263,9 +263,18 @@ async fn query_legacy_named(
     code: &str,
     start: u32,
 ) -> Result<ListingsPage> {
-    let (path, q) = legacy_query(name, start);
+    let (path, q) = legacy_query(name, start, 20);
     let data = c.legacy_json(&path, &q, false).await?;
     let page = super::legacy::parse_page(&data, name, code, start)?;
+    c.note_legacy_ok();
+    Ok(page)
+}
+
+/// Somente a primeira página do nome, pela conexão pública principal.
+pub async fn query_legacy_floor(c: &SteamClient, name: &str, code: &str) -> Result<ListingsPage> {
+    let (path, q) = legacy_query(name, 0, 100);
+    let data = c.legacy_json_main(&path, &q).await?;
+    let page = super::legacy::parse_page(&data, name, code, 0)?;
     c.note_legacy_ok();
     Ok(page)
 }
@@ -276,7 +285,7 @@ pub async fn query_public_alt(
     name: &str,
     code: &str,
 ) -> Option<Result<ListingsPage>> {
-    let (path, q) = legacy_query(name, 0);
+    let (path, q) = legacy_query(name, 0, 20);
     Some(
         c.legacy_json_public_alt(&path, &q)
             .await?
@@ -284,12 +293,12 @@ pub async fn query_public_alt(
     )
 }
 
-fn legacy_query(name: &str, start: u32) -> (String, [(&'static str, String); 6]) {
+fn legacy_query(name: &str, start: u32, count: u32) -> (String, [(&'static str, String); 6]) {
     let path = format!("/market/listings/730/{}/render/", path_escape(name));
     let q = [
         ("query", String::new()),
         ("start", start.to_string()),
-        ("count", "20".into()),
+        ("count", count.to_string()),
         ("country", "BR".into()),
         ("language", "english".into()),
         ("currency", CURRENCY_BRL.to_string()),

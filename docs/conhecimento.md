@@ -20,6 +20,10 @@ Glossário: *ask* = preço pedido num anúncio; *venda paga* = transação fecha
   `S/internal/steam/steam.go:49-52`) Atualização medida em 06/11: com o cookie público `bMarketOptOut=1`,
   o nome completo e `/render/?currency=7`, a resposta é JSON com anúncios, seed e float mesmo enquanto
   `/market/actions` devolve 429. Contrato e capturas: `pesquisa-web.md`, seção 10.
+- Medido em 17/11/2026 com a opção antiga, `start=0&count=100` respondeu 200 com `pagesize=100` e os
+  100 anúncios mais baratos do nome, com seed e float. As leituras levaram 250 a 1.650 ms (~600 KB por
+  resposta). A captura de P250 | Nevermore (Minimal Wear) tinha 331 anúncios no total e os 100 da
+  primeira página foram preservados na amostra do teste.
 - O endpoint clássico `/market/pricehistory/` foi medido em 06/11: sem login respondeu 400; com a sessão
   do app e a opção antiga respondeu 200 com pontos em BRL, identificados por `price_prefix="R$"`.
   Contrato e limitações: `pesquisa-web.md`, seção 10. A página SSR continua como conhecimento de referência (1.6).

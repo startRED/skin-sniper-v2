@@ -56,8 +56,8 @@ pub(crate) struct Active {
     pub attempted_at: i64,
 }
 
-/// Menor anúncio por (nome, grupo raro ou nenhum).
-pub(crate) type Rivals = HashMap<(String, Option<String>), i64>;
+/// Anúncios por (nome, grupo raro ou nenhum), em ordem de preço.
+pub(crate) type Rivals = HashMap<(String, Option<String>), Vec<(i64, String)>>;
 
 pub(crate) struct Shared {
     pub saldo: i64,

@@ -104,6 +104,8 @@ impl Endpoint {
 #[derive(Debug)]
 pub enum Error {
     BudgetExhausted,
+    /// A rota principal não tem vaga próxima para a varredura.
+    MainSlotBusy,
     /// 429 da Steam: o grupo da consulta está pausado até `until` (segundos Unix).
     RateLimited {
         until: i64,
@@ -143,6 +145,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BudgetExhausted => write!(f, "cota de exploração esgotada"),
+            Self::MainSlotBusy => write!(f, "vaga da varredura ocupada"),
             Self::RateLimited { until } => write!(f, "Steam respondeu 429; pausado até {until}"),
             Self::BreakerOpen { endpoint, until } => write!(f, "{endpoint:?} em pausa até {until}"),
             Self::Http { endpoint, status } => write!(f, "{endpoint:?}: HTTP {status}"),
@@ -605,6 +608,31 @@ struct SendPace {
     last_bucket: [Option<Instant>; 3],
 }
 
+impl SendPace {
+    fn ready_at(
+        &self,
+        inner: &Inner,
+        now: Instant,
+        bucket: usize,
+        alt: bool,
+        gap: Duration,
+    ) -> Instant {
+        let any = inner.last_any.map_or(now, |last| last + inner.spacing);
+        let bucket_at = self.last_bucket[bucket].map_or(now, |last| last + gap);
+        let last_read = if alt {
+            inner.alt_last_read
+        } else {
+            inner.last_read
+        };
+        let read_at = if bucket == 2 {
+            now
+        } else {
+            last_read.map_or(now, |last| last + inner.read_spacing)
+        };
+        any.max(bucket_at).max(read_at)
+    }
+}
+
 enum Slot {
     Main,
     Alt,
@@ -715,7 +743,7 @@ impl SteamClient {
     }
 
     // O banco pode atrasar reservas diferentes; o intervalo precisa valer também no envio real.
-    async fn pace_send(&self, ep: Endpoint, alt: bool) -> Result<()> {
+    async fn pace_send(&self, ep: Endpoint, alt: bool, deadline: Option<Instant>) -> Result<()> {
         let gate = if alt {
             &self.alt_send_pace
         } else {
@@ -739,7 +767,7 @@ impl SteamClient {
                         until: unix_in(t - now),
                     });
                 }
-                let (spacing, gap) = if alt {
+                let gap = if alt {
                     if let Some(t) = inner
                         .alt_limiter
                         .pause_end(now)
@@ -751,29 +779,19 @@ impl SteamClient {
                             until: unix_in(t - now),
                         });
                     }
-                    (inner.spacing, inner.alt_limiter.gap)
+                    inner.alt_limiter.gap
                 } else {
                     if let Some(t) = inner.bucket(ep).pause_end(now) {
                         return Err(Error::RateLimited {
                             until: unix_in(t - now),
                         });
                     }
-                    let spacing = inner.spacing;
-                    (spacing, inner.bucket(ep).gap)
+                    inner.bucket(ep).gap
                 };
-                let any = inner.last_any.map_or(now, |last| last + spacing);
-                let bucket_at = pace.last_bucket[bucket].map_or(now, |last| last + gap);
-                let last_read = if alt {
-                    inner.alt_last_read
-                } else {
-                    inner.last_read
-                };
-                let read_at = if bucket == 2 {
-                    now
-                } else {
-                    last_read.map_or(now, |last| last + inner.read_spacing)
-                };
-                let at = any.max(bucket_at).max(read_at);
+                let at = pace.ready_at(&inner, now, bucket, alt, gap);
+                if deadline.is_some_and(|deadline| at > deadline) {
+                    return Err(Error::MainSlotBusy);
+                }
                 if at <= now {
                     // O contador representa transporte iniciado, não vaga reservada.
                     inner.sent += 1;
@@ -1259,7 +1277,7 @@ impl SteamClient {
                 .header("x-valve-request-type", "queryAction")
                 .header("accept", "application/json, text/javascript, */*");
             let response = self
-                .send_checked(ep, req, true, Some(envelope_problem), attempt == 0)
+                .send_checked(ep, req, true, Some(envelope_problem), attempt == 0, false)
                 .await;
             if matches!(response, Err(Error::ActionUnavailable { .. })) && attempt == 0 {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1303,6 +1321,20 @@ impl SteamClient {
         query: &[(&str, String)],
         auth: bool,
     ) -> Result<Value> {
+        self.legacy_json_on_route(path, query, auth, false).await
+    }
+
+    pub async fn legacy_json_main(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        self.legacy_json_on_route(path, query, false, true).await
+    }
+
+    async fn legacy_json_on_route(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        auth: bool,
+        main_only: bool,
+    ) -> Result<Value> {
         let mut req = self
             .http
             .get(self.url(path))
@@ -1311,7 +1343,9 @@ impl SteamClient {
         if !auth {
             req = req.header(COOKIE, "bMarketOptOut=1");
         }
-        let (parts, body) = self.send(Endpoint::Legacy, req, auth).await?;
+        let (parts, body) = self
+            .send_checked(Endpoint::Legacy, req, auth, None, true, main_only)
+            .await?;
         if parts.status != 200 {
             return Err(Error::Http {
                 endpoint: Endpoint::Legacy,
@@ -1412,7 +1446,7 @@ impl SteamClient {
         req: RequestBuilder,
         auth: bool,
     ) -> Result<(Parts, Vec<u8>)> {
-        self.send_checked(ep, req, auth, None, true).await
+        self.send_checked(ep, req, auth, None, true, false).await
     }
 
     /// Como `send`, mas `check(status, corpo)` pode dizer que a resposta (200) não é o envelope esperado:
@@ -1424,6 +1458,7 @@ impl SteamClient {
         auth: bool,
         check: Option<EnvelopeCheck>,
         reset_on_success: bool,
+        main_only: bool,
     ) -> Result<(Parts, Vec<u8>)> {
         if self.public_only && matches!(ep, Endpoint::Session | Endpoint::Buy | Endpoint::Auth) {
             return Err(Error::PublicOnly);
@@ -1437,6 +1472,16 @@ impl SteamClient {
                 }
             })?;
         }
+        let allow_alt = !(main_only || ep == Endpoint::Legacy && auth);
+        let deadline = main_only.then(|| Instant::now() + Duration::from_secs(3));
+        if let Some(at) = deadline {
+            // Confere também o relógio do envio antes de ocupar uma vaga no limitador.
+            let pace = self.main_send_pace.lock().await;
+            let g = self.inner.lock().unwrap();
+            if pace.ready_at(&g, Instant::now(), 1, false, g.side.gap) > at {
+                return Err(Error::MainSlotBusy);
+            }
+        }
         loop {
             let slot = {
                 let now = Instant::now();
@@ -1449,7 +1494,7 @@ impl SteamClient {
                 }
                 // No modo público, usa a vaga extra primeiro, sem encaminhar histórico autenticado.
                 if self.alt_public_only
-                    && !(ep == Endpoint::Legacy && auth)
+                    && allow_alt
                     && matches!(self.alt_slot(&mut g, ep, now), Some(Ok(())))
                 {
                     Slot::Alt
@@ -1464,10 +1509,10 @@ impl SteamClient {
                             g.next_any = now + g.spacing;
                             Slot::Main
                         }
-                        Err(w) => match if ep == Endpoint::Legacy && auth {
-                            None
-                        } else {
+                        Err(w) => match if allow_alt {
                             self.alt_slot(&mut g, ep, now)
+                        } else {
+                            None
                         } {
                             Some(Ok(())) => Slot::Alt,
                             alt => {
@@ -1491,6 +1536,9 @@ impl SteamClient {
             };
             match slot {
                 Slot::Main => break,
+                Slot::Wait(w) if deadline.is_some_and(|at| Instant::now() + w > at) => {
+                    return Err(Error::MainSlotBusy);
+                }
                 Slot::Wait(w) => tokio::time::sleep(w).await,
                 Slot::Alt => {
                     if let Some(r) = self.send_alt(ep, &req, check, reset_on_success).await {
@@ -1528,7 +1576,7 @@ impl SteamClient {
             .map_err(|e| Error::Transport(e.without_url().to_string()))?;
         self.public_request(ep, &mut request)?;
         let attempt = self.reserve_read(ep, "main").await?;
-        if let Err(e) = self.pace_send(ep, false).await {
+        if let Err(e) = self.pace_send(ep, false, deadline).await {
             crate::research::finish(attempt, "not_sent").await;
             return Err(e);
         }
@@ -1607,7 +1655,7 @@ impl SteamClient {
             Ok(attempt) => attempt,
             Err(e) => return Some(Err(e)),
         };
-        if let Err(e) = self.pace_send(ep, true).await {
+        if let Err(e) = self.pace_send(ep, true, None).await {
             crate::research::finish(attempt, "not_sent").await;
             return if matches!(e, Error::RateLimited { .. }) {
                 None
@@ -2599,6 +2647,30 @@ mod tests {
             st.last_ok_at, None,
             "resposta do livro não diz que os anúncios voltaram"
         );
+    }
+
+    #[tokio::test]
+    async fn floor_legacy_skips_a_distant_slot_without_sending() {
+        let c = SteamClient::with_base("http://127.0.0.1:1").unwrap();
+        for blocked_gate in ["bucket", "global", "read", "send"] {
+            let now = Instant::now();
+            let later = now + Duration::from_secs(60);
+            {
+                let mut g = c.inner.lock().unwrap();
+                g.next_any = if blocked_gate == "global" { later } else { now };
+                g.bucket(Endpoint::Legacy).next_at =
+                    if blocked_gate == "bucket" { later } else { now };
+                g.last_read = (blocked_gate == "read").then_some(now);
+            }
+            c.main_send_pace.lock().await.last_bucket[1] =
+                (blocked_gate == "send").then_some(later);
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), c.legacy_json_main("/unused", &[]))
+                    .await
+                    .expect("a varredura deve pular a vaga distante imediatamente");
+            assert!(matches!(result, Err(Error::MainSlotBusy)));
+            assert_eq!(c.sent(), 0);
+        }
     }
 
     #[tokio::test]

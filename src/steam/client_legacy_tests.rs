@@ -716,9 +716,9 @@ async fn public_exit_respects_budget_and_global_send_spacing() {
     c.alt_public_only = true;
     c.set_gap_for_test(Duration::from_millis(50));
     c.inner.lock().unwrap().alt_limiter.gap = Duration::from_millis(5);
-    c.pace_send(Endpoint::Book, true).await.unwrap();
+    c.pace_send(Endpoint::Book, true, None).await.unwrap();
     let start = Instant::now();
-    c.pace_send(Endpoint::Listings, true).await.unwrap();
+    c.pace_send(Endpoint::Listings, true, None).await.unwrap();
     assert!(start.elapsed() >= Duration::from_millis(40));
     let (db, _dir) = crate::db::temp_db();
     c.set_research_db(db.clone());

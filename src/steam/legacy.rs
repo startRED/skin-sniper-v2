@@ -194,6 +194,33 @@ mod tests {
     }
 
     #[test]
+    fn real_floor_page_keeps_all_prices_seeds_and_floats() {
+        let data = serde_json::from_str(include_str!(
+            "../../testdata/steam_legacy_render_nevermore_100_2026-11.json"
+        ))
+        .unwrap();
+        let page = parse_page(
+            &data,
+            "P250 | Nevermore (Minimal Wear)",
+            "G182420AD063004",
+            0,
+        )
+        .unwrap();
+        assert_eq!(page.listings.len(), 100);
+        assert!(page.more);
+        assert!(
+            page.listings
+                .windows(2)
+                .all(|p| p[0].price_cents <= p[1].price_cents)
+        );
+        assert!(
+            page.listings
+                .iter()
+                .all(|l| l.seed.is_some() && l.float.is_some())
+        );
+    }
+
+    #[test]
     fn real_history_and_invalid_rows() {
         // Captura real: três pontos iniciais e três finais, com valores originais.
         let v: Value = serde_json::from_str(include_str!(

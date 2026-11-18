@@ -1012,21 +1012,44 @@ async fn evaluate_one(
     })
 }
 
+// Guarda todos os IDs distintos por preço: uma página de piso pode invalidar os mais baratos.
+fn remember_rival(rivals: &mut Vec<(i64, String)>, price: i64, id: &str) {
+    if let Some((old, _)) = rivals.iter_mut().find(|(_, candidate)| candidate == id) {
+        *old = (*old).min(price);
+    } else {
+        rivals.push((price, id.to_owned()));
+    }
+    rivals.sort_unstable();
+}
+
 /// Processa uma página de uma tarefa. Ver o módulo para as regras.
 pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outcome> {
+    process_page(h, task, page, None).await
+}
+
+pub(super) async fn process_page(
+    h: &Hunt,
+    task: &Task,
+    page: &ListingsPage,
+    floor_name: Option<&str>,
+) -> Result<Outcome> {
     let now = h.now();
     let saldo = h.saldo();
+    let state_key = floor_name.map_or_else(|| task.floor_key(), |name| task.floor_sweep_key(name));
     let relevant: Vec<&Listing> = page
         .listings
         .iter()
-        .filter(|l| task.rare() || l.name == task.name)
+        .filter(|l| floor_name.map_or_else(|| task.rare() || l.name == task.name, |n| l.name == n))
         .collect();
     let mut out = Outcome::default();
     let floor = relevant.iter().map(|l| l.price_cents).min();
     {
         let mut s = h.lock();
-        let previous = s.floors.insert(task.floor_key(), (floor, now));
-        if floor.is_some_and(|p| p > saldo) && previous.is_none_or(|(p, _)| p != floor) {
+        let previous = s.floors.insert(state_key.clone(), (floor, now));
+        if floor_name.is_none()
+            && floor.is_some_and(|p| p > saldo)
+            && previous.is_none_or(|(p, _)| p != floor)
+        {
             // A seleção já sabe excluir o alvo caro; não precisa esperar os 15 min periódicos.
             s.selected = None;
         }
@@ -1037,31 +1060,45 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .or_else(|| super::patterns::group(&learned, &x.name, x.seed).map(|(g, _)| g))
             .map(|g| g.key)
     };
-    // Raro: o menor anúncio de cada (nome, grupo) nas outras faixas, vistas há menos de FLOOR_TTL.
+    // Raro: concorrentes do mesmo (nome, grupo) nas outras leituras dentro de FLOOR_TTL.
     // shortcut: o concorrente novo de uma faixa só pesa na oportunidade de outra quando a dela é consultada de
     // novo; se isso deixar lucro velho na tela, reavaliar as ativas do mesmo grupo aqui.
     let mut elsewhere = super::Rivals::new();
-    if task.rare() {
+    // Uma página de piso vazia não comprova que os concorrentes sumiram.
+    if task.rare() && (floor_name.is_none() || !relevant.is_empty()) {
         let mut here = super::Rivals::new();
         for l in &relevant {
-            let p = here
-                .entry((l.name.clone(), key(l)))
-                .or_insert(l.price_cents);
-            *p = (*p).min(l.price_cents);
+            let rivals = here.entry((l.name.clone(), key(l))).or_default();
+            remember_rival(rivals, l.price_cents, &l.listing_id);
         }
-        let (mine, prefix) = (task.floor_key(), format!("{}#", task.id));
+        let range_prefix = format!("{}#", task.id);
+        let floor_prefix = task.floor_sweep_key("");
+        let floor_max = floor_name.and_then(|_| relevant.iter().map(|l| l.price_cents).max());
         let mut s = h.lock();
-        for (_, (_, m)) in s
-            .rivals
-            .iter()
-            .filter(|(k, (at, _))| **k != mine && k.starts_with(&prefix) && now - at < FLOOR_TTL)
-        {
-            for (g, &p) in m {
-                let e = elsewhere.entry(g.clone()).or_insert(p);
-                *e = (*e).min(p);
+        for (_, (_, groups)) in s.rivals.iter_mut().filter(|(k, (at, _))| {
+            **k != state_key
+                && (k.starts_with(&range_prefix) || k.starts_with(&floor_prefix))
+                && now - *at < FLOOR_TTL
+        }) {
+            for (group, rivals) in groups {
+                if floor_name == Some(group.0.as_str()) {
+                    rivals.retain(|(price, id)| {
+                        (page.more && floor_max.is_none_or(|max| *price >= max))
+                            || relevant.iter().any(|l| l.listing_id == *id)
+                    });
+                }
+                if here.contains_key(group) {
+                    let candidates = elsewhere.entry(group.clone()).or_default();
+                    for (price, id) in rivals {
+                        if relevant.iter().any(|l| l.listing_id == *id) {
+                            continue;
+                        }
+                        remember_rival(candidates, *price, id);
+                    }
+                }
             }
         }
-        s.rivals.insert(mine, (now, here));
+        s.rivals.insert(state_key.clone(), (now, here));
     }
     let ids: Vec<String> = relevant.iter().map(|l| l.listing_id.clone()).collect();
     if let Err(error) = h.db.call(move |c| {
@@ -1082,12 +1119,17 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
     // --- sumiu? só com página confiável; fora da primeira página o anúncio pode só ter sido empurrado
     let trust = {
         let mut s = h.lock();
+        let key = if floor_name.is_some() {
+            &state_key
+        } else {
+            &task.id
+        };
         if page.listings.is_empty() {
-            let n = s.empty_streak.entry(task.id.clone()).or_default();
+            let n = s.empty_streak.entry(key.clone()).or_default();
             *n = n.saturating_add(1);
             *n >= EMPTY_PAGES_TO_TRUST
         } else {
-            s.empty_streak.remove(&task.id);
+            s.empty_streak.remove(key);
             true
         }
     };
@@ -1106,13 +1148,20 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .filter(|a| a.task == task.id && !present.contains(a.opp.id.as_str()))
             // raro em rodízio: a página só cobre a faixa de seed consultada
             .filter(|a| {
+                if let Some(name) = floor_name {
+                    return a.opp.name == name;
+                }
                 task.seeds.first().is_none_or(|&(lo, hi)| {
                     a.opp
                         .seed
                         .is_some_and(|s| (i64::from(lo)..=i64::from(hi)).contains(&s))
                 })
             })
-            .filter(|a| !page.more || a.opp.price_cents <= page_max)
+            .filter(|a| {
+                !page.more
+                    || a.opp.price_cents < page_max
+                    || (floor_name.is_none() && a.opp.price_cents == page_max)
+            })
             .map(|a| a.opp.id.clone())
             .collect();
         out.gone = mark_gone(h, missing, GoneReason::Unavailable).await?;
@@ -1157,7 +1206,12 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
             .iter()
             .filter(|o| o.name == l.name && o.listing_id != l.listing_id && key(o) == mine)
             .map(|o| o.price_cents)
-            .chain(elsewhere.get(&(l.name.clone(), mine.clone())).copied())
+            .chain(
+                elsewhere
+                    .get(&(l.name.clone(), mine.clone()))
+                    .and_then(|rivals| rivals.iter().find(|(_, id)| id != &l.listing_id))
+                    .map(|(price, _)| *price),
+            )
             .min();
         if l.price_cents > saldo && active.is_none() {
             // Guarda uma vez por ciclo: o mesmo anúncio volta em toda consulta da tarefa.
@@ -1196,7 +1250,9 @@ pub async fn process(h: &Hunt, task: &Task, page: &ListingsPage) -> Result<Outco
                 continue;
             }
         };
-        let new_credit = !was_known && super::explore::first_credit(h, &l.listing_id).await?;
+        let new_credit = floor_name.is_none()
+            && !was_known
+            && super::explore::first_credit(h, &l.listing_id).await?;
         // `mine` é o grupo raro (tabela ou aprendido), o mesmo que a avaliação usou
         if judged.refused == Some("sem_lucro")
             && let Some(n) = &judged.near
