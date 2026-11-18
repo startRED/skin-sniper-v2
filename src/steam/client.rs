@@ -1185,6 +1185,12 @@ impl SteamClient {
         g.read_spacing = gap;
     }
 
+    /// Só para teste: a fila nativa fica sem vaga por `wait`, como logo depois de uma consulta num intervalo longo.
+    #[cfg(test)]
+    pub(crate) fn hold_native_for_test(&self, wait: Duration) {
+        self.inner.lock().unwrap().limiter.next_at = Instant::now() + wait;
+    }
+
     /// `true` = uma consulta desse endpoint agora falharia sem ir à Steam: o balde dele está em pausa por 429 e a
     /// saída extra não pode ler. A caça usa isto para não esperar pausas de até 30 min no meio de um passo.
     pub fn blocked(&self, ep: Endpoint) -> bool {
@@ -2530,8 +2536,6 @@ mod tests {
         use std::sync::Arc;
         let app = Router::new().route("/ok", get(|| async { "{}" }));
         let c = Arc::new(fast(&serve(app).await));
-        c.set_gap_for_test(Duration::from_millis(400));
-        c.inner.lock().unwrap().last_any = Some(Instant::now());
         let (db, _dir) = crate::db::temp_db();
         c.set_research_db(db.clone());
         for _ in 0..15 {
@@ -2546,6 +2550,8 @@ mod tests {
             scale: 1.0,
             block_id: None,
         };
+        // O teste segura a porta do envio: a consulta reserva a pesquisa e para ali, sem depender do relógio.
+        let gate = c.main_send_pace.lock().await;
         let c2 = c.clone();
         let task = tokio::spawn({
             let db = db.clone();
@@ -2561,8 +2567,33 @@ mod tests {
                 .unwrap()
             }
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        c.inner.lock().unwrap().limiter.on_429(Instant::now(), None);
+        // O 429 só entra depois que a reserva da consulta aparece no banco, e a porta só abre depois do 429.
+        // O prazo só impede o teste de ficar preso se a reserva nunca vier.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while db
+                .call(|c| {
+                    c.query_row(
+                        "SELECT count(*) FROM research_attempts WHERE source='exploracao_externa'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                })
+                .await
+                .unwrap()
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a consulta não reservou a pesquisa");
+        // Pausa de uma hora: não vence antes de a consulta retomar, por mais lenta que a máquina esteja.
+        c.inner
+            .lock()
+            .unwrap()
+            .limiter
+            .on_429(Instant::now(), Some(Duration::from_secs(3600)));
+        drop(gate);
         let (result, context) = task.await.unwrap();
         result.unwrap();
         assert_eq!(c.sent(), 0);

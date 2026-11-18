@@ -2728,16 +2728,17 @@ async fn ready_public_listings_skip_the_book_and_search_prefilters() {
     let mut task = lone_moonrise(&h, &mut rx).await;
     task.code = "G180420B6053004".into();
     h.lock().queue.set_tasks(vec![task.clone()]);
-    h.steam.restore_pace("0|6000|60000|0");
-    crate::steam::listings::query_listings_wear(&h.steam, &task.code, 0, task.wear, &[])
-        .await
-        .unwrap();
+    // Fila nativa ocupada sem mandar consulta: uma consulta de verdade esperava 6 s desde a anterior e voltava
+    // rente ao fim da vaga; com a máquina carregada a vaga já tinha passado e o passo ia pelo livro.
+    // Uma hora: a vaga não vence durante o teste, por mais lenta que a máquina esteja.
+    h.steam.hold_native_for_test(Duration::from_secs(3600));
     let before = (
         bodies.book_queries.load(Ordering::Relaxed),
         bodies.search_queries.load(Ordering::Relaxed),
         bodies.legacy_queries.load(Ordering::Relaxed),
     );
-    tokio::time::timeout(Duration::from_secs(1), scheduler::run_task(&h, &task))
+    // O prazo só impede o teste de ficar preso se o passo for esperar a fila nativa; o acerto é a contagem abaixo.
+    tokio::time::timeout(Duration::from_secs(60), scheduler::run_task(&h, &task))
         .await
         .expect("a triagem não deve gastar a vaga do render")
         .unwrap();
