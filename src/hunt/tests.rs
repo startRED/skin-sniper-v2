@@ -2556,6 +2556,43 @@ async fn cheap_hunt_off_keeps_only_seed_and_float_targets() {
 }
 
 #[tokio::test]
+async fn active_opportunity_keeps_its_out_of_reach_rare_task_after_restart() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let opp = run_until_two(&h, &mut rx).await.remove(0);
+    h.disable_cheap_hunt();
+    catalog::reselect_now(&h).await.unwrap();
+    let task = h.lock().queue.tasks().remove(0).id;
+    // estimativa velha e alta demais; ao reiniciar só a oportunidade volta do banco, não os pisos vistos
+    h.db.call(|c| c.execute("UPDATE items SET floor_usd_cents = 1000000", []))
+        .await
+        .unwrap();
+    let active = Active {
+        opp,
+        task: task.clone(),
+        attempted_at: 0,
+    };
+    {
+        let mut s = h.lock();
+        s.floors.clear();
+        s.active = HashMap::from([(active.opp.id.clone(), active)]);
+    }
+    catalog::reselect_now(&h).await.unwrap();
+    let ids =
+        |h: &Hunt| -> Vec<String> { h.lock().queue.tasks().into_iter().map(|t| t.id).collect() };
+    assert_eq!(ids(&h), vec![task]);
+    assert_eq!(h.lock().active.len(), 1, "continua acompanhada");
+    h.lock().active.clear();
+    catalog::reselect_now(&h).await.unwrap();
+    assert!(
+        ids(&h).is_empty(),
+        "sem oportunidade, a estimativa tira a skin"
+    );
+}
+
+#[tokio::test]
 async fn a_recent_common_page_does_not_spend_another_listing_query() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();

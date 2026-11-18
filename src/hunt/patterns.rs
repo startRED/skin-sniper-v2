@@ -641,7 +641,7 @@ mod tests {
             deals: &deals,
         };
         let selected = |items: &[Item]| -> Vec<String> {
-            let mut v: Vec<String> = catalog::select_ranges(items, &ctx)
+            let mut v: Vec<String> = catalog::select_ranges(items, items, &ctx)
                 .0
                 .into_iter()
                 .map(|t| t.name)

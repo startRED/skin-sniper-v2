@@ -8,7 +8,8 @@
 //! 4. seleção por nota = vendas/dia × lucro possível × fator aprendido (`Queue::boosts`), mais uma consulta de grupo raro por
 //!    skin com tabela (todos os desgastes numa consulta). A nota só escolhe quem
 //!    entra e desempata o que ainda não foi testado; quem recebe consultas é o bandido (`scheduler`). Tudo precisa
-//!    caber no saldo ao virar oportunidade; preço atual não exclui alvo raro.
+//!    caber no saldo ao virar oportunidade; preço visto do raro não o exclui, só o comum mais barato fora do saldo
+//!    (`out_of_reach`).
 //!
 //! O catálogo público curado é carregado antes da caça; a varredura renova os dados Steam de uma amostra.
 
@@ -44,7 +45,7 @@ pub const RARE_MAX_TASKS: usize = 24;
 const SKIN_RANK_BASE: i64 = 100_000;
 /// Piso visto numa consulta vale por tanto tempo (depois a tarefa é conferida de novo).
 pub const FLOOR_TTL: i64 = 6 * 3600;
-/// A seleção é refeita periodicamente; piso acima do saldo só exclui alvos de desconto.
+/// A seleção é refeita periodicamente; piso visto acima do saldo só exclui alvos de desconto.
 pub const RESELECT_SECS: i64 = 900;
 /// Quanto o piso pode ficar abaixo da mediana de vendas e ainda ser plausível: a hipótese que dá o piso mínimo
 /// de desconto (`min_discount_floor`) antes de haver histórico. Com histórico vale a dispersão do item.
@@ -336,7 +337,7 @@ pub async fn load_deals(db: &Db, learned: &Learned, now: i64) -> Result<Deals> {
 }
 
 /// Desconto: itens com piso entre o mínimo viável e o saldo, ≥ 1 venda/dia e lucro possível ≥ mínimo, por nota
-/// (até `WATCH_MAX`). Raro: uma tarefa por skin com prova (todos os desgastes), inclusive acima do saldo (até
+/// (até `WATCH_MAX`). Raro: uma tarefa por skin com prova (todos os desgastes), menos as fora de alcance (`out_of_reach`; até
 /// `RARE_MAX_TASKS`, os que mais vendem primeiro), com nota-base somada igual à dos comuns. O piso é o do anúncio visto numa consulta recente;
 /// sem consulta, USD × razão (que só serve de triagem).
 pub(super) fn common_candidates(items: &[Item], c: &Ctx) -> Vec<Task> {
@@ -373,13 +374,32 @@ pub(super) fn common_candidates(items: &[Item], c: &Ctx) -> Vec<Task> {
     common.into_iter().map(|(_, task)| task).collect()
 }
 
+/// Raro fora de alcance: a estimativa do anúncio mais barato da skin (qualquer desgaste, StatTrak ou Souvenir)
+/// passa do saldo com folga de 10 %. A folga cobre o erro da triagem: medido em 18/11/2026 no banco instalado,
+/// o piso em BRL ficou entre 0,92 e 1,02 × USD × razão em 98 % dos 1.085 itens com piso de R$ 1,00 ou mais
+/// (mediana 0,95, menor 0,915). O que a folga não cobre é preço velho (mediana de 11,7 h e máximo de 322 h nas
+/// 206 variantes dos alvos lidos naquele dia): por isso vence a estimativa a leitura mais recente (até
+/// `FLOOR_TTL`) de uma faixa ou nome que trouxe anúncio dentro do saldo, e skin com variante sem preço de triagem
+/// nunca sai (`select_ranges`). Leitura mais recente vazia ou acima do saldo devolve a decisão à estimativa.
+/// shortcut: variante que o catálogo ainda não conhece não entra na conta, rever se um raro que cabe no saldo
+/// ficar de fora.
+fn out_of_reach(cheapest: i64, saldo: i64) -> bool {
+    cheapest.saturating_mul(9) > saldo.saturating_mul(10)
+}
+
 #[cfg(test)]
 pub fn select(items: &[Item], c: &Ctx) -> Vec<Task> {
-    select_ranges(items, c).0
+    select_ranges(items, items, c).0
 }
 
 /// A seleção e, por alvo raro, o que a agenda precisa saber de cada faixa de seed (`scheduler::Range`).
-pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec<Range>>) {
+/// `all` = toda variante conhecida, dentro ou fora da curadoria: só serve para saber o que cabe no saldo
+/// (`out_of_reach`), porque a consulta da faixa traz também as variantes que a curadoria barra.
+pub fn select_ranges(
+    items: &[Item],
+    all: &[Item],
+    c: &Ctx,
+) -> (Vec<Task>, HashMap<String, Vec<Range>>) {
     let ratio_floor = |i: &Item| i.triage_brl(c.now, c.ratio);
     let mut tasks = common_candidates(items, c);
     tasks.truncate(WATCH_MAX);
@@ -389,6 +409,16 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
     // Nome = o desgaste que mais vende (painel e CSFloat); piso = o menor dos desgastes; vendas = a soma.
     let mut by_code: BTreeMap<&str, (i64, &str, f64, f64)> = BTreeMap::new();
     let mut seen_names: HashSet<&str> = HashSet::new();
+    // Menor piso comum de cada código, com StatTrak e Souvenir (`out_of_reach`).
+    // `None` = alguma variante sem preço de triagem: não dá para dizer que a skin não cabe.
+    let mut cheapest: HashMap<&str, Option<i64>> = HashMap::new();
+    for i in all {
+        if let Some(code) = i.code.as_deref() {
+            let f = ratio_floor(i);
+            let low = cheapest.entry(code).or_insert(f);
+            *low = (*low).zip(f).map(|(a, b)| a.min(b));
+        }
+    }
     for i in items {
         let Some(code) = i.code.as_deref() else {
             continue;
@@ -411,8 +441,35 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
             e.3 += spd;
         }
     }
+    // Oportunidade ativa (`reselect_now`): enquanto está viva a tarefa continua acompanhada, a qualquer preço; não
+    // sai por `out_of_reach` nem pelo corte de `RARE_MAX_TASKS`.
+    let active = |id: &str| {
+        c.floors.keys().any(|key| {
+            key.strip_prefix(id)
+                .is_some_and(|rest| rest.starts_with("|active:"))
+        })
+    };
     let mut rare: Vec<(f64, i64, Task, f64, Vec<Range>)> = by_code
         .into_iter()
+        .filter(|(code, _)| {
+            // Vence a estimativa a leitura mais recente com anúncio dentro do saldo: de uma faixa de seed
+            // (`Task::floor_key`), de um nome na varredura do piso (`Task::floor_sweep_key`) ou uma oportunidade
+            // ativa.
+            let id = format!("r:{code}");
+            let seen = c.floors.iter().any(|(key, &(floor, at))| {
+                key.strip_prefix(id.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['#', '|']))
+                    && c.now - at < FLOOR_TTL
+                    && floor.is_some_and(|f| f <= c.saldo)
+            });
+            active(&id)
+                || seen
+                || !cheapest
+                    .get(code)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|low| out_of_reach(low, c.saldo))
+        })
         .map(|(code, (f, name, _, spd))| {
             let id = format!("r:{code}");
             let seeds = rare_ranges(name, c.learned);
@@ -465,7 +522,9 @@ pub fn select_ranges(items: &[Item], c: &Ctx) -> (Vec<Task>, HashMap<String, Vec
     // Quem mais vale primeiro: giro (anúncios novos por hora e revenda mais rápida) × lucro por anúncio novo.
     // O único achado real (Moonrise FT, ~300 vendas/dia) veio do topo; skins de 0–1 venda/dia ocupavam vagas.
     rare.sort_by(|a, b| {
-        b.0.total_cmp(&a.0)
+        active(&b.2.id)
+            .cmp(&active(&a.2.id))
+            .then(b.0.total_cmp(&a.0))
             .then(a.1.cmp(&b.1))
             .then(a.2.id.cmp(&b.2.id))
     });
@@ -1044,7 +1103,15 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
     let now = h.now();
     let (saldo, ratio, floors, learned) = {
         let s = h.lock();
-        (s.saldo, s.ratio, s.floors.clone(), s.learned.clone())
+        let mut floors = s.floors.clone();
+        // Oportunidade ativa é anúncio visto (`out_of_reach`): ao reiniciar ela volta do banco, os pisos vistos não.
+        for a in s.active.values() {
+            floors.insert(
+                format!("{}|active:{}", a.task, a.opp.id),
+                (Some(a.opp.price_cents), now),
+            );
+        }
+        (s.saldo, s.ratio, floors, s.learned.clone())
     };
     let Some((ratio, _)) = ratio else {
         return Ok(());
@@ -1061,7 +1128,8 @@ pub async fn reselect_now(h: &Hunt) -> Result<()> {
         learned: &learned,
         deals: &deals,
     };
-    let (mut tasks, ranges) = select_ranges(&items, &ctx);
+    let all = load_pattern_items(&h.db).await?;
+    let (mut tasks, ranges) = select_ranges(&items, &all, &ctx);
     if h.cheap.load(std::sync::atomic::Ordering::Relaxed) {
         tasks = super::explore::select(h, &items, &ctx, tasks).await?;
     } else {
@@ -1448,7 +1516,7 @@ mod tests {
             learned: &learned,
             ..ctx(saldo, &boost, &floors)
         };
-        let (tasks, ranges) = select_ranges(&items, &c);
+        let (tasks, ranges) = select_ranges(&items, &items, &c);
         let rare: Vec<&Task> = tasks.iter().filter(|t| !t.seeds.is_empty()).collect();
         let moon = rare
             .iter()
@@ -1473,7 +1541,7 @@ mod tests {
             by_seed: HashMap::from([(500, 90)]),
         };
         let deals = Deals::from([("Glock-18 | Moonrise".to_string(), moon_deals)]);
-        let (_, measured) = select_ranges(&items, &Ctx { deals: &deals, ..c });
+        let (_, measured) = select_ranges(&items, &items, &Ctx { deals: &deals, ..c });
         let m2 = measured[&moon.id][0];
         assert!(
             (m2.gain * 10.0 - m.gain).abs() < 1e-6 * m.gain,
@@ -1612,7 +1680,7 @@ mod tests {
             "acima do saldo"
         );
         assert!(names.contains("AWP | Duality (Field-Tested)"));
-        // Raros: uma tarefa por skin, sem repetir, inclusive acima do saldo.
+        // Raros: uma tarefa por skin, sem repetir; sai só aquele cujo comum mais barato não cabe no saldo.
         let ids: Vec<&str> = rare.iter().map(|t| t.id.as_str()).collect();
         assert!(
             rare.iter()
@@ -1634,7 +1702,7 @@ mod tests {
             assert_eq!(has(want), 1, "{want}: {rn:?}");
         }
         for no in ["Glock-18 | Fade (", "AK-47 | Case Hardened ("] {
-            assert_eq!(has(no), 1, "raro caro continua elegível: {no}");
+            assert_eq!(has(no), 0, "nem o comum mais barato cabe no saldo: {no}");
         }
         assert!(rare.iter().all(|t| !t.name.contains("StatTrak")));
         let moon = rare
@@ -1671,6 +1739,17 @@ mod tests {
         // nome é o desgaste que mais vende: o Moonrise de 0,2/dia no BS não puxa a tarefa para o fim
         assert_eq!(rare[0], "Desert Eagle | Heat Treated (Field-Tested)");
         assert_eq!(rare[1], "Glock-18 | Moonrise (Field-Tested)", "{rare:?}");
+        // tarefa com oportunidade ativa passa à frente: o corte não a tira
+        let last = select(&items, &ctx(saldo, &boost, &HashMap::new()))
+            .into_iter()
+            .rfind(Task::rare)
+            .unwrap();
+        let live = HashMap::from([(format!("{}|active:1", last.id), (Some(1), 0))]);
+        let first = select(&items, &ctx(saldo, &boost, &live))
+            .into_iter()
+            .find(Task::rare)
+            .unwrap();
+        assert_eq!(first.id, last.id);
         assert!(
             !rare
                 .iter()
@@ -1815,18 +1894,79 @@ mod tests {
     }
 
     #[test]
-    fn rare_reference_above_balance_keeps_the_task() {
+    fn rare_leaves_only_when_its_cheapest_common_is_out_of_reach() {
         let (items, saldo) = catalog_fixture();
         let boost = NO_BOOST();
         let floors = HashMap::new();
-        let ids = |balance| {
+        let heat = "G:Desert Eagle | Heat Treated";
+        let has = |balance| {
             select(&items, &ctx(balance, &boost, &floors))
-                .into_iter()
-                .filter(Task::rare)
-                .map(|t| t.id)
-                .collect::<Vec<_>>()
+                .iter()
+                .any(|t| t.rare() && t.code == heat)
         };
-        assert_eq!(ids(1), ids(saldo));
+        // o comum mais barato da skin, entre todos os desgastes, StatTrak e Souvenir, pela triagem (razão 5,5)
+        let cheapest = items
+            .iter()
+            .filter(|i| i.code.as_deref() == Some(heat))
+            .filter_map(|i| i.floor_usd_cents)
+            .map(|usd| usd_to_brl(usd, 5.5))
+            .min()
+            .unwrap();
+        assert!(has(saldo) && has(cheapest), "cabe no saldo: fica");
+        // folga de 10 % para o erro da triagem: 0,9 × o mais barato ainda fica; abaixo disso nenhum anúncio cabe
+        assert!(has(cheapest * 9 / 10 + 1));
+        let poor = cheapest * 9 / 10 - 1;
+        assert!(!has(poor));
+        assert!(!out_of_reach(100, 90) && out_of_reach(101, 90));
+        assert!(!out_of_reach(1, i64::MAX) && out_of_reach(i64::MAX, 1));
+        let has_with = |items: &[Item], floors: &HashMap<_, _>| {
+            select(items, &ctx(poor, &boost, floors))
+                .iter()
+                .any(|t| t.rare() && t.code == heat)
+        };
+        // anúncio visto dentro do saldo vence a estimativa (preço velho, oportunidade ativa): numa faixa de seed
+        // ou na varredura do piso
+        let seen = |key: &str, price| {
+            HashMap::from([(format!("r:{heat}{key}"), (Some(price), 1_793_769_000))])
+        };
+        for key in ["#1-2", "|floor:Desert Eagle | Heat Treated (Field-Tested)"] {
+            assert!(has_with(&items, &seen(key, poor)) && !has_with(&items, &seen(key, poor + 1)));
+        }
+        assert!(!has_with(&items, &seen("0|floor:outro código", poor)));
+        assert!(
+            has_with(&items, &seen("|active:1", poor + 1)),
+            "oportunidade ativa segura a qualquer preço"
+        );
+        // variante fora da curadoria também conta: a consulta da faixa a traz
+        let mut all = items.clone();
+        all.push(Item {
+            name: "Souvenir Desert Eagle | Heat Treated (Battle-Scarred)".into(),
+            floor_usd_cents: Some(1),
+            ..all
+                .iter()
+                .find(|i| i.code.as_deref() == Some(heat))
+                .unwrap()
+                .clone()
+        });
+        let c = ctx(poor, &boost, &floors);
+        assert!(
+            select_ranges(&items, &all, &c)
+                .0
+                .iter()
+                .any(|t| t.code == heat)
+        );
+        // variante sem preço de triagem pode ser a mais barata: a skin não sai
+        let mut unknown = items.clone();
+        let i = unknown
+            .iter_mut()
+            .find(|i| i.code.as_deref() == Some(heat))
+            .unwrap();
+        (
+            i.floor_usd_cents,
+            i.reference_usd_cents,
+            i.history_price_cents,
+        ) = (None, None, None);
+        assert!(has_with(&unknown, &floors));
     }
 
     #[test]
