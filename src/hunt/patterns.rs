@@ -972,6 +972,74 @@ mod tests {
             "prova emprestada: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}, {} abaixo da metade do previsto",
             borrowed.iter().filter(|p| p.1 < p.0 / 2.0).count()
         );
+        // a mesma prova retroativa separada pela regra que provou o seed e, na regra 4, pelo piso da skin
+        let mut by_rule: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+        // regra 3 com seed sem venda própria neste desgaste ou pior: o que a venda real foi contra o pior, o quartil e a mediana do grupo
+        let mut first: [Vec<(f64, f64)>; 3] = Default::default();
+        for (base, v) in &comps {
+            for c in v {
+                let Some(e) = evidence_for(base, c.seed, c.wear, v, c.sold_at) else {
+                    continue;
+                };
+                let own = v
+                    .iter()
+                    .filter(|o| o.seed == c.seed && o.wear >= c.wear && o.sold_at < c.sold_at)
+                    .count();
+                let cents = floor.get(base).copied().unwrap_or(0);
+                let rule = match (score(base, c.seed), siblings(base, c.seed)) {
+                    (Some(_), _) => "1 nota".to_string(),
+                    (None, Some(_)) if own >= RARE_MIN_SALES => "2 tabela, vendas próprias".into(),
+                    (None, Some(_)) => "3 tabela, emprestada".into(),
+                    (None, None) => format!(
+                        "4 fora da tabela, piso {}",
+                        match cents {
+                            0 => "desconhecido",
+                            1..=49 => "< US$ 0,50",
+                            50..=299 => "US$ 0,50 a 2,99",
+                            _ => ">= US$ 3",
+                        }
+                    ),
+                };
+                by_rule
+                    .entry(rule)
+                    .or_default()
+                    .push((e[e.len() / 2], c.ratio));
+                if let (None, Some(group), 0) = (score(base, c.seed), siblings(base, c.seed), own) {
+                    let mut pool: Vec<f64> = v
+                        .iter()
+                        .filter(|o| {
+                            group.contains(&o.seed) && o.wear >= c.wear && o.sold_at < c.sold_at
+                        })
+                        .map(|o| o.ratio)
+                        .collect();
+                    pool.sort_by(f64::total_cmp);
+                    for (i, at) in [0, (pool.len() - 1) / 4, pool.len() / 2]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        first[i].push((pool[at], c.ratio));
+                    }
+                }
+            }
+        }
+        for (rule, pairs) in &by_rule {
+            let (n, paid, ratio) = crate::hunt::value::backtest_summary(pairs);
+            println!(
+                "regra {rule}: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}, {} abaixo da metade do previsto",
+                pairs.iter().filter(|p| p.1 < p.0 / 2.0).count()
+            );
+        }
+        for (label, pairs) in ["pior do grupo", "quartil de baixo", "mediana"]
+            .iter()
+            .zip(&first)
+        {
+            let (n, paid, ratio) = crate::hunt::value::backtest_summary(pairs);
+            println!(
+                "seed de tabela sem venda própria neste desgaste ou pior, previsto pelo {label}: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}, {} abaixo da metade, {} acima do dobro",
+                pairs.iter().filter(|p| p.1 < p.0 / 2.0).count(),
+                pairs.iter().filter(|p| p.1 > p.0 * 2.0).count()
+            );
+        }
     }
 
     #[test]
