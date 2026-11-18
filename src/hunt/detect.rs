@@ -1228,7 +1228,13 @@ pub(super) async fn process_page(
         if l.price_cents > saldo && active.is_none() {
             // Guarda uma vez por ciclo: o mesmo anúncio volta em toda consulta da tarefa.
             if h.lock().cycle.over_saldo.insert(l.listing_id.clone()) {
-                audit.push(over_saldo(h, task, l, others_min, notify_min, saldo).await);
+                let row = over_saldo(h, task, l, others_min, notify_min, saldo).await;
+                if floor_name.is_none() || mine.is_some() || row.reason != "acima_do_saldo" {
+                    audit.push(row);
+                } else {
+                    // Não gravada aqui: a consulta normal do mesmo ciclo ainda grava a dela.
+                    h.lock().cycle.over_saldo.remove(&l.listing_id);
+                }
             }
             continue; // não cabe agora; se o saldo subir, ainda é novo
         }
@@ -1276,7 +1282,14 @@ pub(super) async fn process_page(
         row.mid_profit = judged.near.as_ref().map(|n| n.mid_cents);
         row.quick_profit = judged.near.as_ref().map(|n| n.quick_cents);
         row.detail = judged.detail.clone();
-        audit.push(row);
+        // Comum sem lucro lido no piso fica sem linha, inclusive quando uma faixa o reencontra sem mudança (já
+        // avaliado): nenhum leitor da auditoria usa essas linhas e eram ~4.300 por hora (medido em 18/11/2026).
+        // shortcut: seed aprendido como pagante depois não conta, na agenda, os anúncios que o piso viu e sumiram
+        // antes (os que ficam são reavaliados: `patterns::load` limpa a memória quando um seed entra ou sai);
+        // se a agenda precisar desse passado, gravar uma linha por anúncio na primeira vez que o piso o vê.
+        if floor_name.is_none() || mine.is_some() || judged.refused != Some("sem_lucro") {
+            audit.push(row);
+        }
         let hist_now = history_at(h, &l.name).await?.unwrap_or(0);
         let mut earned = Found {
             fresh: 1,

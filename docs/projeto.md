@@ -265,7 +265,7 @@ saldo e mercado podem variar. O relatório mostra associação com a agenda, sem
    Grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
    sessão/login/compra. São divisões operacionais baseadas nas respostas medidas, não cotas oficiais da Valve.
    Sessão e compra não herdam o 429 de uma varredura de anúncios. Entre duas consultas quaisquer há no mínimo 3 s, de
-   qualquer balde ou saída: nunca rajada. As leituras de mercado somadas (todos os endpoints) têm ainda um piso de 12 s (300/h), inclusive
+   qualquer balde ou saída: nunca rajada. As leituras de mercado somadas (todos os endpoints) têm ainda intervalo médio de 12 s (300/h), com variação de ±30%, inclusive
    entre endpoints diferentes e na primeira leitura após reiniciar; sessão, login e compra mantêm a fila própria.
    Cada balde tem o próprio intervalo e a própria pausa por 429, preservados no banco. Com um balde em pausa e a saída extra sem vaga, a consulta falha na hora
    em vez de segurar a caça. Com as actions barradas, alvos comuns usam `/render` da interface antiga e o histórico
@@ -305,8 +305,8 @@ saldo e mercado podem variar. O relatório mostra associação com a agenda, sem
    (`api.ipify.org`, fora da Steam) e só usa a extra quando é diferente do de casa; conferência falha ou IP igual
    = extra parada. Em 08/11 as duas saíram pelo mesmo IP (PR #88) e somaram ~1 000/h, abrindo um bloqueio de mais
    de 1 dia; em 09/11, com o IP de casa ainda em 429, a Starlink devolveu 200 em `/actions`. Com IP diferente, a
-   extra leva toda leitura pública (anúncios, histórico, livro, busca, interface antiga) e tem o próprio piso de
-   12 s entre leituras; o mínimo de 3 s entre quaisquer envios continua somando as duas. Desenho anterior: um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
+   extra leva toda leitura pública (anúncios, histórico, livro, busca, interface antiga) e tem intervalo médio próprio de
+   12 s entre leituras, com variação de ±30%; o mínimo de 3 s entre quaisquer envios continua somando as duas. Desenho anterior: um proxy HTTP em `127.0.0.1:1056` (`ALT_PROXY`; no PC do Erick é o `saida-celular`, que sai pela
    rede fixa autorizada por um celular com Tailscale; redes atuais em `pesquisa-web.md` 13) dá outro IP público,
    sem garantia de cota independente. As sondas de
    `pesquisa-web.md` 11 encontraram actions recusadas e livro/render públicos disponíveis nessa rota. Por isso a
@@ -366,9 +366,21 @@ saldo e mercado podem variar. O relatório mostra associação com a agenda, sem
    e avalia todos os seeds da página na tarefa rara. A prioridade é tempo sem ler × seeds pagantes ×
    vendas por dia, com preferência para nomes inéditos e filtro de saldo. O intervalo de 60 s entre
    varreduras e o mínimo de 180 s por nome são hipóteses a ajustar pela medição das consultas e dos achados.
+   Em 18/11/2026, na primeira versão instalada, os primeiros 199 s tiveram 6 tentativas e 1 leitura; outra execução teve 10 tentativas e 5 leituras em 426 s (cerca de uma leitura a cada 85 s, em vez de 60 s).
+   Páginas do piso não registram avaliações de anúncios comuns (sem grupo raro) recusados como `sem_lucro` nem dos comuns acima do saldo (`acima_do_saldo`): eram cerca de 4.300 linhas por hora para um limite de 300.000 linhas consultado por 14 dias.
+   Nenhum leitor usa essas linhas hoje: a agenda conta só seeds pagantes, a tela do Aprendizado só `aprovada`, `acima_do_saldo_boa` e `zona_amarela`, e a trava de aviso repetido só `acima_do_saldo_boa`.
+   Limite aceito: se um seed comum for aprendido como pagante depois, a agenda não conta os anúncios dele que o piso viu e que sumiram antes disso (antes da varredura eles nem eram lidos); os que continuam anunciados voltam a ser avaliados na consulta seguinte, porque a memória de anúncios já avaliados é limpa sempre que um seed entra ou sai dos pagantes.
+   O comum sem lucro avaliado no piso também fica sem linha quando uma faixa o reencontra sem mudança de preço, histórico ou concorrente, porque já está avaliado; o comum acima do saldo continua registrado pela consulta de faixa, uma vez por ciclo.
    Nomes com oportunidade ativa têm prioridade após o intervalo mínimo, mesmo com piso acima do saldo.
    A varredura fica fora do registro de observações, e a primeira faixa que reencontra o anúncio recebe
    uma vez o resultado da avaliação no piso (anúncio novo, achado e lucro ou quase-achado).
+   Quando vence, a varredura pega no turno da caça a próxima vaga da rota principal, a mesma que a
+   consulta por faixa esperaria. O prazo é o intervalo entre leituras mais 3 s de folga, ampliada
+   quando o desvio máximo do ritmo ultrapassa 3 s (15,6 s no total hoje). Uma vaga distante é pulada.
+   Com R$ 41,91, cerca de 2% do estoque raro das duas famílias Heat Treated cabe no saldo. Dos 30 anúncios raros que cabem, 28 dão prejuízo na estimativa média da bancada; 2 rendem cerca de R$ 9 no cenário médio e dão prejuízo no pessimista. A estimativa da bancada (mediana dos múltiplos das vendas do CSFloat × menor preço Steam do nome) é mais grosseira que a avaliação do programa, que deu +R$ 0,70 no cenário médio para o anúncio de seed 882, abaixo do mínimo de R$ 1,00. O programa ainda não havia avaliado o anúncio de seed 730. As medições não sustentam
+   a expectativa de um achado real por hora. A varredura continua porque a consulta por faixa do
+   Desert Eagle | Heat Treated raramente traz página e um anúncio novo do seed pagante 730 apareceu
+   no piso em cerca de uma hora (medições em [conhecimento.md, seção 1.1](conhecimento.md#11-interface-antiga-e-opção-de-sair-do-beta)).
    **Caça de comum em desconto desligada (11/11, pedido do Erick):** `main` chama `Hunt::disable_cheap_hunt` e a
    seleção fica só com seed e float. Quem anuncia abaixo do maior pedido de compra vende na hora para o pedido, e
    em 6 dias foram 5 235 anúncios de comum avaliados para 1 achado de R$ 0,93. Ela gastava 150 das ~277 consultas

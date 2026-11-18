@@ -312,7 +312,18 @@ pub async fn load(h: &Hunt) -> Result<()> {
             .collect(),
     );
     let (old, new) = (size(&h.lock().learned), size(&l));
-    h.lock().learned = l;
+    {
+        let mut s = h.lock();
+        let same_seeds = s.learned.len() == l.len()
+            && l.iter()
+                .all(|(base, m)| s.learned.get(base).is_some_and(|o| o.keys().eq(m.keys())));
+        if !same_seeds {
+            // Seed entrou ou saiu dos pagantes: o grupo raro do anúncio muda; cada um volta a ser avaliado na
+            // próxima consulta (o piso avalia também os comuns, que podem virar raros aqui).
+            s.evaluated.clear();
+        }
+        s.learned = l;
+    }
     if old != new {
         tracing::info!(skins = new.0, seeds = new.1, "catálogo de patterns medido");
         let at = h.now();
