@@ -4,6 +4,7 @@
   import { day, money, signed } from './format';
   import type { Learning } from './types';
   import LearningDashboard from './LearningDashboard.svelte';
+  import AlertHistory from './AlertHistory.svelte';
 
   let data = $state<Learning | null>(null);
   let error = $state('');
@@ -80,6 +81,7 @@
     {#if today}
       <p class="today">Hoje: <b>{today.new_listings}</b> anúncios novos · <b>{today.sales}</b> saíram da lista · <b class:up={today.finds > 0}>{today.finds}</b> {today.finds === 1 ? 'achado' : 'achados'}{#if data.since}<span class="muted"> · registro desde {day(data.since)}</span>{/if}</p>
     {/if}
+    {#if data.alerts}<AlertHistory report={data.alerts} />{/if}
     <LearningDashboard {data} />
 
     <details class="more">
@@ -111,7 +113,7 @@
 
         {#if hv}
           <div class="grp">
-            <h3 title="A agenda lê a faixa de seed onde mais anúncio novo que cabe no saldo deve ter aparecido desde a última leitura, pesado pelo lucro que as vendas daquele seed provam.">Agenda de leituras</h3>
+            <h3 title="A agenda lê o grupo de padrões (seeds) onde ler agora mais acrescenta. Entram na conta: quantos anúncios novos costumam aparecer ali, o lucro que as vendas daquele padrão provam e o tempo desde a última leitura. Reler o mesmo grupo logo em seguida quase não conta.">Agenda de leituras</h3>
             <dl class="stats">
               {@render kv('Um achado dura', `~${life(hv.life_s)}`, hv.lives ? `Medido em ${hv.lives} sumiços` : 'Valor padrão, ainda sem medida')}
               {#if hv.reads}

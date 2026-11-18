@@ -16,6 +16,9 @@ type Ws =
 
 const HOME: &str = "https://steamcommunity.com/market/";
 
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseElapsed(pub Option<u64>);
+
 pub struct Browser {
     exe: PathBuf,
     profile: PathBuf,
@@ -55,7 +58,7 @@ impl Browser {
         &self,
         url: &str,
         headers: &[(String, String)],
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<(u16, Vec<u8>, Option<u64>), String> {
         let mut live = self.live.lock().await;
         if live.is_none() {
             *live = Some(self.start().await?);
@@ -66,7 +69,11 @@ impl Browser {
             let s = v.as_str().ok_or("fetch sem resposta")?;
             let v: Value = serde_json::from_str(s).map_err(|e| e.to_string())?;
             let status = v["s"].as_u64().ok_or("fetch sem status")? as u16;
-            Ok((status, v["b"].as_str().unwrap_or("").as_bytes().to_vec()))
+            Ok((
+                status,
+                v["b"].as_str().unwrap_or("").as_bytes().to_vec(),
+                parse_elapsed(&v),
+            ))
         });
         if out.is_err() {
             *live = None; // kill_on_drop derruba o Chrome
@@ -267,6 +274,10 @@ fn user_agent_override(version: &Value) -> Value {
     })
 }
 
+fn parse_elapsed(v: &Value) -> Option<u64> {
+    v.get("elapsed_ms").and_then(Value::as_u64)
+}
+
 /// Script do `fetch`; URL e cabeçalhos entram como JSON, nunca colados no código.
 fn fetch_js(url: &str, headers: &[(String, String)]) -> String {
     let h: serde_json::Map<String, Value> = headers
@@ -274,8 +285,8 @@ fn fetch_js(url: &str, headers: &[(String, String)]) -> String {
         .map(|(k, v)| (k.clone(), Value::String(v.clone())))
         .collect();
     format!(
-        "(async()=>{{const r=await fetch({},{{headers:{},credentials:'include'}});\
-         return JSON.stringify({{s:r.status,b:await r.text()}})}})()",
+        "(async()=>{{const started=performance.now();const r=await fetch({},{{headers:{},credentials:'include'}});\
+         const body=await r.text();const elapsed_ms=Math.floor(performance.now()-started);return JSON.stringify({{s:r.status,b:body,elapsed_ms}})}})()",
         Value::String(url.to_string()),
         Value::Object(h)
     )
@@ -284,6 +295,21 @@ fn fetch_js(url: &str, headers: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_timing_is_internal_and_optional() {
+        let js = fetch_js("http://localhost", &[]);
+        assert!(js.find("performance.now()").unwrap() < js.find("await fetch").unwrap());
+        assert!(js.find("await r.text()").unwrap() < js.find("performance.now()-started").unwrap());
+        assert_eq!(parse_elapsed(&json!({"elapsed_ms": 42})), Some(42));
+        for v in [
+            json!({}),
+            json!({"elapsed_ms": -1}),
+            json!({"elapsed_ms": "bad"}),
+        ] {
+            assert!(parse_elapsed(&v).is_none());
+        }
+    }
 
     #[test]
     fn fetch_js_escapes_url_and_headers() {
@@ -304,7 +330,7 @@ mod tests {
             "https://steamcommunity.com/market/actions?q=QueryListingsForItem&qp={}",
             urlencode(qp)
         );
-        let (s, body) = b
+        let (s, body, _) = b
             .fetch(
                 &url,
                 &[("x-valve-request-type".into(), "queryAction".into())],

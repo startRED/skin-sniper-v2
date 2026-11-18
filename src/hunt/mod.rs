@@ -6,6 +6,7 @@
 
 pub mod bootstrap;
 pub mod catalog;
+pub(crate) mod comparison;
 pub mod detect;
 pub mod explore;
 pub mod ledger;
@@ -81,6 +82,8 @@ pub(crate) struct Shared {
     pub last_state_pub: i64,
     /// Último (preço, `history_at`, menor concorrente) com que cada anúncio foi avaliado: muda → avalia de novo.
     pub evaluated: HashMap<String, (i64, i64, Option<i64>)>,
+    // shortcut: o resultado do piso pendente de crédito na faixa fica em memória e se perde ao reiniciar.
+    floor_first: HashMap<String, scheduler::Found>,
     /// Balanço do ciclo de 10 min (o que foi conferido e o que chegou perto).
     pub cycle: detect::Cycle,
     /// Por tarefa: menor anúncio visto na última consulta (se havia algum) e quando foi.
@@ -193,6 +196,7 @@ impl Hunt {
                 empty_streak: HashMap::new(),
                 last_state_pub: 0,
                 evaluated: HashMap::new(),
+                floor_first: HashMap::new(),
                 cycle: detect::Cycle::default(),
                 floors: HashMap::new(),
                 rivals: HashMap::new(),
@@ -258,6 +262,7 @@ impl Hunt {
         scheduler::load_pace(self).await?;
         patterns::load(self).await?;
         patterns::load_cache(self).await?;
+        patterns::load_seen(self).await?;
         explore::load(self).await?;
         {
             let mut s = self.lock();

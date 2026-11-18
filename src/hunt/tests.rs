@@ -17,6 +17,7 @@ use crate::web::api::{Confidence, Kind};
 use axum::extract::{Path, Query, State as AxState};
 use axum::routing::get;
 use axum::{Json, Router};
+use rusqlite::params;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -417,6 +418,10 @@ struct Bodies {
     listing_queries: AtomicUsize,
     csfloat: Value,
     csfloat_names: Mutex<Vec<String>>,
+    /// O CSFloat responde 429 (pausa).
+    csfloat_429: AtomicBool,
+    /// O CSFloat responde 500 (erro para o nome pedido).
+    csfloat_500: AtomicBool,
     /// Livro de ofertas (captura real do Negev; o menor anúncio é trocado pelos testes).
     book: Mutex<Value>,
     book_queries: AtomicUsize,
@@ -441,6 +446,8 @@ async fn serve() -> (String, Arc<Bodies>) {
         listing_queries: AtomicUsize::new(0),
         csfloat: csfloat_body(),
         csfloat_names: Mutex::new(vec![]),
+        csfloat_429: AtomicBool::new(false),
+        csfloat_500: AtomicBool::new(false),
         book: Mutex::new(fixture("steam_orderbook_negev_2026-11.json")),
         book_queries: AtomicUsize::new(0),
         listings_429: AtomicBool::new(false),
@@ -600,8 +607,15 @@ async fn serve() -> (String, Arc<Bodies>) {
             "/history/{name}/sales",
             get(
                 |AxState(b): AxState<Arc<Bodies>>, Path(n): Path<String>| async move {
+                    use axum::response::IntoResponse;
                     b.csfloat_names.lock().unwrap().push(n);
-                    Json(b.csfloat.clone())
+                    if b.csfloat_429.load(Ordering::Relaxed) {
+                        return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+                    }
+                    if b.csfloat_500.load(Ordering::Relaxed) {
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    Json(b.csfloat.clone()).into_response()
                 },
             ),
         )
@@ -942,6 +956,166 @@ async fn refused_history_waits_per_name_then_recovers_without_faking_freshness()
     assert_eq!(bodies.history_queries.load(Ordering::Relaxed), 3);
 }
 
+static COLLECTOR_NOW: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(NOW);
+fn collector_clock() -> i64 {
+    COLLECTOR_NOW.load(Ordering::SeqCst)
+}
+
+/// O coletor de verdade contra o servidor local: reiniciar não zera a volta, cada lista recebe a sua vez (mesmo com
+/// vagas atrasadas), o nome nunca lido vem antes de reler o topo do giro, pausa e rede fora do ar não contam como
+/// leitura (nem o registro de pesquisa que falha antes do envio) e vigiados falhando sem parar deixam as listas
+/// avançar.
+#[tokio::test]
+async fn sales_collector_resumes_after_restart_and_reaches_the_tail() {
+    // (nome, vendas/dia, curado): três skins de tabela (a primeira também curada: conta só na lista de tabela) e
+    // uma curada fora das tabelas
+    const NAMES: [(&str, f64, bool); 4] = [
+        ("AWP | Fade (Factory New)", 10.0, true),
+        ("Glock-18 | Fade (Factory New)", 9.0, false),
+        ("M4A1-S | Fade (Factory New)", 8.0, false),
+        ("AK-47 | Redline (Field-Tested)", 20.0, true),
+    ];
+    const GAP: i64 = 120;
+    const DAY: i64 = 24 * 3600;
+    let [t1, t2, t3, r1] = NAMES.map(|n| n.0);
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    db.call(|c| {
+        for (i, (name, sales, curated)) in NAMES.iter().enumerate() {
+            c.execute(
+                "INSERT INTO items(name,g_code,floor_usd_cents,sales_per_day,dispersion,history_at,updated_at)
+                 VALUES (?1,?2,1000,?3,0.2,?4,1)",
+                rusqlite::params![name, format!("G{i:08X}1"), sales, NOW - 100],
+            )?;
+            if *curated {
+                c.execute(
+                    "INSERT INTO catalog_references(name,observed_at,rank) VALUES (?1,1,0)",
+                    [name],
+                )?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    // um programa recém-ligado sobre o mesmo banco, na hora de uma vaga
+    let boot = |at: i64, base: &str| {
+        let (base, db) = (base.to_string(), db.clone());
+        async move {
+            COLLECTOR_NOW.store(at, Ordering::SeqCst);
+            let h = Hunt::with_clock(
+                HuntDeps {
+                    settings: SettingsStore::new(db.clone()),
+                    db,
+                    steam: Arc::new(SteamClient::with_base(&base).unwrap()),
+                    csfloat: Arc::new(CsfloatClient::with_base(&base).unwrap()),
+                    events: broadcast::channel(16).0,
+                    telegram: None,
+                },
+                collector_clock,
+            );
+            patterns::load_seen(&h).await.unwrap();
+            h.lock().learn_at = at - GAP;
+            h
+        }
+    };
+    let step = |at: i64| {
+        let boot = boot(at, &base);
+        async move {
+            let h = boot.await;
+            patterns::maybe_step(&h).await;
+            h
+        }
+    };
+    let asked = || std::mem::take(&mut *bodies.csfloat_names.lock().unwrap());
+    let watch = |h: &Hunt, names: &[&str]| {
+        let tasks = names.iter().map(|name| Task {
+            id: format!("d:{name}"),
+            name: name.to_string(),
+            code: "G180420B6053004".into(),
+            wear: Some(2),
+            seeds: vec![],
+            float: None,
+            score: 1.0,
+        });
+        h.lock().queue.set_tasks(tasks.collect());
+    };
+
+    // pausa do CSFloat: o pedido volta 429 e o nome não gasta a vez; religado, é ele de novo
+    bodies.csfloat_429.store(true, Ordering::Relaxed);
+    let paused = step(NOW).await;
+    bodies.csfloat_429.store(false, Ordering::Relaxed);
+    paused.lock().learn_at = NOW - GAP;
+    patterns::maybe_step(&paused).await;
+    assert!(paused.lock().learn_seen.is_empty());
+    assert_eq!(asked(), [t1], "em pausa o cliente recusa sem enviar");
+    // rede fora do ar (porta morta): o nome fica adiado só na memória daquele programa; no banco não conta
+    let offline = boot(NOW, "http://127.0.0.1:1").await;
+    patterns::maybe_step(&offline).await;
+    assert_eq!(offline.lock().learn_seen.get(t1), Some(&NOW));
+    // o registro da pesquisa falha antes do envio: sem a decisão a vez volta; sem a tentativa o nome fica adiado só
+    // na memória; nos dois casos nada sai para o CSFloat
+    for (table, mark) in [
+        ("research_decisions", None),
+        ("research_attempts", Some(&NOW)),
+    ] {
+        db.call(move |c| {
+            c.execute_batch(&format!(
+                "CREATE TRIGGER broken BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'quebrado'); END"
+            ))
+        })
+        .await
+        .unwrap();
+        let broken = step(NOW).await;
+        assert_eq!(broken.lock().learn_seen.get(t1), mark, "{table}");
+        db.call(|c| c.execute_batch("DROP TRIGGER broken"))
+            .await
+            .unwrap();
+    }
+    assert!(asked().is_empty());
+    let kept: i64 = db
+        .call(|c| c.query_row("SELECT count(*) FROM pattern_seen", [], |r| r.get(0)))
+        .await
+        .unwrap();
+    assert_eq!(kept, 0, "sem resposta do CSFloat nada é anotado");
+
+    // vagas atrasadas (a cada 240 s, sempre na mesma paridade do relógio) e um reinício por vaga: as listas se
+    // alternam mesmo assim; quando a lista da vez não tem nome vencido a vaga cai para a outra
+    for gaps in [0, 2, 4, 6, 8] {
+        step(NOW + gaps * GAP).await;
+    }
+    assert_eq!(
+        asked(),
+        [t1, r1, t2, t3],
+        "depois de reiniciar o topo não é relido, e nada é lido duas vezes em 24 h"
+    );
+    // listas sem nome vencido e a última tentativa foi de um vigiado que falhou: ele não fica preso, tenta de novo
+    let h = boot(NOW + 12 * GAP, &base).await;
+    watch(&h, &[MOON]);
+    h.lock()
+        .learn_seen
+        .insert(MOON.into(), NOW + 12 * GAP - 600);
+    patterns::maybe_step(&h).await;
+    assert_eq!(asked(), [MOON]);
+    // um dia depois, a vez é do resto (atendido há mais tempo), mesmo com nome de tabela lido antes dele
+    step(NOW + DAY + 6 * GAP).await;
+    step(NOW + DAY + 8 * GAP).await;
+    assert_eq!(asked(), [r1, t1]);
+
+    // três vigiados falhando sem parar (o CSFloat responde 500 a tudo): a vaga seguinte a cada falha é das listas,
+    // que continuam avançando; 10 min depois o primeiro vigiado tenta de novo
+    const MW_MOON: &str = "Glock-18 | Moonrise (Minimal Wear)";
+    let failing = NOW + 3 * DAY;
+    bodies.csfloat_500.store(true, Ordering::Relaxed);
+    let h = boot(failing, &base).await;
+    watch(&h, &[MOON, ST_MOON, MW_MOON]);
+    for slot in 0..8 {
+        COLLECTOR_NOW.store(failing + slot * GAP, Ordering::SeqCst);
+        patterns::maybe_step(&h).await;
+    }
+    assert_eq!(asked(), [MW_MOON, r1, ST_MOON, t2, MOON, t3, MW_MOON, t1]);
+}
+
 #[tokio::test]
 async fn sales_collector_warms_watched_cache_before_catalog_without_extra_slots() {
     let (base, bodies) = serve().await;
@@ -1260,6 +1434,74 @@ async fn run_until_two(h: &Arc<Hunt>, rx: &mut broadcast::Receiver<Event>) -> Ve
         }
     }
     found
+}
+
+#[tokio::test]
+async fn over_saldo_notice_is_recorded_with_result_without_network() {
+    let (db, _dir) = temp_db();
+    let (mut h, _) = hunt_against("http://127.0.0.1:1", db.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let fake = Router::new().route(
+        "/botoffline/sendMessage",
+        axum::routing::post(|| async {
+            Json(json!({"ok":false,"error_code":403,"description":"recusado no teste offline"}))
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, fake).await.unwrap();
+    });
+    let telegram = Arc::new(crate::notify::Telegram::with_base(&base, Duration::ZERO).unwrap());
+    Arc::get_mut(&mut h).unwrap().telegram = Some(telegram.clone());
+    let opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    let id = format!("saldo:{}", opp.id);
+    assert!(super::detect::send_over_saldo_alert(&h, &opp, 1).is_none());
+    assert_eq!(
+        db.call(|c| Ok(crate::web::learning_alerts::report(c, NOW)?.rows.len()))
+            .await
+            .unwrap(),
+        0
+    );
+    // O servidor local recebe somente dados de teste; nenhuma requisição sai para o Telegram.
+    telegram.set_credentials(Some("offline".into()), Some("offline".into()));
+    super::detect::send_over_saldo_alert(&h, &opp, 1)
+        .unwrap()
+        .await
+        .unwrap();
+    db.call(move |c| {
+        c.execute("UPDATE alert_window SET started_at=?1", [NOW - 1])?;
+        c.execute("UPDATE alert_forecasts SET grp='g',base_cents=100,predicted_cents=100 WHERE listing_id=?1",[&id])?;
+        for at in NOW+1..NOW+4 {
+            c.execute("INSERT INTO csfloat_sales(name,sold_at,price_usd_cents,base_usd_cents,multiple,grp) SELECT name,?1,100,100,1,'g' FROM alert_forecasts WHERE listing_id=?2",rusqlite::params![at,id])?;
+        }
+        c.execute("INSERT INTO group_sale_windows SELECT name,?1,?2 FROM alert_forecasts WHERE listing_id=?3",rusqlite::params![NOW+48*3600,NOW-1,id])?;
+        let r = crate::web::learning_alerts::report(c, NOW + 9 * 86400)?;
+        assert_eq!(r.rows.len(), 1);
+        let row = &r.rows[0];
+        assert_eq!(row.id, id);
+        assert!(row.above_saldo);
+        assert_eq!(row.group_check,"o grupo teve venda");
+        assert_eq!(row.price_check,"sustenta");
+        assert!(
+            row.telegram
+                .starts_with("falhou: Telegram recusou: recusado no teste offline")
+        );
+        assert_eq!(r.metrics[3].value, "1 em 7 dias; 0 dentro do saldo");
+        assert!(r.metrics[4].value.starts_with("0 de 0"));
+        assert!(r.metrics[6].value.starts_with("0 de 0"));
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM opportunities", [], |r| r
+                .get::<_, i64>(0))?,
+            0
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    server.abort();
 }
 
 #[tokio::test]
@@ -1679,6 +1921,128 @@ async fn floor_keeps_missing_rival_tied_with_highest_price_when_more_listings_ex
         .unwrap();
 
     assert_eq!(h.lock().evaluated[ID_T1].2, Some(price));
+}
+
+#[tokio::test]
+async fn floor_first_opportunity_credits_the_range_once_without_a_second_alert() {
+    let (base, _) = serve().await;
+    for reevaluate in [false, true] {
+        let (db, _dir) = temp_db();
+        let (h, _rx) = hunt_against(&base, db);
+        h.set_saldo(3608, SaldoSource::Manual);
+        h.settings
+            .apply(serde_json::from_value(json!({"notify_min_profit_cents":100})).unwrap())
+            .await
+            .unwrap();
+        let (task, mut page, listing) = floor_rival_fixture();
+        page.listings = vec![listing];
+        let floor = detect::process_page(&h, &task, &page, Some(MOON))
+            .await
+            .unwrap();
+        assert_eq!(floor.rewarded.fresh, 0);
+        let [(opp, alert)] = floor.found.as_slice() else {
+            panic!("o piso deveria achar uma oportunidade");
+        };
+        assert!(*alert);
+        let gain_cents = opp.sell.mid.profit_cents;
+        assert!(h.lock().evaluated.contains_key(ID_T1));
+        if reevaluate {
+            h.lock().evaluated.clear();
+        }
+
+        let range = detect::process(&h, &task, &page).await.unwrap();
+        assert_eq!(range.rewarded.fresh, 1, "reavaliação: {reevaluate}");
+        assert_eq!(range.rewarded.finds, 1);
+        assert_eq!(range.rewarded.gain_cents, gain_cents);
+        assert_eq!(range.rewarded.near_hits, 0);
+        assert!(range.found.iter().all(|(_, alert)| !alert));
+        let again = detect::process(&h, &task, &page).await.unwrap();
+        assert_eq!(again.rewarded, scheduler::Found::default());
+    }
+}
+
+#[tokio::test]
+async fn floor_first_near_hit_credits_the_range_once() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let (task, mut page, mut listing) = floor_rival_fixture();
+    listing.price_cents = 1450;
+    page.listings = vec![listing];
+
+    let floor = detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert!(floor.found.is_empty());
+    assert_eq!(floor.rewarded, scheduler::Found::default());
+
+    let range = detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(
+        range.rewarded,
+        scheduler::Found {
+            fresh: 1,
+            near_hits: 1,
+            ..Default::default()
+        }
+    );
+    let again = detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(again.rewarded, scheduler::Found::default());
+}
+
+#[tokio::test]
+async fn known_listing_without_floor_visit_earns_no_range_credit() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (task, mut page, listing) = floor_rival_fixture();
+    db.call({
+        let listing = listing.clone();
+        move |c| {
+            c.execute(
+                "INSERT INTO listings_seen(listing_id, name, price_cents, first_seen, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![listing.listing_id, listing.name, listing.price_cents, NOW],
+            )
+        }
+    })
+    .await
+    .unwrap();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    page.listings = vec![listing];
+
+    let range = detect::process(&h, &task, &page).await.unwrap();
+    assert!(h.lock().evaluated.contains_key(ID_T1));
+    assert_eq!(range.rewarded.fresh, 0);
+}
+
+#[tokio::test]
+async fn floor_read_leaves_observations_empty() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (task, _, _) = floor_rival_fixture();
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO items(name, g_code, floor_cents, sales_per_day, updated_at)
+             VALUES (?1, 'G180420B6053004', 700, 10, ?2)",
+            params![MOON, NOW],
+        )
+    })
+    .await
+    .unwrap();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    h.lock().queue.set_tasks(vec![task]);
+    scheduler::sweep_floor(&h, &mut std::collections::HashMap::new())
+        .await
+        .unwrap();
+
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), 1);
+    let rows: i64 = db
+        .call(|c| c.query_row("SELECT count(*) FROM observations", [], |r| r.get(0)))
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
 }
 
 fn floor_rival_fixture() -> (Task, crate::steam::listings::ListingsPage, Listing) {

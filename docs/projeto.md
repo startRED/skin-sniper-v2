@@ -45,11 +45,11 @@ Não é objetivo da v1: vender pelo painel, valorizar adesivo (o chaveiro entra 
 | `pricing/combo.rs` | melhor combinação de anúncios que cabe no saldo (mochila em centavos) |
 | `hunt/catalog.rs` | descoberta e seleção do que vigiar dado o saldo |
 | `hunt/bootstrap.rs` | catálogo curado embutido, referências públicas separadas e renovação diária sem Steam |
-| `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador |
+| `hunt/scheduler.rs` | fila de consultas por prioridade dentro do ritmo do limitador; escolhe a faixa rara pelo índice marginal (`best_range`) |
 | `hunt/detect.rs` | anúncio novo → avaliação → oportunidade / some quando vendido |
 | `hunt/ledger.rs` | registro de observações: todo anúncio visto, idade, sumiço e relistagem (aprendizado) |
 | `hunt/teacher.rs` | professor grátis: compras virtuais dos avisos e quase-achados e o resultado delas no mercado; recalibração do comum |
-| `hunt/value.rs` | valor de uma leitura (taxa de anúncio novo × estoque acumulado × retorno) e o ajuste horário dos parâmetros |
+| `hunt/value.rs` | mede o estoque acumulado (exposure) no aprendizado e ajusta os parâmetros a cada hora (Aprendizado, item 6) |
 | `research.rs` | atribuição de decisões e tentativas, cota persistente de pesquisa |
 | `hunt/explore.rs`, `hunt/trial.rs` | candidatas fora do ranking, continuidade de ativos e comparação por blocos |
 | `notify.rs` | Telegram + evento SSE para notificação/som no navegador |
@@ -174,6 +174,32 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
 
 ## Caça
 
+Registro para comparação: `reads` recebe `choice_range` (alvo + início + fim),
+`choice_gap` (intervalo real na escolha), `choice_control`, `eligible_ranges`
+(quantidade de faixas elegíveis), `oldest_range` e `oldest_gap` (mais velha elegível;
+intervalo nulo se nunca vista). O retrato é consumido uma vez no resultado principal.
+Paralelas, conferências, livros e leituras sem escolha comparável deixam os novos campos
+nulos. Migração aditiva conserva linhas antigas com nulos. Não muda escolhas nem corta leituras.
+`outcome` marca a leitura com escolha: `ok`, ou `failed` quando a consulta saiu para a Steam e falhou
+(retrato gravado uma vez, `new_listings` nulo, sem nota; o ajuste ignora essas linhas). Nulo nas demais.
+A falha devolve à faixa a leitura anterior (ou nenhuma), sem mudar o descanso existente: por `data` nula ela volta a concorrer depois do descanso; nos demais erros pode voltar já na próxima escolha, e os registros de falha por faixa mostram a repetição.
+
+Comparação offline independente: `SNIPER_COMPARISON_DB=<cópia> SNIPER_COMPARISON_SINCE=<unix> SNIPER_COMPARISON_UNTIL=<unix> cargo test compare_recorded_reads -- --ignored --nocapture`.
+Abre apenas a cópia em modo somente leitura, sem migração, configurações, caça ou rede.
+Só conta leituras `ok` com `at` no período comum (início e fim inclusivos), o mesmo para os dois
+braços, e o relatório informa o período. Falhas não viram zero; vazio bem-sucedido conta zero.
+Cada faixa exata e banda (`<600`, `600-3600`, `3600-21600`, `>=21600` segundos)
+precisa de 30 leituras em CADA braço; abaixo disso informa dados insuficientes.
+`fresh` mede anúncios raros novos dentro do saldo por leitura, creditados uma vez.
+`new_listings` guarda todos os novos devolvidos pelo registro, sem recorte de saldo.
+Falha de registro mantém nulo, nunca zero; leituras antigas também ficam nulas.
+O relatório mostra as duas medidas separadamente por braço/faixa/banda, cada uma com
+mínimo de 30 leituras válidas em cada braço; nulos não entram na medida de todos os novos.
+Testes offline cobrem totais distintos (4 novos contra 1 no saldo), nulos e o limiar 29/30.
+Primeiras leituras são excluídas. Bandas ainda contêm esperas diferentes, e seleção,
+saldo e mercado podem variar. O relatório mostra associação com a agenda, sem causalidade.
+
+
 1. **Catálogo e descoberta:** ao subir, importa `assets/catalog/curated.json` sem apagar medições anteriores.
    Só os nomes da curadoria participam das novas seleções; itens removidos continuam no banco para histórico
    e acompanhamento de oportunidades ativas. Nome-base, desgaste e variante são distintos; códigos gerados
@@ -198,24 +224,28 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    com dispersão (P50−P10)/P50 limitada a 50 %: o preço da taxa já entra, então item barato ou de pouca folga fica
    no fim da fila (não sai: um anúncio fora da curva ainda pode dar lucro). Mais **uma** consulta de grupo raro
    por skin com tabela (código G, **sem filtro de desgaste**: a mesma consulta traz todos os desgastes, StatTrak e
-   Souvenir da faixa) cujo piso, no desgaste mais barato, cabe no saldo (`propertyFilters` por faixa de seed dos
+   Souvenir da faixa) com seeds admitidas pela prova de vendas, inclusive quando o preço atual passa do saldo (`propertyFilters` por faixa de seed dos
    tiers; a tarefa percorre as faixas em rodízio, uma por consulta). Até 24 raros, os que mais vendem por dia
    primeiro (soma dos desgastes; sem venda medida conta 1/dia): giro alto traz anúncio novo, e a revenda sai mais
    rápido. Antes era uma tarefa por desgaste: o Moonrise ocupava 5 vagas e cada faixa era revista 5× menos.
    - **Piso:** o do anúncio visto na última consulta da tarefa (vale 6 h); sem consulta ainda, USD × razão medida,
      que só serve de triagem (a Steam em BRL não segue a razão por item; o raro T1 chega a custar dezenas de vezes
-     o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro sai quando **todas** as faixas
-     foram vistas, todas tinham anúncio e o menor passa do saldo (faixa vazia mantém: é onde o anúncio aparece);
-     enquanto faltam faixas, o raro com piso visto acima do saldo entra com 1/4 da nota-base.
+     o piso comum da skin). Desconto com anúncio visto acima do saldo sai; raro continua elegível mesmo quando todas as faixas
+     vistas estão acima do saldo. Um anúncio novo barato pode aparecer depois. O raro com piso visto acima
+     do saldo recebe 1/4 da nota-base, sem perder a elegibilidade.
      A seleção é refeita a cada 15 min e no próximo passo após observar um piso novo acima do saldo.
+     Entrada rara exige código, desgaste normal, referência disponível e seed admitida por `patterns::learn`
+     para aquele desgaste; sem medida alguma usa as tabelas de instalação. Os limites da prova não mudam.
+     Reconsidera a prova ao renovar vendas e a seleção a cada 15 min ou mudança relevante do saldo,
+     mantendo o limite de 24 skins. Ausência de vendas não autoriza inventar prêmio nem admitir candidato.
+     A medição offline do funil está em `medida-catalogo-2026-11-15.md`.
    - **Agenda que aprende:** cada alvo (skin × desgaste × modo: `barato`, `seed` ou `float`) recebe a leitura
-     quando o **valor dela agora**, em centavos, é o maior: taxa de anúncio novo do alvo × anúncios acumulados desde
-     a última leitura × retorno por anúncio novo (fórmula, ajuste e medidas no item 6 do Aprendizado). Sinal =
+     conforme a prioridade calculada: no modo `seed`, a faixa de alvo raro usa o índice marginal; nos demais modos, usam-se os centavos esperados, calculados pelo rendimento e pelo estoque acumulado durante a espera (ajuste e medidas no item 6 do Aprendizado). Sinal =
      anúncio **novo** que cabe no saldo (na leitura só pelo livro, a queda do menor anúncio); reavaliar o mesmo
      anúncio não conta de novo. Alvo nunca lido vai na
      frente; empate vai para o lido há mais tempo. Regras que não mudam: 12,5 % das consultas vão sempre ao alvo
      menos testado, com o slot girando entre os modos (cada modo tem piso próprio, qualquer que seja o número de
-     alvos). O saldo e a taxa continuam decidindo quem entra (regras acima); a nota-base do catálogo só desempata
+     alvos). O saldo e a taxa continuam decidindo quais anúncios viram oportunidade (regras acima); a nota-base do catálogo só desempata
      alvos ainda não testados. A busca e as consultas de anúncios dividem o mesmo limitador global. As notas ficam
      no banco (`arm_stats`, retenção 14 dias e no máximo 2000 linhas) e sobrevivem a reinício.
    - **Fator aprendido na seleção (desconto):** rendimento do alvo `d:` (taxa × retorno, já encolhido para a média
@@ -226,7 +256,13 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    - **Piso mínimo de desconto:** menor preço em que uma venda 30 % acima ainda deixa R$ 1,00 e 10 % depois da taxa
      (hoje ≈ R$ 7,57). Abaixo disso a taxa come o lucro: até 06/11, 9 000 consultas em skins de R$ 1,60–8,50 deram
      um achado de R$ 0,32. Os 30 % são hipótese, não medida.
-3. **Ritmo:** grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
+3. **Ritmo:** teste limitado aprovado pelo Erick em 15/11/2026 em lugar do teto anterior de ~100 consultas/h: descanso de anúncios começa em 28 s,
+   reduz 2 s após cada 6 h de operação sem 429 em Listings, até o piso autorizado de 20 s.
+   Qualquer 429 em Listings, na principal ou extra, volta a 28 s e impede redução por 24 h desde
+   o último 429. Depois desse prazo, espera mais 6 h limpas (interpretação conservadora).
+   Degrau e prazo sobrevivem ao reinício; a janela de 6 h recomeça ao abrir, sem contar tempo fechado.
+   A 20 s, o teto aritmético é 180 leituras/h antes das demais esperas; não foi medido como seguro.
+   Grupos de controle independentes: actions de anúncios/histórico; livro/busca/interface antiga;
    sessão/login/compra. São divisões operacionais baseadas nas respostas medidas, não cotas oficiais da Valve.
    Sessão e compra não herdam o 429 de uma varredura de anúncios. Entre duas consultas quaisquer há no mínimo 3 s, de
    qualquer balde ou saída: nunca rajada. As leituras de mercado somadas (todos os endpoints) têm ainda um piso de 12 s (300/h), inclusive
@@ -301,7 +337,7 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    outro balde): acima do teto, com a mesma tolerância de 10 %, os anúncios não são lidos, e só a **queda** do menor anúncio
    (dentro do saldo) ensina a agenda como um anúncio novo: a subida é venda ou retirada, e o primeiro livro depois
    de ligar não tem com o que comparar. **Descanso da leitura de anúncios (10/11):** alvo raro ou de float só é
-   escolhido 28 s depois da última leitura de anúncios (era 24 s, depois 36 s e 42 s). **Descanso do alvo que
+   escolhido após o descanso adaptativo do item 3 desde a última leitura de anúncios. **Descanso do alvo que
    falha (12/11):** alvo cuja consulta volta `data` nula descansa 5 min, dobrando a cada falha seguida até 1 h, e
    volta ao normal na primeira leitura que der certo; antes era escolhido de novo ~80 s depois e dois alvos
    gastavam 36 % das tentativas de anúncios falhando (`conhecimento.md` 1.3.1). **Foco em seed e float (11/11):**
@@ -331,13 +367,15 @@ Settings = { steam_login_secure: string|null, csfloat_key: string|null, telegram
    vendas por dia, com preferência para nomes inéditos e filtro de saldo. O intervalo de 60 s entre
    varreduras e o mínimo de 180 s por nome são hipóteses a ajustar pela medição das consultas e dos achados.
    Nomes com oportunidade ativa têm prioridade após o intervalo mínimo, mesmo com piso acima do saldo.
+   A varredura fica fora do registro de observações, e a primeira faixa que reencontra o anúncio recebe
+   uma vez o resultado da avaliação no piso (anúncio novo, achado e lucro ou quase-achado).
    **Caça de comum em desconto desligada (11/11, pedido do Erick):** `main` chama `Hunt::disable_cheap_hunt` e a
    seleção fica só com seed e float. Quem anuncia abaixo do maior pedido de compra vende na hora para o pedido, e
    em 6 dias foram 5 235 anúncios de comum avaliados para 1 achado de R$ 0,93. Ela gastava 150 das ~277 consultas
    por hora do app (livro 94, interface antiga 48, busca 8; medido em 11/11, 04:00–10:30Z). Saem junto: os alvos
    `barato` do painel, a exploração de alvo novo e os pedidos de compra sugeridos (leem o livro dos alvos comuns).
-   O código continua (os testes ligam a caça). Total esperado: ~86 anúncios/h + ~11 de descoberta ≈ 100/h, o teto
-   pedido pelo Erick; não é número seguro medido — as 8 janelas livres desde 06/11 (123 a 262 consultas/h de
+   O código continua (os testes ligam a caça). O teto anterior de ~100 consultas/h foi substituído pelo teste limitado do item 3.
+   Nenhum desses ritmos foi comprovado como seguro — as 8 janelas livres desde 06/11 (123 a 262 consultas/h de
    anúncios + histórico) terminaram todas em 429 depois de 1 a 7 h, sem relação com o ritmo.
    Em 10/11, ~200 leituras de anúncios/h por 3 h terminaram em 429 desse balde por horas, com o livro respondendo;
    124–153/h tinham rodado 3–4 h sem 429. O número é hipótese de poucas horas. O achado ativo é conferido a cada
@@ -431,8 +469,10 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
    `docs/superpowers/specs/2026-11-12-so-pattern-design.md` (o de 10/11,
    `2026-11-10-aprendizado-unificado-design.md`, descreve a conta por alvo que esta substitui).
    - **Unidade = faixa de seed.** Uma consulta de anúncios filtra uma faixa de seeds de uma skin × desgaste. A
-     agenda compara faixas: `V = taxa × peso × W·(1 − e^(−Δ/W)) × lucro`, em centavos esperados: anúncios novos de
-     seed pagante esperados desde a última leitura da faixa × lucro por anúncio. Toda leitura custa uma consulta de
+     agenda compara faixas pelo índice marginal `I = v * W * (1 - exp(-x) - x exp(-x))`,
+     com `v = taxa * peso * lucro` e `x = gap/W`. Para esperas pequenas cresce como
+     `v * gap^2/(2W)`: frequência próxima da raiz do valor relativo. Hipótese de alocação,
+     sem ganho real medido. Toda leitura custa uma consulta de
      anúncios (medido em 13/11: 1,00 a 1,03 por leitura), então dividir pelo custo não muda a ordem.
      - `peso` = seeds pagantes da faixa × vendas/dia da skin, normalizado para média 1 entre as faixas
        selecionadas: quanto de anúncio novo a faixa deve receber;
@@ -441,7 +481,7 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
        (792 s), que vale para anúncio comum. Medido em 20 h de leituras de faixa: anúncio novo ≤ saldo por leitura
        foi 0,004 com a faixa relida a < 5 min e 0,18 a 1–4 h, e a agenda relia as mesmas 2 faixas a cada 2–3 min
        (1 294 de 2 073 leituras, 5 anúncios novos). Com a caça barata desligada, o ajuste de `W` usa só as
-       releituras de faixa (escolheu 28 800 s, o topo da grade). Simulação de 7 dias × 10 sorteios
+       releituras de faixa (escolheu 28 800 s, o topo da grade). Ensaio anterior de 7 dias × 10 sorteios (da mudança de estoque, não da agenda marginal)
        (`hunt/agenda_sim.rs`, premissas lá): anúncios novos por leitura iguais ou maiores que a conta antiga em 6
        cenários (vida 15 min a 12 h × mercado observado/giro), de 0 a +54 %;
      - `lucro` = líquido de vender pelo piso comum × mediana da prova dos seeds da faixa − o piso comum, em
@@ -451,6 +491,33 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
        `peso × W·(1 − e^(−Δ/W))` da faixa lida, gravada com a leitura (`reads.gap`, `reads.weight`); `λ` é a taxa
        da classe, onde o alvo novo começa; `√a` é o otimismo de contagem, que some com medida; `r` e exposição
        pesam metade a cada `H`.
+   - **Agenda marginal (16/11):** muda apenas a escolha; exposure, taxa aprendida, registro e
+     controle 1/8 continuam iguais. Sem novo ajuste ou migração. O controle limita a espera
+     em escolhas elegíveis de `next_matching` (no teste, só modo seed); não garante tempo de parede:
+     `overdue_task` tem prioridade e pode ocupar vagas. `recheck_secs` continua entre 60 e
+     1800 s, um décimo da idade do aviso; a troca não altera reconferências.
+     Na cópia sanitizada, os 105 snapshots entre 01h08min11s e 01h57min50s de 16/11/2026 (Brasília) incluem
+     92 escolhas da agenda e 13 do controle. As 51 esperas <600 s (38 <300 s) são da
+     agenda; nenhuma reconferência nesse recorte. Cinco faixas receberam 53/92 escolhas
+     da agenda (57,61%). Antes dos snapshots não há faixa identificada: não extrapolar.
+     Simulador usa `Params::default`, SALDO=3608 e RATIO=5.5 explicitamente como
+     hipóteses diagnósticas, nunca saldo atual ou câmbio recuperado. Não lê settings.
+     Teste determinístico com 227 faixas, uma valendo 25 vezes as outras: frequência
+     relativa caiu de 24,71 (regra antiga, teste falha) para
+     6,15 / 5,18 / 4,90 (marginal, 10 mil escolhas por janela de 2 h / 8 h / quase infinita), perto de sqrt(25)=5;
+     maiores esperas 233 / 232 / 231 escolhas elegíveis, abaixo do limite de controle 8*227=1816.
+     Horizonte reduzido: 2 dias, 3 sorteios iguais por regra; observado tem viés das
+     faixas já lidas; giro presume distribuição uniforme de seeds; chegada Poisson e
+     vida exponencial são hipóteses. Começa sem aprendizado; estoque inicial pode contar
+     como captura na simulação, embora não ensine nem entre no placar real.
+     Comparação offline das duas regras, mesmos sorteios, 12 cenários: capturas
+     de +0.00% a +43.48%; valor estimado de -13.59% a +92.66%.
+     Todas cobriram 227 faixas por causa do controle; isso não prova espalhamento.
+     O simulador mede também a fração das escolhas da agenda nas cinco faixas mais frequentes
+     (exclui controle; soma as cinco mais frequentes de cada sorteio) e a maior espera
+     por faixa, incluindo o começo e o fim do horizonte. Não reproduz necessariamente a concentração real.
+     Capturas não pioraram, mas houve perda de valor simulado em alguns cenários; o modelo não prova ganho real.
+     Ensaio release: compilação em 4 min 03 s; execução em 60,07 s para stock e 49,58 s para marginal.
    - **Chance de compra por skin (13/11):** o `lucro` da faixa é multiplicado por (bons + 1) ÷ (vistos + 10): vistos =
      anúncios de seed pagante da skin avaliados em 14 dias (inclusive acima do saldo), bons = os que deram lucro no
      preço médio ou viraram aviso (`catalog::load_deals`). Medido em 12/11 (6,6 dias): Heat Treated da Desert Eagle
@@ -472,7 +539,10 @@ Os números abaixo (60 dias, 24 h, 98 %, 5 degraus) são hipóteses de calibraç
      1. **Controle.** 1 leitura em 8 (`EXPLORE_SHARE` = 12,5 %) ignora o valor e lê a faixa lida há mais tempo.
         Toda leitura grava `worth` = anúncios novos × lucro da faixa e `gain` (lucro previsto dos avisos); o
         placar "Agenda × rodízio cego (7 dias)" compara o que cada braço rende por leitura. Se a agenda não
-        ganhar do rodízio, o aprendizado não está servindo.
+        ganhar do rodízio, o aprendizado não está servindo. Durante os primeiros sete dias após
+        a troca, esse placar mistura escolhas da regra antiga e da nova, até as antigas saírem
+        da janela; o registro existente não foi alterado. O painel também compara, por faixa de
+        espera, somando as faixas de seed, a média de anúncios raros novos no saldo por leitura; mostra as contagens até haver 30 por braço.
      2. **Previsão.** O app repete as leituras dos últimos 7 dias (`reads`; páginas do mesmo alvo em até 90 s
         contam como uma) prevendo cada uma só com as anteriores, para `W` {0,5; 1; 2; 4; 8 h} × `m` {0,5; 1; 2;
         4; 8; 16} × `H` {24; 72; 168 h}, e mede o erro (perda de Poisson). Troca os parâmetros só com ≥ 1 000 leituras
@@ -584,12 +654,19 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
     e, depois da trava, o campo "Vendi por". A oportunidade comprada não é apagada pela limpeza de 7 dias. A data
     da trava é estimada (7 dias arredondados para a hora cheia, regra tirada de uma compra só); confirmação pelo
     inventário não existe, porque o app não tem login.
-  - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo
-    lentas ou caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo); cada skin no máximo 1×/24 h,
-    sem gastar consulta da Steam. A
-    mesma vaga prioriza nomes vigiados cujo cache de vendas falta ou venceu (6 h), a cada 15 s enquanto a última
-    consulta não falhou. A cota e a pausa do CSFloat continuam obrigatórias; falhas por nome esperam 10 min.
-    Cada leitura refaz a prova; quando os seeds pagantes de uma skin crescem, a seleção é refeita na hora.
+  - **Coletor:** lê as vendas do CSFloat de uma skin a cada 2 min, alternando as skins de tabela (mesmo lentas ou
+    caras) e as de mais giro do catálogo (≥ 5 vendas/dia, piso ≤ saldo): a vez é da lista atendida há mais tempo
+    (nome das duas conta na de tabela); cada skin das listas no máximo 1×/24 h (a vigiada relê quando o cache de 6
+    h vence), sem gastar consulta da Steam. Entre os nomes vencidos lê primeiro o nunca lido e depois o lido há
+    mais tempo, dentro da lista da vez (a outra só entra quando a da vez não tem nome vencido), e ao reiniciar
+    retoma a volta gravada em `pattern_seen`, que só anota o nome que o CSFloat respondeu (pausa e cota devolvem a
+    vez na hora; rede fora do ar adia o nome só até reiniciar): pela ordem de giro ele relia o topo todo dia e não
+    chegava ao fim da lista (17/11: só os 124 primeiros dos 338 nomes de tabela; 940 nomes ao todo, mais do que as
+    vagas de um dia). A mesma vaga prioriza nomes vigiados cujo cache de vendas falta ou venceu (6 h), a cada 15 s
+    enquanto a última consulta não falhou. A cota e a pausa do CSFloat continuam obrigatórias; falha de um nome
+    vigiado espera 10 min, e a vaga seguinte à falha de um vigiado é das listas (se elas têm nome vencido), para
+    que vigiados falhando sem parar não tomem todas as vagas. Cada leitura refaz a prova; quando os seeds pagantes
+    de uma skin crescem, a seleção é refeita na hora.
   - **Medido em 12/11** (45 759 vendas guardadas; teste `catalog_on_a_real_db`, só leitura): 15 skins e 231
     seeds pagantes. Por piso comum: até US$ 2 — Glock-18 High Beam (4 seeds), Sawed-Off Amber Fade (8), USP-S
     Tropical Breeze (1); US$ 3–5 — P2000 Amber Fade (5), Desert Eagle Serpent Strike (2), MP7 Amberline (5),
@@ -784,3 +861,27 @@ usar o painel de verdade no navegador contra a Steam real, com o robô antigo pa
   das chaves do topo e `success`; nunca o conteúdo.
 - Compra: uma por vez, do pedido até confirmar/terminar e ajustar o saldo; a segunda recebe 409 "termine a compra
   em andamento primeiro".
+
+### Ensaio offline da agenda marginal em 16/11/2026
+
+2 dias × 3 sorteios por regra, release, SALDO=3608 e RATIO=5.5 hipotéticos; sem rede.
+Top5 exclui controle; soma as cinco faixas mais frequentes de cada sorteio. Maior gap inclui todas as leituras e bordas do horizonte.
+
+| Mercado/parâmetros | Vida (min) | Leituras por regra | Capturas/chegadas antiga → nova | Valor simulado (centavos) antiga → nova | Top5 agenda antiga → nova | Maior gap antiga → nova |
+|---|---:|---:|---|---|---|---|
+| mercado observado, parâmetros default | 15 | 18516 | 33/125 → 39/125 | 4479.91 → 4431.75 | 12211/16203 (75.36%) → 5928/16203 (36.59%) | 784.0 → 586.1 min |
+| mercado observado, parâmetros default | 120 | 18516 | 67/125 → 84/125 | 6104.12 → 6460.17 | 11642/16203 (71.85%) → 4919/16203 (30.36%) | 742.9 → 601.1 min |
+| mercado observado, parâmetros default | 720 | 18516 | 100/125 → 119/125 | 6831.32 → 7045.39 | 10142/16203 (62.59%) → 4047/16203 (24.98%) | 724.3 → 526.4 min |
+| mercado observado, parâmetros janela das faixas | 15 | 18516 | 37/125 → 42/125 | 4290.65 → 3707.64 | 11172/16203 (68.95%) → 4742/16203 (29.27%) | 724.3 → 462.9 min |
+| mercado observado, parâmetros janela das faixas | 120 | 18516 | 74/125 → 92/125 | 6231.91 → 6787.51 | 10225/16203 (63.11%) → 4191/16203 (25.87%) | 705.6 → 507.7 min |
+| mercado observado, parâmetros janela das faixas | 720 | 18516 | 111/125 → 120/125 | 6988.79 → 7069.84 | 9123/16203 (56.30%) → 3440/16203 (21.23%) | 642.1 → 414.4 min |
+| mercado giro, parâmetros default | 15 | 18516 | 12/51 → 16/51 | 1488.71 → 1537.82 | 11686/16203 (72.12%) → 5538/16203 (34.18%) | 750.4 → 522.7 min |
+| mercado giro, parâmetros default | 120 | 18516 | 21/51 → 30/51 | 3246.64 → 3425.33 | 11171/16203 (68.94%) → 4279/16203 (26.41%) | 750.4 → 567.5 min |
+| mercado giro, parâmetros default | 720 | 18516 | 39/51 → 42/51 | 3494.41 → 3557.39 | 9213/16203 (56.86%) → 3575/16203 (22.06%) | 694.4 → 481.1 min |
+| mercado giro, parâmetros janela das faixas | 15 | 18516 | 12/51 → 12/51 | 1332.81 → 2567.73 | 10538/16203 (65.04%) → 4829/16203 (29.80%) | 698.1 → 421.4 min |
+| mercado giro, parâmetros janela das faixas | 120 | 18516 | 23/51 → 33/51 | 3253.83 → 3437.40 | 9762/16203 (60.25%) → 3126/16203 (19.29%) | 698.1 → 421.4 min |
+| mercado giro, parâmetros janela das faixas | 720 | 18516 | 41/51 → 45/51 | 3525.50 → 3561.68 | 8278/16203 (51.09%) → 2889/16203 (17.83%) | 664.5 → 421.4 min |
+
+Capturas não pioraram; valor simulado caiu até 13,59% em alguns cenários.
+O modelo começa frio, não reproduz necessariamente a concentração real e não prova melhora de lucro real.
+Cobertura de 227 em todas as linhas é garantida pelo controle neste ensaio e não prova espalhamento.

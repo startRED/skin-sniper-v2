@@ -200,6 +200,23 @@ const MIGRATIONS: &[&str] = &[
     // 1ª leitura de faixa deixou de ensinar (12/11): r/exposição dos raros vinham inflados por estoque contado
     // como anúncio novo. As leituras ficam; a repetição e o placar já as pulam.
     "UPDATE arm_stats SET r = 0, exposure = 0 WHERE id LIKE 'r:%';",
+    crate::web::learning_alerts::SCHEMA,
+    crate::web::learning_alerts::FOLLOWUP_SCHEMA,
+    "ALTER TABLE reads ADD COLUMN choice_range TEXT;
+     ALTER TABLE reads ADD COLUMN choice_gap INTEGER;
+     ALTER TABLE reads ADD COLUMN choice_control INTEGER;
+     ALTER TABLE reads ADD COLUMN eligible_ranges INTEGER;
+     ALTER TABLE reads ADD COLUMN oldest_range TEXT;
+     ALTER TABLE reads ADD COLUMN oldest_gap INTEGER;
+     ALTER TABLE reads ADD COLUMN new_listings INTEGER;
+     ALTER TABLE reads ADD COLUMN outcome TEXT;",
+    // 26: a volta do coletor de vendas sobrevive ao reinício; começa pelas consultas que o CSFloat respondeu (a
+    // decisão sozinha não serve: é gravada antes do envio, inclusive quando a pausa ou a cota recusam)
+    "CREATE TABLE pattern_seen (name TEXT PRIMARY KEY, at INTEGER NOT NULL);
+     INSERT INTO pattern_seen SELECT d.target, max(a.at) FROM research_attempts a
+        JOIN research_decisions d ON d.id = a.decision_id
+        WHERE d.policy = 'pattern_sales' AND a.route = 'csfloat' AND a.outcome IN ('ok', 'error')
+        GROUP BY d.target;",
 ];
 
 /// Quanto o aprendizado lembra (registro, livro, avaliações): hipótese de calibração da mina de ouro.
@@ -373,6 +390,57 @@ pub mod tempfile_dir {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn alert_migration_preserves_old_predictions_and_marks_delivery_unknown() {
+        let mut c = Connection::open_in_memory().unwrap();
+        let old_version = MIGRATIONS
+            .iter()
+            .position(|sql| *sql == crate::web::learning_alerts::SCHEMA)
+            .unwrap()
+            + 1;
+        for sql in &MIGRATIONS[..old_version] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", old_version as i64)
+            .unwrap();
+        c.execute("INSERT INTO ghosts(listing_id,name,kind,bought_at,price_cents,mid_price_cents,mid_net_cents,approved) VALUES ('old','skin','raro',100,100,200,170,1)",[]).unwrap();
+        c.execute(
+            "INSERT INTO alert_delivery VALUES ('old','windows','pendente',NULL,100)",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c).unwrap();
+        assert_eq!(
+            c.query_row(
+                "SELECT mid_price_cents FROM ghosts WHERE listing_id='old'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            200
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT state FROM alert_delivery WHERE listing_id='old'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "desconhecido"
+        );
+        c.execute("INSERT INTO opportunities(id,json,created_at) VALUES ('silent','{\"name\":\"skin\",\"price_cents\":100}',?1)", [now_unix()]).unwrap();
+        let report = crate::web::learning_alerts::report(&c, now_unix()).unwrap();
+        assert_eq!(report.rows.len(), 1);
+        assert_eq!(report.rows[0].id, "old");
+        assert_eq!(report.rows[0].windows, "desconhecido");
+        migrate(&mut c).unwrap();
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM alert_window", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
     use super::*;
 
     #[test]
@@ -551,5 +619,71 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "{t}: só a de 59 dias fica");
         }
+    }
+    #[test]
+    fn comparison_migration_preserves_old_reads() {
+        let mut c = Connection::open_in_memory().unwrap();
+        // a migração da comparação é a 25ª
+        for sql in &MIGRATIONS[..24] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.execute("INSERT INTO reads(at,arm,fresh) VALUES(1,'r:a',2)", [])
+            .unwrap();
+        c.pragma_update(None, "user_version", 24).unwrap();
+        migrate(&mut c).unwrap();
+        let row: (i64, Option<String>, Option<u32>, Option<String>) = c
+            .query_row(
+                "SELECT fresh, choice_range, new_listings, outcome FROM reads",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (2, None, None, None));
+    }
+
+    /// A volta do coletor começa só pelos nomes que o CSFloat respondeu: decisão recusada antes do envio, 429 e
+    /// falha de rede não contam como lidos.
+    #[test]
+    fn collector_round_starts_from_answered_queries() {
+        let mut c = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..25] {
+            c.execute_batch(sql).unwrap();
+        }
+        // (nome, hora da decisão, resultado da tentativa)
+        for (i, (name, at, outcome)) in [
+            ("ok", 10, Some("ok")),
+            ("ok", 20, Some("ok")),
+            ("ok", 30, None),
+            ("http", 11, Some("error")),
+            ("recusado", 12, None),
+            ("pausa", 13, Some("rate_limited")),
+            ("rede", 14, Some("network_error")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            c.execute(
+                "INSERT INTO research_decisions(id,at,source,policy,target,scale) VALUES (?1,?2,'coleta','pattern_sales',?3,1)",
+                rusqlite::params![i as i64, at, name],
+            )
+            .unwrap();
+            if let Some(outcome) = outcome {
+                c.execute(
+                    "INSERT INTO research_attempts(decision_id,at,source,endpoint,route,outcome) VALUES (?1,?2,'coleta','sales','csfloat',?3)",
+                    rusqlite::params![i as i64, at, outcome],
+                )
+                .unwrap();
+            }
+        }
+        c.pragma_update(None, "user_version", 25).unwrap();
+        migrate(&mut c).unwrap();
+        let seen: Vec<(String, i64)> = c
+            .prepare("SELECT name, at FROM pattern_seen ORDER BY name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(seen, [("http".to_string(), 11), ("ok".to_string(), 20)]);
     }
 }

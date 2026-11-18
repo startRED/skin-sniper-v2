@@ -1,7 +1,8 @@
 //! Simulação offline da agenda sobre uma cópia do banco: quantos anúncios novos de seed pagante (≤ saldo) cada
-//! leitura pega. Só roda à mão (`SNIPER_DB=<cópia>/sniper.db cargo test --release agenda_on_a_real_db --
+//! leitura pega. Só roda à mão (`RATIO=5.5 AGENDA_RULE=stock SNIPER_DB=<cópia>/sniper.db cargo test --release agenda_on_a_real_db --
 //! --ignored --nocapture`); abre o banco para escrita (migração, `refit_log`), então use sempre uma cópia.
 //!
+//! Para comparar, repita com AGENDA_RULE=marginal; somente o simulador aceita essa escolha.
 //! Premissas (não medidas, só o que a conta assume):
 //! - cada faixa recebe anúncio novo ≤ saldo como Poisson, em dois mercados: **observado** (anúncios da faixa em
 //!   `observations` que apareceram depois da primeira vez que a faixa foi vista, ÷ o tempo desde então; faixa
@@ -10,7 +11,7 @@
 //! - cada anúncio vive um tempo exponencial de média `L` (três cenários, a vida real do raro barato não foi
 //!   medida: 9 sumiços em 215 vistos);
 //! - uma leitura a cada `LISTINGS_REST_SECS` (o ritmo de hoje), sem falha, todas em alvo raro; a agenda começa
-//!   sem nada aprendido e aprende com o que pega, com os parâmetros do banco ou com a janela que o ajuste adota
+//!   sem nada aprendido e aprende com o que pega, com Params::default (sem settings) ou com a janela que o ajuste adota
 //!   olhando só as releituras de faixa.
 
 use crate::db::Db;
@@ -22,8 +23,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const DAY: i64 = 86_400;
-/// Repetições da semana simulada (sementes do sorteio) somadas em cada linha.
-const SEEDS: u64 = 10;
+/// Repetições dos dois dias simulados (sementes do sorteio) somadas em cada linha.
+const SEEDS: u64 = 3;
 
 /// Gerador determinístico (xorshift): mesma sequência para a agenda antiga e a nova.
 struct Rng(u64);
@@ -55,6 +56,10 @@ pub struct Outcome {
     pub worth: f64,
     pub arrived: u64,
     pub ranges_read: usize,
+    pub agenda_reads: u64,
+    pub agenda_top5: u64,
+    /// Maior intervalo por faixa, incluindo bordas do horizonte, em segundos.
+    pub max_gap: i64,
 }
 
 /// Roda a agenda `days` dias sobre o mercado `rates` (anúncios/s por faixa, na ordem de `Task::seeds`).
@@ -94,6 +99,7 @@ pub fn simulate(
         params,
         ..Queue::default()
     };
+    q.legacy_stock = std::env::var("AGENDA_RULE").as_deref() == Ok("stock");
     q.set_tasks(tasks.to_vec());
     q.set_ranges(ranges.clone());
     let mut out = Outcome {
@@ -102,8 +108,13 @@ pub fn simulate(
         worth: 0.0,
         arrived,
         ranges_read: 0,
+        agenda_reads: 0,
+        agenda_top5: 0,
+        max_gap: 0,
     };
     let mut read_ranges = std::collections::HashSet::new();
+    let mut agenda_counts: HashMap<(String, usize), u64> = HashMap::new();
+    let mut last_read: HashMap<(String, usize), i64> = HashMap::new();
     let mut now = start;
     while now < end {
         let Some(task) = q.next_matching(now, Task::rare) else {
@@ -116,7 +127,14 @@ pub fn simulate(
             .iter()
             .position(|r| *r == narrowed.seeds[0])
             .unwrap();
-        read_ranges.insert((full.id.clone(), i));
+        let key = (full.id.clone(), i);
+        let last = last_read.insert(key.clone(), now).unwrap_or(start);
+        out.max_gap = out.max_gap.max(now - last);
+        if !q.last_exploring {
+            out.agenda_reads += 1;
+            *agenda_counts.entry(key.clone()).or_default() += 1;
+        }
+        read_ranges.insert(key);
         let mut fresh = 0;
         for ad in ads.get_mut(&(full.id.clone(), i)).into_iter().flatten() {
             if !ad.seen && ad.at <= now as f64 && (now as f64) < ad.gone {
@@ -138,6 +156,20 @@ pub fn simulate(
         out.worth += f64::from(fresh) * ranges.get(&full.id).map_or(1.0, |r| r[i].gain);
         now += LISTINGS_REST_SECS;
     }
+    for task in tasks {
+        for i in 0..task.seeds.len() {
+            out.max_gap = out.max_gap.max(
+                end - last_read
+                    .get(&(task.id.clone(), i))
+                    .copied()
+                    .unwrap_or(start),
+            );
+        }
+    }
+    let mut counts: Vec<u64> = agenda_counts.into_values().collect();
+    counts.sort_unstable_by(|a, b| b.cmp(a));
+    out.agenda_top5 = counts.iter().take(5).sum();
+    assert!(out.agenda_top5 <= out.agenda_reads && out.agenda_reads <= out.reads);
     out.ranges_read = read_ranges.len();
     out
 }
@@ -243,15 +275,7 @@ async fn agenda_on_a_real_db() {
     let end: i64 = raw
         .query_row("SELECT MAX(at) FROM reads", [], |r| r.get(0))
         .unwrap();
-    let params: Params = raw
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'value_params'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default();
+    let params = Params::default();
     let h: Arc<Hunt> = Hunt::with_clock(
         HuntDeps {
             settings: crate::settings::SettingsStore::new(db.clone()),
@@ -267,10 +291,14 @@ async fn agenda_on_a_real_db() {
     let learned = h.lock().learned.clone();
     let items = catalog::load_items(&db).await.unwrap();
     let deals = catalog::load_deals(&db, &learned, end).await.unwrap();
-    let (ratio, _) = catalog::load_ratio(&db)
-        .await
-        .unwrap()
-        .expect("razão BRL/USD");
+    let ratio: f64 = std::env::var("RATIO")
+        .expect("RATIO explícita: hipótese BRL/USD, não configuração recuperada")
+        .parse()
+        .expect("RATIO numérica");
+    assert!(ratio.is_finite() && ratio > 0.0);
+    println!(
+        "Hipóteses: saldo={saldo} centavos (default 3608); RATIO={ratio}; Params::default, sem ler settings"
+    );
     let (boost, floors) = (HashMap::new(), HashMap::new());
     let ctx = Ctx {
         ratio,
@@ -282,6 +310,7 @@ async fn agenda_on_a_real_db() {
         deals: &deals,
     };
     let (mut tasks, ranges) = select_ranges(&items, &ctx);
+    tasks.sort_by(|a, b| a.id.cmp(&b.id));
     tasks.retain(Task::rare);
     let observed = observed_rates(&raw, &tasks, saldo, end - 7 * DAY, end);
     let turnover = turnover_rates(&raw, &items, &tasks, saldo);
@@ -298,19 +327,23 @@ async fn agenda_on_a_real_db() {
     let classes: Vec<usize> = ids.iter().map(|id| crate::hunt::value::class(id)).collect();
     let (fit, _, adopted) = crate::hunt::value::tune(&reads, &classes, params);
     println!(
-        "{} alvos, {n_ranges} faixas; parâmetros do banco {params:?}; janela que melhor prevê só as releituras de \
+        "{} alvos, {n_ranges} faixas; parâmetros default {params:?}; janela que melhor prevê só as releituras de \
          faixa: {} s (adotada pelo ajuste: {adopted})",
         tasks.len(),
         fit.window
     );
-    // o banco como está e a janela que o ajuste adota se olhar só as releituras de faixa
+    // Defaults e a janela que o ajuste adota olhando somente as releituras de faixa.
     let fitted = Params {
         window: fit.window,
         ..params
     };
+    println!(
+        "Simulação reduzida: 2 dias × {SEEDS} sorteios; regra={:?}",
+        std::env::var("AGENDA_RULE").unwrap_or_else(|_| "marginal".into())
+    );
     for ((market, rates), (label, params)) in [("observado", &observed), ("giro", &turnover)]
         .into_iter()
-        .flat_map(|m| [(m, ("banco", params)), (m, ("janela das faixas", fitted))])
+        .flat_map(|m| [(m, ("default", params)), (m, ("janela das faixas", fitted))])
     {
         let live = rates.values().flatten().filter(|r| **r > 0.0).count();
         let per_day: f64 = rates.values().flatten().sum::<f64>() * DAY as f64;
@@ -319,21 +352,219 @@ async fn agenda_on_a_real_db() {
         );
         for life in [900.0, 7200.0, 43_200.0] {
             let runs: Vec<Outcome> = (1..=SEEDS)
-                .map(|s| simulate(&tasks, &ranges, rates, params, life, 7, 0x5eed * s))
+                .map(|s| simulate(&tasks, &ranges, rates, params, life, 2, 0x5eed * s))
                 .collect();
             let reads: u64 = runs.iter().map(|o| o.reads).sum();
             let caught: u64 = runs.iter().map(|o| o.caught).sum();
             let arrived: u64 = runs.iter().map(|o| o.arrived).sum();
             let worth: f64 = runs.iter().map(|o| o.worth).sum();
             let ranges_read = runs.iter().map(|o| o.ranges_read).sum::<usize>() / runs.len();
+            let agenda_reads: u64 = runs.iter().map(|o| o.agenda_reads).sum();
+            let top5: u64 = runs.iter().map(|o| o.agenda_top5).sum();
+            let max_gap = runs.iter().map(|o| o.max_gap).max().unwrap();
             println!(
-                "  vida {:>4.0} min: {caught} pegos de {arrived} ({:.1} %), {:.4} anúncio novo/leitura, \
-                 {:.2} centavos/leitura, {ranges_read} faixas lidas",
+                "  leituras={reads}; lucro simulado total={worth:.2} centavos; vida {:>4.0} min: {caught} pegos de {arrived} ({:.1} %), {:.4} anúncio novo/leitura, \
+                 {:.2} centavos/leitura, {ranges_read} faixas lidas; agenda_top5={top5}/{agenda_reads} ({:.2}%); max_gap={max_gap} s",
                 life / 60.0,
                 100.0 * caught as f64 / arrived.max(1) as f64,
                 caught as f64 / reads.max(1) as f64,
                 worth / reads.max(1) as f64,
+                100.0 * top5 as f64 / agenda_reads.max(1) as f64,
             );
         }
     }
+}
+
+#[test]
+fn comparison_requires_thirty_in_each_arm_and_exact_bands() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER, at INTEGER DEFAULT 10, outcome TEXT DEFAULT 'ok');").unwrap();
+    for gap in [599, 600, 3599, 3600, 21599, 21600] {
+        for arm in [0, 1] {
+            for _ in 0..30 {
+                c.execute(
+                    "INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:a#1-2',?1,?2,1,4)",
+                    rusqlite::params![gap, arm],
+                )
+                .unwrap();
+            }
+        }
+    }
+    c.execute(
+        "DELETE FROM reads WHERE rowid=(SELECT min(rowid) FROM reads)",
+        [],
+    )
+    .unwrap();
+    let report = comparison_report(&c, 0, 100).unwrap();
+    assert!(report.contains("dados insuficientes"));
+    assert!(report.contains("600-3600"));
+    assert!(report.contains("3600-21600"));
+    assert!(report.contains(">=21600"));
+    assert!(report.contains("<600 s | agenda=29 controle=30 | anúncios raros novos dentro do saldo por leitura: dados insuficientes"));
+    assert!(report.contains("600-3600 s | agenda=60 controle=60 | anúncios raros"));
+    assert!(report.contains("3600-21600 s | agenda=60 controle=60 | anúncios raros"));
+    assert!(report.contains(">=21600 s | agenda=30 controle=30 | anúncios raros"));
+    assert!(report.contains("agenda=1.000000 controle=1.000000"));
+    c.execute("INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:b#1-2',21600,0,7,NULL)", [])
+        .unwrap();
+    c.execute("INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:a#1-3',21600,1,7,NULL)", [])
+        .unwrap();
+    let report = comparison_report(&c, 0, 100).unwrap();
+    assert_eq!(report.matches("dados insuficientes").count(), 6);
+}
+
+/// Associação observacional por faixa e banda no período `since..=until` (unix, inclusivo), igual para os
+/// dois braços; consultas que falharam ficam fora. Nunca inicia a caça nem lê configurações.
+fn comparison_report(c: &rusqlite::Connection, since: i64, until: i64) -> rusqlite::Result<String> {
+    let mut out = format!(
+        "Período comum: {since}..={until} (unix, inclusivo).\n\
+         Associação com a agenda, sem causalidade. Bandas não igualam esperas, saldo ou mercado.\n"
+    );
+    let rows = crate::hunt::comparison::compare(c, since, until)?;
+    let mut count = 0;
+    for row in &rows {
+        count += 1;
+        let label = ["<600", "600-3600", "3600-21600", ">=21600"][row.band as usize];
+        out.push_str(&format!("{} | {label} s | agenda={} controle={} | anúncios raros novos dentro do saldo por leitura: ", row.range, row.policy, row.control));
+        match row.rare_rates() {
+            Some((policy, control, _)) => {
+                out.push_str(&format!("agenda={policy:.6} controle={control:.6}\n"))
+            }
+            None => out.push_str("dados insuficientes (mínimo 30 CADA braço)\n"),
+        }
+        out.push_str(&format!(
+            "{} | {label} s | agenda={} controle={} | anúncios novos por leitura: ",
+            row.range, row.policy_new_count, row.control_new_count
+        ));
+        if row.policy_new_count < 30 || row.control_new_count < 30 {
+            out.push_str("dados insuficientes (mínimo 30 CADA braço)\n");
+        } else {
+            out.push_str(&format!(
+                "agenda={:.6} controle={:.6}\n",
+                row.policy_new as f64 / row.policy_new_count as f64,
+                row.control_new as f64 / row.control_new_count as f64
+            ));
+        }
+    }
+    for row in crate::hunt::comparison::by_wait(&rows) {
+        let label = ["<600", "600-3600", "3600-21600", ">=21600"][row.band as usize];
+        if let Some((policy, control, _)) = row.rare_rates() {
+            out.push_str(&format!(
+                "Total por espera {label} s: agenda={policy:.6} controle={control:.6}\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "Total por espera {label} s: agenda={} controle={}, aguardando 30 em cada braço\n",
+                row.policy, row.control
+            ));
+        }
+    }
+    if count == 0 {
+        out.push_str("dados insuficientes: nenhuma faixa/banda comparável registrada\n");
+    }
+    Ok(out)
+}
+
+#[test]
+#[ignore = "exige caminho explícito de cópia offline; somente leitura"]
+fn compare_recorded_reads() {
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("informe {k}"));
+    let at = |k: &str| var(k).parse::<i64>().expect("timestamp unix em segundos");
+    let (since, until) = (at("SNIPER_COMPARISON_SINCE"), at("SNIPER_COMPARISON_UNTIL"));
+    assert!(since <= until, "período vazio");
+    let c = rusqlite::Connection::open_with_flags(
+        var("SNIPER_COMPARISON_DB"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    println!("{}", comparison_report(&c, since, until).unwrap());
+}
+
+#[test]
+fn comparison_distinguishes_total_new_from_affordable_and_missing() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER, at INTEGER DEFAULT 10, outcome TEXT DEFAULT 'ok');").unwrap();
+    for arm in [0, 1] {
+        for _ in 0..30 {
+            c.execute("INSERT INTO reads(choice_range,choice_gap,choice_control,fresh,new_listings) VALUES('r:a#1-2',600,?1,1,4)", [arm])
+                .unwrap();
+        }
+    }
+    let report = comparison_report(&c, 0, 100).unwrap();
+    assert!(report.contains("anúncios novos por leitura: agenda=4.000000 controle=4.000000"));
+    assert!(report.contains(
+        "anúncios raros novos dentro do saldo por leitura: agenda=1.000000 controle=1.000000"
+    ));
+    c.execute("UPDATE reads SET new_listings=NULL WHERE rowid=1", [])
+        .unwrap();
+    let report = comparison_report(&c, 0, 100).unwrap();
+    assert!(
+        report.contains("agenda=29 controle=30 | anúncios novos por leitura: dados insuficientes")
+    );
+    assert!(report.contains(
+        "anúncios raros novos dentro do saldo por leitura: agenda=1.000000 controle=1.000000"
+    ));
+}
+
+#[test]
+fn comparison_uses_only_the_common_period_and_skips_failures() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE reads(choice_range TEXT, choice_gap INTEGER, choice_control INTEGER, fresh INTEGER, new_listings INTEGER, at INTEGER, outcome TEXT);").unwrap();
+    let add = |at: i64, arm: i64, fresh: i64, new: Option<i64>, outcome: &str| {
+        c.execute(
+            "INSERT INTO reads VALUES('r:a#1-2',600,?1,?2,?3,?4,?5)",
+            rusqlite::params![arm, fresh, new, at, outcome],
+        )
+        .unwrap();
+    };
+    for arm in [0, 1] {
+        // vazios bem-sucedidos contam como zero; o achado fica na borda inicial do período
+        for _ in 0..29 {
+            add(150, arm, 0, Some(0), "ok");
+        }
+        add(100, arm, 3, Some(3), "ok");
+        add(200, arm, 0, Some(0), "ok");
+        for _ in 0..40 {
+            // fora do período: não entram nem completam o mínimo
+            add(99, arm, 9, Some(9), "ok");
+            add(201, arm, 9, Some(9), "ok");
+            // falha enviada dentro do período: nem zero nem leitura
+            add(150, arm, 0, None, "failed");
+        }
+    }
+    let report = comparison_report(&c, 100, 200).unwrap();
+    assert!(report.starts_with("Período comum: 100..=200"));
+    assert!(report.contains("agenda=31 controle=31 | anúncios raros novos dentro do saldo por leitura: agenda=0.096774 controle=0.096774"));
+    assert!(report.contains("anúncios novos por leitura: agenda=0.096774 controle=0.096774"));
+    // período que corta as bordas: 29 por braço, abaixo do mínimo, sem conclusão
+    let report = comparison_report(&c, 101, 199).unwrap();
+    assert!(report.contains("agenda=29 controle=29"));
+    assert_eq!(report.matches("dados insuficientes").count(), 2);
+    assert!(!report.contains("agenda=0."));
+}
+
+#[tokio::test]
+async fn panel_and_offline_report_match_when_one_read_finds_many() {
+    let (db, _dir) = crate::db::temp_db();
+    db.call(|c| {
+        c.execute("UPDATE alert_window SET started_at=1000", [])?;
+        for arm in [0, 1] {
+            for i in 0..30 {
+                let fresh = if arm == 0 && i == 0 { 20 } else if arm == 1 && i < 10 { 1 } else { 0 };
+                let range = format!("r:skin{}#1-2", i % 6);
+                c.execute("INSERT INTO reads(at,arm,fresh,choice_range,choice_gap,choice_control,outcome) VALUES(1001,'r:a',?1,?2,600,?3,'ok')", rusqlite::params![fresh,range,arm])?;
+            }
+        }
+        for (fresh, state, expected, panel) in [(20, "cumprido", "0.666667", "66,7"), (5, "não cumprido", "0.166667", "16,7")] {
+            c.execute("UPDATE reads SET fresh=?1 WHERE rowid=(SELECT min(rowid) FROM reads WHERE choice_control=0)", [fresh])?;
+            let offline = comparison_report(c, 1000, 2000)?;
+            let metric = &crate::web::learning_alerts::report(c, 2000)?.metrics[0];
+            assert_eq!(metric.state, state);
+            assert!(offline.contains(&format!("Total por espera 600-3600 s: agenda={expected} controle=0.333333")));
+            assert!(metric.value.contains(panel));
+            assert!(metric.value.contains("rodízio 33,3 anúncios a cada 100 leituras"));
+            assert!(!metric.value.contains("r:a#1-2"));
+        }
+        Ok(())
+    }).await.unwrap();
 }

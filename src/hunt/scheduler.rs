@@ -47,14 +47,8 @@ const SAVE_EVERY_SECS: i64 = 30;
 const ACTIVE_RECHECK_SECS: i64 = 60;
 /// Teto da conferência do achado antigo (ver `recheck_secs`).
 const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
-/// Descanso da leitura de anúncios: no máximo uma a cada 28 s (≤ 129/h).
-// shortcut: 100/h é hipótese. Medido: ~200 leituras de anúncios/h por 3 h terminaram em 429 por horas (10/11),
-// como 220–250/h em 06/11 e 07/11; 75–85/h de anúncios + 46–49/h de histórico rodaram 6 h (11/11) e a mesma soma
-// terminou em bloqueio às 4 h (10/11). Com a vaga livre sempre indo a seed/float, o teto vira o ritmo real.
-// 11/11: 8 janelas livres desde 06/11, de 123 a 262/h somados, terminaram todas em bloqueio depois de 1 a 7 h;
-// o ritmo não explica a duração. 42 s (86/h + ~11/h de descoberta + avaliação ≈ 100/h) é o teto pedido pelo
-// Erick, não um número medido como seguro. 12/11: com o Chrome (#107), 24 h a ~75 anúncios/h + histórico tiveram
-// só 2 rajadas curtas de 429; o Erick pediu 28 s. Se voltar bloqueio de horas, é o primeiro número a desfazer.
+/// Descanso inicial; em operação o cliente mantém o degrau persistente de 28 até 20 s.
+#[cfg(test)]
 pub(super) const LISTINGS_REST_SECS: i64 = 28;
 const FLOOR_SWEEP_GAP_SECS: i64 = 60;
 const FLOOR_SWEEP_RETRY_SECS: i64 = 3;
@@ -163,12 +157,28 @@ const PLAIN_RANGE: Range = Range {
 /// Uma leitura para o registro (`reads`): o histórico que o ajuste repete e o placar compara.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Read {
+    /// Todos os anúncios novos registrados; ausente se o registro falhou ou não é comparável.
+    pub new_listings: Option<u32>,
     pub at: i64,
     pub arm: String,
     pub fresh: u32,
     /// Lucro esperado das oportunidades novas (centavos).
     pub gain: i64,
     pub range: Option<RangeRead>,
+    pub choice: Option<ChoiceSnapshot>,
+    /// Consulta enviada que falhou: fica no registro só para a comparação, fora do ajuste.
+    pub failed: bool,
+}
+
+/// Retrato da escolha; só a primeira resposta da leitura principal o consome.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChoiceSnapshot {
+    pub range: String,
+    pub gap: Option<i64>,
+    pub control: bool,
+    pub eligible_ranges: usize,
+    pub oldest_range: String,
+    pub oldest_gap: Option<i64>,
 }
 
 /// A faixa de seed lida: o que a repetição precisa para refazer a conta da exposição.
@@ -273,6 +283,8 @@ struct Progress {
 
 #[derive(Default)]
 pub struct Queue {
+    #[cfg(test)]
+    legacy_stock: bool,
     entries: HashMap<String, Entry>,
     /// Sobrevive à saída do braço da seleção: se ele voltar, retoma de onde parou.
     stats: HashMap<String, Stat>,
@@ -292,6 +304,10 @@ pub struct Queue {
     /// Faixa que `next_matching` escolheu para o alvo (índice, controle); `focus` consome.
     choice: HashMap<String, (usize, bool)>,
     focused: HashMap<String, Focus>,
+    snapshots: HashMap<String, ChoiceSnapshot>,
+    focused_snapshots: HashMap<String, ChoiceSnapshot>,
+    /// Alvos que a consulta em curso focou junto com o principal e ainda não leram (`focus_shared`).
+    shared: Vec<String>,
     pub external: Option<String>,
     pub external_ready: bool,
     pub last_exploring: bool,
@@ -348,12 +364,8 @@ impl Queue {
         self.ranges = ranges;
     }
 
-    /// A faixa do alvo que mais vale ler agora e quanto: peso × lucro × estoque acumulado desde a última leitura
-    /// dela, na mesma janela com que a taxa aprende (`reward`). Vezes a taxa do alvo, são os anúncios novos de seed
-    /// pagante esperados × lucro por anúncio; toda leitura custa uma consulta de anúncios (medido em 13/11: 1,00 a
-    /// 1,03 por leitura), então dividir pelo custo não muda a ordem. Empate fica com a primeira.
-    // Era a vida do anúncio mais barato comum (`life`, 792 s): a faixa relida há 2 min valia 1/6 da parada há dias e
-    // a agenda relia as mesmas 2 faixas a cada 2–3 min (13/11: 1 294 de 2 073 leituras, 5 anúncios novos).
+    /// Índice marginal: peso * lucro * W * (1 - exp(-x) - x exp(-x)), x = gap/W.
+    /// Exposição do aprendizado continua sendo o estoque acumulado, sem a parcela marginal.
     fn best_range(&self, task: &Task, now: i64) -> Option<(usize, f64)> {
         task.seeds
             .iter()
@@ -364,10 +376,24 @@ impl Queue {
                     .range_seen
                     .get(&range_key(&task.id, r))
                     .map(|at| now - at);
-                (
-                    i,
-                    range.weight * range.gain * value::exposure(gap, self.params.window),
-                )
+                let window = self.params.window;
+                let stock = gap.map_or(window, |gap| {
+                    let x = gap.max(0) as f64 / window;
+                    // Série evita cancelamento numérico quando gap/W é pequeno.
+                    let marginal = if x < 1e-3 {
+                        x * x * (0.5 - x / 3.0 + x * x / 8.0)
+                    } else {
+                        -(-x).exp_m1() - x * (-x).exp()
+                    };
+                    window * marginal.max(0.0)
+                });
+                #[cfg(test)]
+                let stock = if self.legacy_stock {
+                    value::exposure(gap, window)
+                } else {
+                    stock
+                };
+                (i, range.weight * range.gain * stock)
             })
             .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
     }
@@ -383,6 +409,7 @@ impl Queue {
     }
 
     fn begin_query(&mut self, task: &Task) {
+        self.shared.clear();
         let n = self
             .query_revisions
             .entry(base_name(&task.name).to_string())
@@ -487,9 +514,9 @@ impl Queue {
         }
     }
 
-    /// A leitura de anúncios ainda descansa da última (`LISTINGS_REST_SECS`).
-    pub fn resting(&self, now: i64) -> bool {
-        now - self.listed_at < LISTINGS_REST_SECS
+    /// A leitura de anúncios ainda descansa da última.
+    pub fn resting(&self, now: i64, rest_seconds: i64) -> bool {
+        now - self.listed_at < rest_seconds
     }
 
     /// Há alvo de seed: a vaga da leitura de anúncios vai para eles, e entre eles decide a agenda (valor da
@@ -498,7 +525,7 @@ impl Queue {
         self.entries.values().any(|e| e.task.rare())
     }
 
-    /// Centavos esperados de ler o alvo agora (`value`): nunca visto vale infinito.
+    /// Prioridade da leitura: retorno marginal para raro; centavos esperados nos demais. Nunca visto vale infinito.
     fn value(&self, pool: &value::Pool, id: &str, now: i64) -> f64 {
         let Some(s) = self.stats.get(id).filter(|s| s.seen() > 0) else {
             return f64::INFINITY;
@@ -526,6 +553,9 @@ impl Queue {
 
     /// `next` só entre os alvos que `keep` aceita (sem os raros enquanto a leitura de anúncios está barrada).
     pub fn next_matching(&mut self, now: i64, keep: impl Fn(&Task) -> bool) -> Option<Task> {
+        self.snapshots.clear();
+        self.focused_snapshots.clear();
+        self.shared.clear();
         let external_id = self.external.clone();
         let failing: HashSet<&str> = self
             .failing
@@ -639,6 +669,36 @@ impl Queue {
             Some(i) => Some((i, true)),
             None => self.best_range(&pick.task, now).map(|(i, _)| (i, false)),
         };
+        if let Some((i, control)) = choice {
+            let mut candidates: Vec<_> = self
+                .entries
+                .values()
+                .filter(|e| eligible(&e.task) && e.task.rare())
+                .flat_map(|e| e.task.seeds.iter().map(|&r| range_key(&e.task.id, r)))
+                .collect();
+            candidates.sort_by(|a, b| {
+                self.range_seen
+                    .get(a)
+                    .copied()
+                    .unwrap_or(0)
+                    .cmp(&self.range_seen.get(b).copied().unwrap_or(0))
+                    .then(a.cmp(b))
+            });
+            if let Some(oldest) = candidates.first() {
+                let range = range_key(&id, pick.task.seeds[i]);
+                self.snapshots.insert(
+                    id.clone(),
+                    ChoiceSnapshot {
+                        gap: self.range_seen.get(&range).map(|at| now - at),
+                        range,
+                        control,
+                        eligible_ranges: candidates.len(),
+                        oldest_range: oldest.clone(),
+                        oldest_gap: self.range_seen.get(oldest).map(|at| now - at),
+                    },
+                );
+            }
+        }
         match choice {
             Some(c) => self.choice.insert(id.clone(), c),
             None => self.choice.remove(&id),
@@ -673,22 +733,31 @@ impl Queue {
             }
             self.dirty.insert(id.to_string());
         }
-        // a faixa escolhida não foi lida: volta a contar o estoque desde a leitura anterior
-        if let Some(f) = self.focused.remove(id) {
-            match f.prev {
-                Some(at) => self.range_seen.insert(f.key, at),
-                None => self.range_seen.remove(&f.key),
-            };
-        }
+        self.snapshots.remove(id);
+        self.focused_snapshots.remove(id);
+        self.unfocus(id);
+        self.unfocus_shared();
         (self.credit, self.explore, self.explore_turn, self.cursors) = credit;
         for (id, e) in &mut self.entries {
             e.cursor = self.cursors.get(id).copied().unwrap_or(0);
         }
     }
 
+    /// A faixa escolhida não foi lida: volta a contar o estoque desde a leitura anterior.
+    fn unfocus(&mut self, id: &str) {
+        if let Some(f) = self.focused.remove(id) {
+            match f.prev {
+                Some(at) => self.range_seen.insert(f.key, at),
+                None => self.range_seen.remove(&f.key),
+            };
+        }
+    }
+
     /// A consulta do alvo voltou `data` nula: ele descansa (`FAIL_REST_SECS`) em vez de repetir a falha na
     /// vaga dos outros. A primeira leitura que der certo (`reward`) zera a conta. Devolve o descanso em segundos.
     pub fn failed(&mut self, id: &str, now: i64) -> i64 {
+        self.snapshots.remove(id);
+        self.focused_snapshots.remove(id);
         let (n, until) = self.failing.entry(id.to_string()).or_insert((0, 0));
         *n += 1;
         let rest = (FAIL_REST_SECS << (*n - 1).min(8)).min(FAIL_REST_MAX_SECS);
@@ -699,7 +768,18 @@ impl Queue {
     /// Resultado de uma olhada no alvo: anúncios novos dentro do saldo e o lucro esperado das oportunidades novas
     /// (centavos). Olhada sem nada novo também conta: soma exposição e zera o estoque.
     pub fn reward(&mut self, id: &str, now: i64, found: Found) {
+        self.reward_with_listings(id, now, found, None);
+    }
+
+    fn reward_with_listings(
+        &mut self,
+        id: &str,
+        now: i64,
+        found: Found,
+        new_listings: Option<u32>,
+    ) {
         self.failing.remove(id);
+        self.shared.retain(|s| s != id);
         let Some(s) = self.stats.get_mut(id) else {
             return;
         };
@@ -740,14 +820,45 @@ impl Queue {
         if found.fresh > 0 || found.gain_cents > 0 {
             s.reward_at = now;
         }
+        let choice = self.focused_snapshots.remove(id);
         self.reads.push(Read {
+            new_listings: choice.as_ref().and(new_listings),
             at: now,
             arm: id.to_string(),
             fresh: found.fresh,
             gain: found.gain_cents.max(0),
             range,
+            choice,
+            failed: false,
         });
         self.dirty.insert(id.to_string());
+    }
+
+    /// Os outros alvos da mesma consulta não leram: só a espera volta, sem leitura nem falha deles.
+    fn unfocus_shared(&mut self) {
+        for other in std::mem::take(&mut self.shared) {
+            self.unfocus(&other);
+            self.focused_snapshots.remove(&other);
+        }
+    }
+
+    /// Consulta enviada que falhou antes do resultado: grava o retrato da escolha uma vez, sem nota nem zero, e
+    /// devolve a espera da faixa (a falha não leu nada).
+    fn failed_read(&mut self, id: &str, now: i64) {
+        self.unfocus(id);
+        self.unfocus_shared();
+        if let Some(choice) = self.focused_snapshots.remove(id) {
+            self.reads.push(Read {
+                new_listings: None,
+                at: now,
+                arm: id.to_string(),
+                fresh: 0,
+                gain: 0,
+                range: None,
+                choice: Some(choice),
+                failed: true,
+            });
+        }
     }
 
     /// Centavos esperados de uma leitura com o estoque cheio e o motivo em palavras do dia a dia.
@@ -803,6 +914,11 @@ impl Queue {
         else {
             return task;
         };
+        self.focused_snapshots.remove(&task.id);
+        let snapshot = self
+            .snapshots
+            .remove(&task.id)
+            .filter(|_| task.seeds == e.task.seeds);
         let seeds = &e.task.seeds;
         let (i, control) = if task.seeds.len() == 1 && seeds.len() > 1 {
             // conferência de achado: a tarefa já vem na faixa dele
@@ -823,6 +939,9 @@ impl Queue {
         };
         let (range, info) = (seeds[i], range_info(&self.ranges, &e.task, i));
         let key = range_key(&task.id, range);
+        if let Some(snapshot) = snapshot.filter(|s| s.range == key) {
+            self.focused_snapshots.insert(task.id.clone(), snapshot);
+        }
         let prev = self.range_seen.insert(key.clone(), now);
         self.focused.insert(
             task.id.clone(),
@@ -839,7 +958,15 @@ impl Queue {
         }
     }
 
+    /// `focus` de um alvo que vai junto na consulta de outro: a falha dela devolve a espera dele também.
+    fn focus_shared(&mut self, task: Task, now: i64) -> Task {
+        self.shared.push(task.id.clone());
+        self.focus(task, now)
+    }
+
     pub(super) fn record_scan(&mut self, id: &str, now: i64) {
+        self.snapshots.remove(id);
+        self.focused_snapshots.remove(id);
         let stat = self.stats.entry(id.to_string()).or_insert_with(|| Stat {
             first_at: now,
             updated_at: now,
@@ -984,6 +1111,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         return Tick::Book;
     }
     // A seleção é provisória até uma requisição sair; a falha continua contando se a Steam recebeu a tentativa.
+    let listings_rest = h.steam.listings_rest_secs();
     let (next, credit) = {
         let now = h.now();
         let mut s = h.lock();
@@ -1011,7 +1139,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
                 .collect();
             // No descanso da leitura de anúncios a vaga é do livro de ofertas (alvo barato); fora dele, de um
             // alvo de seed ou float: é a leitura escassa e é onde está o anúncio mal precificado.
-            let no_listings = listings_blocked || s.queue.resting(now);
+            let no_listings = listings_blocked || s.queue.resting(now, listings_rest);
             let rare = !no_listings && s.queue.has_rare();
             (
                 s.queue.next_matching(now, |t| {
@@ -1057,6 +1185,9 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         },
         Err(e) => (Err(e), 0),
     };
+    if result.is_err() && attempts > 0 {
+        h.lock().queue.failed_read(&task.id, h.now());
+    }
     match result {
         Ok(()) => {
             set_idle_message(h);
@@ -1427,7 +1558,7 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
                 other.clone()
             };
             if same_query(task, &focused) {
-                targets.push(s.queue.focus(other, h.now()));
+                targets.push(s.queue.focus_shared(other, h.now()));
             }
         }
     }
@@ -1466,11 +1597,18 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
             key.push_str(&format!("|legacy:{}", queried.name));
         }
         super::ledger::count_hour(h, now, "queries", 1).await;
-        match super::ledger::record(h, &key, &page, now).await {
-            Ok(r) if r != super::ledger::Recorded::default() => tracing::debug!(?r, "registro"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!("registro de observações falhou: {e:#}"),
-        }
+        let new_listings = match super::ledger::record(h, &key, &page, now).await {
+            Ok(r) => {
+                if r != super::ledger::Recorded::default() {
+                    tracing::debug!(?r, "registro");
+                }
+                Some(r.new)
+            }
+            Err(e) => {
+                tracing::warn!("registro de observações falhou: {e:#}");
+                None
+            }
+        };
         let mut near = 0;
         for t in targets
             .iter()
@@ -1478,7 +1616,9 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
         {
             let out = detect::process(h, t, &page).await?;
             near += out.rewarded.near_hits;
-            h.lock().queue.reward(&t.id, h.now(), out.rewarded);
+            h.lock()
+                .queue
+                .reward_with_listings(&t.id, h.now(), out.rewarded, new_listings);
         }
         super::ledger::count_hour(h, now, "near", near).await;
         if !named_only {
@@ -1528,7 +1668,10 @@ fn floor_priority(
     Some((false, age.is_none(), age.unwrap_or(1) as f64 * weight))
 }
 
-async fn sweep_floor(h: &Arc<Hunt>, visited: &mut HashMap<String, i64>) -> anyhow::Result<()> {
+pub(super) async fn sweep_floor(
+    h: &Arc<Hunt>,
+    visited: &mut HashMap<String, i64>,
+) -> anyhow::Result<()> {
     use crate::pricing::groups::{group_of, skin_base};
 
     let tasks: HashMap<_, _> = h
@@ -1574,16 +1717,16 @@ async fn sweep_floor(h: &Arc<Hunt>, visited: &mut HashMap<String, i64>) -> anyho
                     .any(|a| a.task == task.id && a.opp.name == name);
                 let priority =
                     floor_priority(s.saldo, price, age, paying, sales.unwrap_or(0.0), active)?;
-                Some((priority, task, name, key))
+                Some((priority, task, name))
             })
-            .max_by(|(a, _, name_a, _), (b, _, name_b, _)| {
+            .max_by(|(a, _, name_a), (b, _, name_b)| {
                 a.0.cmp(&b.0)
                     .then(a.1.cmp(&b.1))
                     .then(a.2.total_cmp(&b.2))
                     .then(name_b.cmp(name_a))
             })
     };
-    let Some((_, task, name, key)) = target else {
+    let Some((_, task, name)) = target else {
         return Ok(());
     };
     let (result, context) = crate::research::scope_tracked(
@@ -1607,13 +1750,6 @@ async fn sweep_floor(h: &Arc<Hunt>, visited: &mut HashMap<String, i64>) -> anyho
             return Ok(());
         }
     };
-    let new = match super::ledger::record(h, &key, &page, now).await {
-        Ok(record) => Some(record.new),
-        Err(error) => {
-            tracing::warn!(%error, "registro de observações do piso falhou");
-            None
-        }
-    };
     let paying = {
         let s = h.lock();
         page.listings
@@ -1628,7 +1764,7 @@ async fn sweep_floor(h: &Arc<Hunt>, visited: &mut HashMap<String, i64>) -> anyho
         crate::research::with_context(context, detect::process_page(h, task, &page, Some(&name)))
             .await;
     tracing::info!(
-        %name, anuncios = page.listings.len(), novos = ?new, pagantes = paying,
+        %name, anuncios = page.listings.len(), pagantes = paying,
         achados = ?outcome.as_ref().ok().map(|out| out.rewarded.finds),
         "varredura do piso"
     );
@@ -1728,8 +1864,8 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
         for r in reads {
             let range = r.range;
             tx.execute(
-                "INSERT INTO reads(at, arm, fresh, gain, gap, weight, control, worth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO reads(at, arm, fresh, gain, gap, weight, control, worth, choice_range, choice_gap, choice_control, eligible_ranges, oldest_range, oldest_gap, new_listings, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 rusqlite::params![
                     r.at,
                     r.arm,
@@ -1739,6 +1875,14 @@ pub async fn save_stats(h: &Hunt) -> anyhow::Result<()> {
                     range.map(|x| x.weight),
                     range.is_some_and(|x| x.control),
                     range.map_or(0, |x| x.worth),
+                    r.choice.as_ref().map(|x| &x.range),
+                    r.choice.as_ref().and_then(|x| x.gap),
+                    r.choice.as_ref().map(|x| x.control),
+                    r.choice.as_ref().map(|x| x.eligible_ranges as i64),
+                    r.choice.as_ref().map(|x| &x.oldest_range),
+                    r.choice.as_ref().and_then(|x| x.oldest_gap),
+                    r.new_listings,
+                    r.choice.as_ref().map(|_| if r.failed { "failed" } else { "ok" }),
                 ],
             )?;
         }
@@ -1837,6 +1981,7 @@ pub async fn run(h: Arc<Hunt>) {
             h.saldo(),
             h.steam.main_blocked(Endpoint::Legacy),
         ) {
+            // shortcut: a varredura roda no turno da caça; medido em 17/11/2026: respostas de 250 a 1.650 ms. Se o log mostrar leituras de faixa atrasadas por ela, mover para tarefa própria.
             let gap = match sweep_floor(&h, &mut floor_visited).await {
                 Err(error) if floor_slot_busy(&error) => FLOOR_SWEEP_RETRY_SECS,
                 result => {
@@ -1910,6 +2055,56 @@ mod tests {
         let unread = floor_priority(1000, None, None, 10, 100.0, false).unwrap();
         assert!(active(180).unwrap() > unread);
         assert!(active(181).unwrap() > active(180).unwrap());
+    }
+
+    #[test]
+    fn marginal_frequency_and_control_coverage() {
+        for window in [7200.0, 28800.0, 1e9] {
+            let mut t = task("r:a", 1.0);
+            t.seeds = (0..227).map(|i| (i, i)).collect();
+            let mut q = Queue {
+                params: value::Params {
+                    window,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            q.set_tasks(vec![t.clone()]);
+            q.set_ranges(HashMap::from([(
+                t.id.clone(),
+                (0..227)
+                    .map(|i| Range {
+                        weight: if i == 0 { 25.0 } else { 1.0 },
+                        gain: 1.0,
+                    })
+                    .collect(),
+            )]));
+            let mut counts = [0usize; 227];
+            let mut last = [0usize; 227];
+            let mut max_gap = 0;
+            for step in 1..=10000 {
+                let now = 1_000_000 + step as i64 * 28;
+                let pick = q.next_matching(now, Task::rare).unwrap();
+                let pick = q.focus(pick, now);
+                let i = pick.seeds[0].0 as usize;
+                counts[i] += 1;
+                max_gap = max_gap.max(step - last[i]);
+                last[i] = step;
+                q.reward(&t.id, now, Found::default());
+                q.take_reads();
+            }
+            let ratio = counts[0] as f64 / (counts[1..].iter().sum::<usize>() as f64 / 226.0);
+            println!(
+                "W={window}; ratio={ratio:.4}; max_gap={max_gap}; bound={}",
+                8 * 227
+            );
+            assert!(max_gap <= 8 * 227);
+            assert!((3.5..6.5).contains(&ratio), "frequency ratio={ratio}");
+            assert!(
+                last.iter().all(|s| 10000 - s <= 8 * 227),
+                "control bounds coverage"
+            );
+        }
     }
 
     #[test]
@@ -2065,12 +2260,26 @@ mod tests {
     }
 
     #[test]
+    fn listings_rest_obeys_each_interval() {
+        let q = Queue {
+            listed_at: 1_000_000,
+            ..Default::default()
+        };
+        for seconds in [28, 26, 20] {
+            assert!(q.resting(1_000_000 + seconds - 1, seconds));
+            assert!(!q.resting(1_000_000 + seconds, seconds));
+        }
+        assert!(q.resting(1_000_020, 28));
+        assert!(!q.resting(1_000_020, 20));
+    }
+
+    #[test]
     fn listings_rest_between_reads_and_an_old_find_is_rechecked_less_often() {
         let mut q = Queue::default();
-        assert!(!q.resting(1_000_000));
+        assert!(!q.resting(1_000_000, LISTINGS_REST_SECS));
         q.listed_at = 1_000_000;
-        assert!(q.resting(1_000_000 + LISTINGS_REST_SECS - 1));
-        assert!(!q.resting(1_000_000 + LISTINGS_REST_SECS));
+        assert!(q.resting(1_000_000 + LISTINGS_REST_SECS - 1, LISTINGS_REST_SECS));
+        assert!(!q.resting(1_000_000 + LISTINGS_REST_SECS, LISTINGS_REST_SECS));
         assert_eq!(recheck_secs(0), 60);
         assert_eq!(recheck_secs(3600), 360);
         assert_eq!(recheck_secs(5 * 3600), 1800);
@@ -2310,11 +2519,14 @@ mod tests {
         assert!((s.r - 100.0).abs() < 0.01);
         assert!(s.exposure > before + 1000.0 && s.exposure < before + 1820.0);
         let read = Read {
+            new_listings: None,
             at: now + 20,
             arm: "a".to_string(),
             fresh: 0,
             gain: 0,
             range: None,
+            choice: None,
+            failed: false,
         };
         assert_eq!(q.take_reads(), vec![read]);
         assert!(q.take_reads().is_empty());
@@ -2557,5 +2769,245 @@ mod tests {
         tasks.push(task("d:solo", 1.0));
         let cheap_share = run(tasks, Mode::Cheap);
         assert!(cheap_share >= floor, "desconto {cheap_share:.3}");
+    }
+    #[test]
+    fn comparison_snapshot_excludes_failures_external_and_repeated_reward() {
+        let mut q = Queue::default();
+        let rare = |id: &str| Task {
+            seeds: vec![(1, 2), (5, 6)],
+            ..task(id, 1.0)
+        };
+        q.set_tasks(vec![rare("r:a"), rare("r:b"), rare("r:c")]);
+        q.external = Some("r:c".into());
+        q.failed("r:b", 100);
+        q.range_seen.insert("r:a#1-2".into(), 1);
+        q.range_seen.insert("r:a#5-6".into(), 2);
+        let t = q.next_matching(101, Task::rare).unwrap();
+        q.focus(t, 101);
+        q.reward_with_listings(
+            "r:a",
+            102,
+            Found {
+                fresh: 1,
+                ..Found::default()
+            },
+            Some(4),
+        );
+        let r = q.take_reads().pop().unwrap();
+        assert_eq!(r.new_listings, Some(4));
+        assert_eq!(r.fresh, 1);
+        let snapshot = r.choice.unwrap();
+        assert_eq!(snapshot.eligible_ranges, 2);
+        assert_eq!(snapshot.oldest_range, "r:a#1-2");
+        assert_eq!(snapshot.oldest_gap, Some(100));
+        assert!(matches!(snapshot.gap, Some(99 | 100)));
+        q.reward_with_listings("r:a", 103, Found::default(), Some(4));
+        let r = q.take_reads().pop().unwrap();
+        assert!(r.choice.is_none());
+        assert_eq!(r.new_listings, None);
+        let t = q.next_matching(104, Task::rare).unwrap();
+        q.focus(t, 104);
+        q.reward_with_listings("r:a", 104, Found::default(), None);
+        let r = q.take_reads().pop().unwrap();
+        assert!(r.choice.is_some());
+        assert_eq!(r.new_listings, None);
+        // A conferência, mesmo após uma escolha ainda pendente, não a herda.
+        let t = q.next_matching(104, Task::rare).unwrap();
+        let confirmation = Task {
+            seeds: vec![t.seeds[0]],
+            ..t
+        };
+        q.record_scan("r:a", 104);
+        q.focus(confirmation, 104);
+        q.reward("r:a", 105, Found::default());
+        assert!(q.take_reads().pop().unwrap().choice.is_none());
+        let t = q.next_matching(106, Task::rare).unwrap();
+        q.focus(t, 106);
+        q.undo_unsent(
+            "r:a",
+            106,
+            (q.credit, q.explore, q.explore_turn, q.cursors.clone()),
+        );
+        q.reward("r:a", 107, Found::default());
+        assert!(q.take_reads().pop().unwrap().choice.is_none());
+    }
+
+    #[test]
+    fn sent_failure_records_choice_once_without_touching_stats() {
+        let mut q = Queue::default();
+        let rare = |id: &str| Task {
+            seeds: vec![(1, 2), (5, 6)],
+            ..task(id, 1.0)
+        };
+        q.set_tasks(vec![rare("r:a")]);
+        let t = q.next_matching(100, Task::rare).unwrap();
+        q.focus(t, 100);
+        let stat = q.stats["r:a"].clone();
+        q.failed_read("r:a", 101);
+        q.failed("r:a", 101);
+        q.failed_read("r:a", 102);
+        let reads = q.take_reads();
+        assert_eq!(reads.len(), 1);
+        let r = &reads[0];
+        assert!(r.failed && r.choice.is_some() && r.range.is_none());
+        assert_eq!((r.fresh, r.new_listings), (0, None));
+        assert_eq!(q.stats["r:a"].n, stat.n);
+        assert_eq!(q.stats["r:a"].exposure, stat.exposure);
+    }
+
+    #[test]
+    fn sent_failure_gives_back_the_range_wait() {
+        // faixa lida há uma hora e faixa nunca lida: a falha devolve a espera verdadeira às duas
+        for seen in [Some(3600), None] {
+            let mut q = Queue::default();
+            q.set_tasks(vec![Task {
+                seeds: vec![(1, 2)],
+                ..task("r:a", 1.0)
+            }]);
+            let key = range_key("r:a", (1, 2));
+            if let Some(ago) = seen {
+                q.range_seen.insert(key.clone(), 10_000 - ago);
+            }
+            let t = q.next_matching(10_000, Task::rare).unwrap();
+            q.focus(t, 10_000);
+            q.failed_read("r:a", 10_001);
+            let rest = q.failed("r:a", 10_001);
+            assert_eq!(q.range_seen.get(&key).copied(), seen.map(|a| 10_000 - a));
+            assert!(!q.focused.contains_key("r:a"));
+            assert_eq!(q.failing["r:a"], (1, 10_001 + rest));
+            let read = q.take_reads().pop().unwrap();
+            assert!(read.failed);
+            assert_eq!(read.choice.unwrap().gap, seen);
+            // em descanso o alvo não sai; depois do descanso volta e a leitura mede a espera verdadeira
+            assert!(q.next_matching(10_002, Task::rare).is_none());
+            let later = 10_001 + rest;
+            let t = q.next_matching(later, Task::rare).unwrap();
+            q.focus(t, later);
+            q.reward("r:a", later, Found::default());
+            let read = q.take_reads().pop().unwrap();
+            assert_eq!(read.range.unwrap().gap, seen.map(|a| later - (10_000 - a)));
+            assert!(
+                read.choice
+                    .is_some_and(|c| c.gap == seen.map(|a| later - (10_000 - a)))
+            );
+            assert!(!q.failing.contains_key("r:a"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod shared_failure_tests {
+    use super::*;
+
+    fn rare(id: &str) -> Task {
+        Task {
+            id: id.into(),
+            name: id.into(),
+            code: "G1234567".into(),
+            wear: Some(2),
+            seeds: vec![(1, 2)],
+            float: None,
+            score: 1.0,
+        }
+    }
+
+    /// Dois alvos na mesma consulta, cada faixa lida há uma hora; devolve a fila já focada e as chaves.
+    fn shared_query() -> (Queue, String, String) {
+        let mut q = Queue::default();
+        q.set_tasks(vec![rare("r:a"), rare("r:b")]);
+        let (ka, kb) = (range_key("r:a", (1, 2)), range_key("r:b", (1, 2)));
+        q.range_seen.insert(ka.clone(), 6_400);
+        q.range_seen.insert(kb.clone(), 6_400);
+        let t = q.next_matching(10_000, |t| t.id == "r:a").unwrap();
+        q.focus(t, 10_000);
+        q.focus_shared(rare("r:b"), 10_000);
+        (q, ka, kb)
+    }
+
+    #[test]
+    fn next_query_failure_does_not_restore_previous_shared_target() {
+        let (mut q, ka, kb) = shared_query();
+        q.set_tasks(vec![rare("r:a"), rare("r:b"), rare("r:c"), rare("r:d")]);
+        q.reward("r:a", 10_001, Found::default());
+        q.reward("r:b", 10_001, Found::default());
+        let kc = range_key("r:c", (1, 2));
+        let kd = range_key("r:d", (1, 2));
+        q.range_seen.insert(kc.clone(), 6_400);
+        q.range_seen.insert(kd.clone(), 6_400);
+        let c = q.next_matching(10_002, |t| t.id == "r:c").unwrap();
+        q.focus(c, 10_002);
+        q.focus_shared(rare("r:d"), 10_002);
+        q.failed_read("r:c", 10_003);
+        assert_eq!(q.range_seen.get(&ka).copied(), Some(10_000));
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(10_000));
+        assert_eq!(q.range_seen.get(&kc).copied(), Some(6_400));
+        assert_eq!(q.range_seen.get(&kd).copied(), Some(6_400));
+        assert!(!q.focused.contains_key("r:d"));
+    }
+
+    #[test]
+    fn sent_shared_failure_gives_back_every_target_wait() {
+        let (mut q, ka, kb) = shared_query();
+        q.failed_read("r:a", 10_001);
+        assert_eq!(q.range_seen.get(&ka).copied(), Some(6_400));
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(6_400));
+        assert!(q.focused.is_empty());
+        assert!(q.focused_snapshots.is_empty());
+        let reads = q.take_reads();
+        assert_eq!(reads.len(), 1);
+        let r = &reads[0];
+        assert!(r.arm == "r:a" && r.failed && r.fresh == 0 && r.range.is_none());
+        assert!(q.stats.get("r:b").is_none_or(|s| s.queries == 0));
+    }
+
+    #[test]
+    fn unsent_shared_query_gives_back_every_target_wait() {
+        let mut q = Queue::default();
+        q.set_tasks(vec![rare("r:a"), rare("r:b"), rare("r:c")]);
+        let keys: Vec<String> = ["r:a", "r:b", "r:c"]
+            .iter()
+            .map(|id| range_key(id, (1, 2)))
+            .collect();
+        for k in &keys {
+            q.range_seen.insert(k.clone(), 6_400);
+        }
+        let credit = (q.credit, q.explore, q.explore_turn, q.cursors.clone());
+        let t = q.next_matching(10_000, |t| t.id == "r:a").unwrap();
+        q.focus(t, 10_000);
+        q.focus_shared(rare("r:b"), 10_000);
+        q.focus_shared(rare("r:c"), 10_000);
+        // o retrato do secundário vem de uma escolha anterior; aqui ele é copiado do principal
+        let snap = q.focused_snapshots["r:a"].clone();
+        for id in ["r:b", "r:c"] {
+            q.focused_snapshots.insert(id.into(), snap.clone());
+        }
+        q.undo_unsent("r:a", 10_001, credit.clone());
+        for k in &keys {
+            assert_eq!(q.range_seen.get(k).copied(), Some(6_400));
+        }
+        assert!(q.focused.is_empty() && q.focused_snapshots.is_empty() && q.shared.is_empty());
+        assert!(q.take_reads().is_empty() && q.failing.is_empty());
+        assert_eq!(
+            (q.credit, q.explore, q.explore_turn, q.cursors.clone()),
+            credit
+        );
+        assert!(q.entries.values().all(|e| e.cursor == 0));
+    }
+
+    #[test]
+    fn sent_shared_success_keeps_reading_every_target() {
+        let (mut q, ka, kb) = shared_query();
+        q.reward("r:a", 10_001, Found::default());
+        q.reward("r:b", 10_001, Found::default());
+        assert_eq!(q.range_seen.get(&ka).copied(), Some(10_000));
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(10_000));
+        assert!(q.focused.contains_key("r:a") && q.focused.contains_key("r:b"));
+        assert!(q.take_reads().iter().all(|r| !r.failed));
+        // falha depois da leitura do secundário não desfaz o que ele leu
+        let (mut q, _, kb) = shared_query();
+        q.reward("r:b", 10_001, Found::default());
+        q.failed_read("r:a", 10_002);
+        assert_eq!(q.range_seen.get(&kb).copied(), Some(10_000));
+        assert!(q.focused.contains_key("r:b"));
     }
 }
