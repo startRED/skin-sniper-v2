@@ -360,6 +360,15 @@ saldo e mercado podem variar. O relatório mostra associação com a agenda, sem
    (a tabela inteira só vale em instalação nova, sem nenhuma skin medida). A agenda passa a escolher a **faixa
    de seed**, não o alvo (item 6 do Aprendizado), e 1 leitura em 8 vai para um rodízio cego que serve de régua.
    O texto abaixo sobre float e sobre a vez fixa de seed e float fica como histórico.
+   **Varredura do piso (17/11):** a consulta por faixa do Desert Eagle | Heat Treated voltou com
+   `data` nula em 16 de 18 leituras no log a partir das 16h e em 18 de 19 na bancada, com seis formatos
+   de consulta. Em paralelo à agenda de faixas, a interface antiga lê os 100 mais baratos de um nome
+   e avalia todos os seeds da página na tarefa rara. A prioridade é tempo sem ler × seeds pagantes ×
+   vendas por dia, com preferência para nomes inéditos e filtro de saldo. O intervalo de 60 s entre
+   varreduras e o mínimo de 180 s por nome são hipóteses a ajustar pela medição das consultas e dos achados.
+   Nomes com oportunidade ativa têm prioridade após o intervalo mínimo, mesmo com piso acima do saldo.
+   A varredura fica fora do registro de observações, e a primeira faixa que reencontra o anúncio recebe
+   uma vez o resultado da avaliação no piso (anúncio novo, achado e lucro ou quase-achado).
    **Caça de comum em desconto desligada (11/11, pedido do Erick):** `main` chama `Hunt::disable_cheap_hunt` e a
    seleção fica só com seed e float. Quem anuncia abaixo do maior pedido de compra vende na hora para o pedido, e
    em 6 dias foram 5 235 anúncios de comum avaliados para 1 achado de R$ 0,93. Ela gastava 150 das ~277 consultas

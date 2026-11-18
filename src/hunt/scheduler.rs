@@ -50,6 +50,9 @@ const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
 /// Descanso inicial; em operação o cliente mantém o degrau persistente de 28 até 20 s.
 #[cfg(test)]
 pub(super) const LISTINGS_REST_SECS: i64 = 28;
+const FLOOR_SWEEP_GAP_SECS: i64 = 60;
+const FLOOR_SWEEP_RETRY_SECS: i64 = 3;
+const FLOOR_MIN_REVISIT_SECS: i64 = 180;
 /// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
 // Medido em 12/11/2026 (24 h): MP7 | Amberline (seed) falhou 287 de 464 tentativas e Serpent Strike (seed) 129 de
 // 366; cada falha são 2 requisições (a repetição de 5 s falha junto ~9 em 10 vezes) e o alvo voltava a ser
@@ -129,6 +132,10 @@ impl Task {
             Some((lo, hi)) if self.seeds.len() == 1 => format!("{}#{lo}-{hi}", self.id),
             _ => self.id.clone(),
         }
+    }
+
+    pub(super) fn floor_sweep_key(&self, name: &str) -> String {
+        format!("{}|floor:{name}", self.id)
     }
 }
 
@@ -1640,6 +1647,138 @@ async fn query_group(h: &Arc<Hunt>, task: &Task, tasks: Vec<Task>) -> anyhow::Re
     Ok(())
 }
 
+fn floor_priority(
+    balance: i64,
+    price: Option<i64>,
+    age: Option<i64>,
+    paying: usize,
+    sales_per_day: f64,
+    active: bool,
+) -> Option<(bool, bool, f64)> {
+    if balance <= 0 || age.is_some_and(|a| a < FLOOR_MIN_REVISIT_SECS) {
+        return None;
+    }
+    if active {
+        return Some((true, age.is_none(), age.unwrap_or_default() as f64));
+    }
+    if balance <= 0 || paying == 0 || price.is_some_and(|p| p > balance) {
+        return None;
+    }
+    let weight = (paying as f64 * sales_per_day).max(0.1);
+    Some((false, age.is_none(), age.unwrap_or(1) as f64 * weight))
+}
+
+pub(super) async fn sweep_floor(
+    h: &Arc<Hunt>,
+    visited: &mut HashMap<String, i64>,
+) -> anyhow::Result<()> {
+    use crate::pricing::groups::{group_of, skin_base};
+
+    let tasks: HashMap<_, _> = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .filter(|task| !task.seeds.is_empty())
+        .map(|task| (task.code.clone(), task))
+        .collect();
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let rows = h.db.call(|c| {
+        c.prepare("SELECT name, g_code, floor_cents, sales_per_day FROM items WHERE g_code IS NOT NULL")?
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get::<_, Option<f64>>(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    }).await?;
+    let now = h.now();
+    let target = {
+        let s = h.lock();
+        rows.into_iter()
+            .filter_map(|(name, code, price, sales)| {
+                let task = tasks.get(&code)?;
+                let key = task.floor_sweep_key(&name);
+                let price = match s.floors.get(&key) {
+                    Some(&(floor, at)) if now - at < catalog::FLOOR_TTL => floor,
+                    _ => price,
+                };
+                let paying = if s.learned.contains_key(skin_base(&name)) {
+                    super::patterns::active(&s.learned, &name).len()
+                } else {
+                    (0..=1000)
+                        .filter(|&seed| group_of(&name, Some(seed), None, None).is_some())
+                        .count()
+                };
+                let age = visited.get(&name).map(|at| now - at);
+                let active = s
+                    .active
+                    .values()
+                    .any(|a| a.task == task.id && a.opp.name == name);
+                let priority =
+                    floor_priority(s.saldo, price, age, paying, sales.unwrap_or(0.0), active)?;
+                Some((priority, task, name))
+            })
+            .max_by(|(a, _, name_a), (b, _, name_b)| {
+                a.0.cmp(&b.0)
+                    .then(a.1.cmp(&b.1))
+                    .then(a.2.total_cmp(&b.2))
+                    .then(name_b.cmp(name_a))
+            })
+    };
+    let Some((_, task, name)) = target else {
+        return Ok(());
+    };
+    let (result, context) = crate::research::scope_tracked(
+        h.db.clone(),
+        decision(h, "varredura_piso", &task.id),
+        async { Ok(listings::query_legacy_floor(&h.steam, &name, &task.code).await?) },
+    )
+    .await?;
+    if result.as_ref().is_err_and(floor_slot_busy) {
+        return result.map(|_| ());
+    }
+    let now = h.now();
+    if result.is_ok() || crate::research::attempts(h.db.clone(), context.id).await? > 0 {
+        visited.insert(name.clone(), now);
+        super::ledger::count_hour(h, now, "queries", 1).await;
+    }
+    let page = match result {
+        Ok(page) => page,
+        Err(error) => {
+            tracing::info!(%name, %error, "varredura do piso sem página");
+            return Ok(());
+        }
+    };
+    let paying = {
+        let s = h.lock();
+        page.listings
+            .iter()
+            .filter(|l| {
+                group_of(&l.name, l.seed.map(u32::from), l.paint_index, l.float).is_some()
+                    || super::patterns::group(&s.learned, &l.name, l.seed).is_some()
+            })
+            .count()
+    };
+    let outcome =
+        crate::research::with_context(context, detect::process_page(h, task, &page, Some(&name)))
+            .await;
+    tracing::info!(
+        %name, anuncios = page.listings.len(), pagantes = paying,
+        achados = ?outcome.as_ref().ok().map(|out| out.rewarded.finds),
+        "varredura do piso"
+    );
+    outcome?;
+    Ok(())
+}
+
+fn floor_slot_busy(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<SteamError>(),
+        Some(SteamError::MainSlotBusy)
+    )
+}
+
 /// Ritmo do último 429 (texto de `SteamClient::restore_pace`), retomado ao subir.
 const PACE_KEY: &str = "steam_pace";
 
@@ -1824,12 +1963,38 @@ pub async fn load_stats(h: &Hunt) -> anyhow::Result<()> {
 }
 
 /// Laço da caça. Termina quando o processo termina.
+fn floor_due(now: i64, next: i64, balance: i64, blocked: bool) -> bool {
+    now >= next && balance > 0 && !blocked
+}
+
 pub async fn run(h: Arc<Hunt>) {
     let mut saved = h.now();
     let mut parallel = super::parallel::Reader::default();
+    let mut next_floor = h.now();
+    let mut floor_visited = HashMap::new();
     loop {
         parallel.step(&h).await;
-        if tick(&h).await == Tick::Idle {
+        let now = h.now();
+        if floor_due(
+            now,
+            next_floor,
+            h.saldo(),
+            h.steam.main_blocked(Endpoint::Legacy),
+        ) {
+            // shortcut: a varredura roda no turno da caça; medido em 17/11/2026: respostas de 250 a 1.650 ms. Se o log mostrar leituras de faixa atrasadas por ela, mover para tarefa própria.
+            let gap = match sweep_floor(&h, &mut floor_visited).await {
+                Err(error) if floor_slot_busy(&error) => FLOOR_SWEEP_RETRY_SECS,
+                result => {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "varredura do piso falhou");
+                    }
+                    FLOOR_SWEEP_GAP_SECS
+                }
+            };
+            next_floor = h.now() + gap;
+        }
+        let idle = tick(&h).await == Tick::Idle;
+        if idle {
             tokio::select! {
                 () = h.wake.notified() => {}
                 () = tokio::time::sleep(Duration::from_secs(2)) => {}
@@ -1855,6 +2020,42 @@ mod agenda_sim;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn due_floor_gets_turn_before_tick_only_with_balance() {
+        assert!(floor_due(100, 100, 1, false));
+        assert!(!floor_due(99, 100, 1, false));
+        assert!(!floor_due(100, 100, 0, false));
+        assert!(!floor_due(100, 100, 1, true));
+    }
+
+    #[test]
+    fn floor_requires_positive_balance_even_with_active_opportunity() {
+        assert!(floor_priority(0, None, None, 1, 1.0, true).is_none());
+    }
+
+    #[test]
+    fn floor_picker_prefers_never_read_then_weight_times_age() {
+        let score =
+            |price, age, seeds, sales| floor_priority(1000, price, age, seeds, sales, false);
+        let light = score(Some(1000), Some(600), 2, 10.0).unwrap();
+        let heavy = score(None, Some(180), 10, 10.0).unwrap();
+        assert!(heavy > light);
+        assert!(score(None, Some(179), 10, 10.0).is_none());
+        assert!(score(Some(1001), None, 10, 10.0).is_none());
+        assert!(score(None, None, 0, 10.0).is_none());
+        assert!(score(None, None, 1, 0.0).unwrap() > heavy);
+        assert!(score(None, None, 10, 10.0).unwrap() > score(None, None, 2, 10.0).unwrap());
+    }
+
+    #[test]
+    fn floor_picker_prioritizes_active_names_over_balance_after_minimum_revisit() {
+        let active = |age| floor_priority(1, Some(1001), Some(age), 0, 0.0, true);
+        assert!(active(179).is_none());
+        let unread = floor_priority(1000, None, None, 10, 100.0, false).unwrap();
+        assert!(active(180).unwrap() > unread);
+        assert!(active(181).unwrap() > active(180).unwrap());
+    }
 
     #[test]
     fn marginal_frequency_and_control_coverage() {

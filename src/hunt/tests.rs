@@ -17,6 +17,7 @@ use crate::web::api::{Confidence, Kind};
 use axum::extract::{Path, Query, State as AxState};
 use axum::routing::get;
 use axum::{Json, Router};
+use rusqlite::params;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -468,6 +469,9 @@ async fn serve() -> (String, Arc<Bodies>) {
                     return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
                 let mut body = b.listings.lock().unwrap().clone();
+                if body["data"].is_null() {
+                    return Json(body).into_response();
+                }
                 // como a Valve: faixa de seed (propriedade 1) filtra os anúncios
                 let qp: Value = serde_json::from_str(q.get("qp").unwrap()).unwrap();
                 if let Some(f) = qp[0]["propertyFilters"].get("1") {
@@ -1660,6 +1664,469 @@ async fn cheaper_competitor_reevaluates_known_opportunity() {
         }
     }
     assert_eq!(gone.as_deref(), Some(ID_CHEAP));
+}
+
+#[tokio::test]
+async fn floor_sweep_finds_a_seed_outside_the_range_without_dropping_another_name() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let code = "G180420B6053004";
+    let task = Task {
+        id: format!("r:{code}"),
+        code: code.into(),
+        name: MOON.into(),
+        wear: None,
+        seeds: vec![(58, 58)],
+        float: None,
+        score: 1.0,
+    };
+    h.lock().queue.set_tasks(vec![task.clone()]);
+    h.lock().floors.insert(task.floor_key(), (Some(700), NOW));
+    let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let common_price = page.listings.iter().map(|l| l.price_cents).min().unwrap();
+    let mut rare = page
+        .listings
+        .iter()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap()
+        .clone();
+    rare.price_cents = common_price;
+    let mut other = rare.clone();
+    other.name = ST_MOON.into();
+    other.listing_id = "other-name".into();
+    other.price_cents -= 1;
+    page.listings = vec![other.clone()];
+    page.more = true;
+    let out = detect::process_page(&h, &task, &page, Some(ST_MOON))
+        .await
+        .unwrap();
+    assert_eq!(out.rewarded.finds, 1);
+    page.listings = vec![rare];
+    let out = detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert_eq!(out.rewarded.finds, 1);
+    assert!(out.gone.is_empty());
+    let mut s = h.lock();
+    assert_eq!(s.active[ID_T1].task, task.id);
+    assert_eq!(s.active[ID_T1].opp.kind, Kind::Raro);
+    assert_eq!(s.active[ID_T1].opp.price_cents, common_price);
+    assert_eq!(s.active[&other.listing_id].task, task.id);
+    assert_eq!(s.floors[&task.floor_key()], (Some(700), NOW));
+    for name in [MOON, ST_MOON] {
+        assert!(s.rivals.contains_key(&task.floor_sweep_key(name)));
+    }
+    let overdue = scheduler::overdue_task(&s, NOW + 60).unwrap();
+    assert_eq!(s.queue.focus(overdue, NOW + 60).seeds, [(58, 58)]);
+}
+
+#[tokio::test]
+async fn floor_and_seed_pages_share_competitors_without_counting_the_same_listing() {
+    let (base, _) = serve().await;
+    for first in [Some(MOON), None] {
+        let (db, _dir) = temp_db();
+        let (h, _rx) = hunt_against(&base, db);
+        h.set_saldo(3608, SaldoSource::Manual);
+        let task = Task {
+            id: "r:moon".into(),
+            code: "G180420B6053004".into(),
+            name: MOON.into(),
+            wear: None,
+            seeds: vec![(59, 59)],
+            float: None,
+            score: 1.0,
+        };
+        let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+        let listing = page
+            .listings
+            .into_iter()
+            .find(|l| l.listing_id == ID_T1)
+            .unwrap();
+        page.more = true;
+        page.listings = vec![listing.clone()];
+        let second = if first.is_some() { None } else { Some(MOON) };
+        detect::process_page(&h, &task, &page, first).await.unwrap();
+        let mid = h.lock().active[ID_T1].opp.sell.mid.price_cents;
+        detect::process_page(&h, &task, &page, second)
+            .await
+            .unwrap();
+        assert_eq!(h.lock().evaluated[ID_T1].2, None);
+        assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, mid);
+
+        let mut rival = listing.clone();
+        rival.listing_id = "cheaper-than-resale".into();
+        rival.price_cents = mid - 1;
+        page.listings.push(rival.clone());
+        detect::process_page(&h, &task, &page, first).await.unwrap();
+        page.listings = vec![listing];
+        detect::process_page(&h, &task, &page, second)
+            .await
+            .unwrap();
+        if second.is_some() && rival.price_cents <= page.listings[0].price_cents {
+            assert_eq!(h.lock().evaluated[ID_T1].2, None);
+            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, mid);
+        } else {
+            assert_eq!(h.lock().evaluated[ID_T1].2, Some(rival.price_cents));
+            assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, mid - 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn floor_ignores_missing_covered_rival_and_keeps_one_above_coverage() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let task = Task {
+        id: "r:moon".into(),
+        code: "G180420B6053004".into(),
+        name: MOON.into(),
+        wear: None,
+        seeds: vec![(59, 59)],
+        float: None,
+        score: 1.0,
+    };
+    let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let listing = page
+        .listings
+        .iter()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap()
+        .clone();
+    let mut rival = listing.clone();
+    rival.listing_id = "stored-rival".into();
+    rival.price_cents = listing.price_cents - 1;
+    page.more = true;
+    page.listings = vec![rival.clone()];
+    detect::process_page(&h, &task, &page, None).await.unwrap();
+    page.listings = vec![listing.clone()];
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert_eq!(h.lock().evaluated[ID_T1].2, None);
+    rival.price_cents = listing.price_cents + 1;
+    page.listings = vec![rival.clone()];
+    detect::process_page(&h, &task, &page, None).await.unwrap();
+    page.listings = vec![listing];
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert_eq!(h.lock().evaluated[ID_T1].2, Some(rival.price_cents));
+}
+
+#[tokio::test]
+async fn floor_keeps_third_rival_above_coverage_when_two_cheaper_rivals_vanish() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let (task, mut page, listing) = floor_rival_fixture();
+    page.listings = vec![listing.clone()];
+    detect::process(&h, &task, &page).await.unwrap();
+    let mid = h.lock().active[ID_T1].opp.sell.mid.price_cents;
+
+    page.listings = vec![
+        floor_rival(&listing, "cheapest", listing.price_cents - 2),
+        floor_rival(&listing, "second", listing.price_cents - 1),
+        floor_rival(&listing, "third", mid - 1),
+    ];
+    detect::process(&h, &task, &page).await.unwrap();
+    page.listings = vec![listing];
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+
+    assert_eq!(h.lock().evaluated[ID_T1].2, Some(mid - 1));
+    assert_eq!(h.lock().active[ID_T1].opp.sell.mid.price_cents, mid - 2);
+}
+
+#[tokio::test]
+async fn floor_removes_missing_rival_before_another_seed_range_is_evaluated() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let (mut task, mut page, listing) = floor_rival_fixture();
+    let mut rival = floor_rival(&listing, "gone", listing.price_cents - 1);
+    let (lo, hi) = crate::pricing::groups::seed_ranges(MOON)
+        .into_iter()
+        .find(|&(lo, hi)| !(lo..=hi).contains(&59))
+        .unwrap();
+    rival.seed = Some(lo);
+    let target_range = std::mem::replace(&mut task.seeds, vec![(lo, hi)]);
+    page.listings = vec![rival];
+    detect::process(&h, &task, &page).await.unwrap();
+
+    page.more = false;
+    page.listings = vec![listing.clone()];
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    task.seeds = target_range;
+    page.listings = vec![listing];
+    detect::process(&h, &task, &page).await.unwrap();
+
+    assert_eq!(h.lock().evaluated[ID_T1].2, None);
+}
+
+#[tokio::test]
+async fn empty_floor_preserves_rivals_for_another_seed_range() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let (mut task, mut page, listing) = floor_rival_fixture();
+    let rival = floor_rival(&listing, "still-for-sale", listing.price_cents - 1);
+    let (lo, hi) = crate::pricing::groups::seed_ranges(MOON)
+        .into_iter()
+        .find(|&(lo, hi)| !(lo..=hi).contains(&59))
+        .unwrap();
+    let target_range = std::mem::replace(&mut task.seeds, vec![(lo, hi)]);
+    page.listings = vec![rival.clone()];
+    detect::process(&h, &task, &page).await.unwrap();
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    let floor_key = task.floor_sweep_key(MOON);
+    let previous_floor = h.lock().rivals.get(&floor_key).unwrap().clone();
+
+    page.more = false;
+    page.listings.clear();
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert_eq!(h.lock().rivals.get(&floor_key), Some(&previous_floor));
+    task.seeds = target_range;
+    page.listings = vec![listing];
+    detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(h.lock().evaluated[ID_T1].2, Some(rival.price_cents));
+}
+
+#[tokio::test]
+async fn floor_keeps_missing_rival_tied_with_highest_price_when_more_listings_exist() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let (task, mut page, listing) = floor_rival_fixture();
+    let price = listing.price_cents;
+    page.listings = vec![floor_rival(&listing, "tied", price)];
+    detect::process(&h, &task, &page).await.unwrap();
+    page.listings = vec![listing];
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+
+    assert_eq!(h.lock().evaluated[ID_T1].2, Some(price));
+}
+
+#[tokio::test]
+async fn floor_first_opportunity_credits_the_range_once_without_a_second_alert() {
+    let (base, _) = serve().await;
+    for reevaluate in [false, true] {
+        let (db, _dir) = temp_db();
+        let (h, _rx) = hunt_against(&base, db);
+        h.set_saldo(3608, SaldoSource::Manual);
+        h.settings
+            .apply(serde_json::from_value(json!({"notify_min_profit_cents":100})).unwrap())
+            .await
+            .unwrap();
+        let (task, mut page, listing) = floor_rival_fixture();
+        page.listings = vec![listing];
+        let floor = detect::process_page(&h, &task, &page, Some(MOON))
+            .await
+            .unwrap();
+        assert_eq!(floor.rewarded.fresh, 0);
+        let [(opp, alert)] = floor.found.as_slice() else {
+            panic!("o piso deveria achar uma oportunidade");
+        };
+        assert!(*alert);
+        let gain_cents = opp.sell.mid.profit_cents;
+        assert!(h.lock().evaluated.contains_key(ID_T1));
+        if reevaluate {
+            h.lock().evaluated.clear();
+        }
+
+        let range = detect::process(&h, &task, &page).await.unwrap();
+        assert_eq!(range.rewarded.fresh, 1, "reavaliação: {reevaluate}");
+        assert_eq!(range.rewarded.finds, 1);
+        assert_eq!(range.rewarded.gain_cents, gain_cents);
+        assert_eq!(range.rewarded.near_hits, 0);
+        assert!(range.found.iter().all(|(_, alert)| !alert));
+        let again = detect::process(&h, &task, &page).await.unwrap();
+        assert_eq!(again.rewarded, scheduler::Found::default());
+    }
+}
+
+#[tokio::test]
+async fn floor_first_near_hit_credits_the_range_once() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let (task, mut page, mut listing) = floor_rival_fixture();
+    listing.price_cents = 1450;
+    page.listings = vec![listing];
+
+    let floor = detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert!(floor.found.is_empty());
+    assert_eq!(floor.rewarded, scheduler::Found::default());
+
+    let range = detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(
+        range.rewarded,
+        scheduler::Found {
+            fresh: 1,
+            near_hits: 1,
+            ..Default::default()
+        }
+    );
+    let again = detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(again.rewarded, scheduler::Found::default());
+}
+
+#[tokio::test]
+async fn known_listing_without_floor_visit_earns_no_range_credit() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (task, mut page, listing) = floor_rival_fixture();
+    db.call({
+        let listing = listing.clone();
+        move |c| {
+            c.execute(
+                "INSERT INTO listings_seen(listing_id, name, price_cents, first_seen, last_seen)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![listing.listing_id, listing.name, listing.price_cents, NOW],
+            )
+        }
+    })
+    .await
+    .unwrap();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    page.listings = vec![listing];
+
+    let range = detect::process(&h, &task, &page).await.unwrap();
+    assert!(h.lock().evaluated.contains_key(ID_T1));
+    assert_eq!(range.rewarded.fresh, 0);
+}
+
+#[tokio::test]
+async fn floor_read_leaves_observations_empty() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (task, _, _) = floor_rival_fixture();
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO items(name, g_code, floor_cents, sales_per_day, updated_at)
+             VALUES (?1, 'G180420B6053004', 700, 10, ?2)",
+            params![MOON, NOW],
+        )
+    })
+    .await
+    .unwrap();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    h.lock().queue.set_tasks(vec![task]);
+    scheduler::sweep_floor(&h, &mut std::collections::HashMap::new())
+        .await
+        .unwrap();
+
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), 1);
+    let rows: i64 = db
+        .call(|c| c.query_row("SELECT count(*) FROM observations", [], |r| r.get(0)))
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+fn floor_rival_fixture() -> (Task, crate::steam::listings::ListingsPage, Listing) {
+    let task = Task {
+        id: "r:moon".into(),
+        code: "G180420B6053004".into(),
+        name: MOON.into(),
+        wear: None,
+        seeds: vec![(59, 59)],
+        float: None,
+        score: 1.0,
+    };
+    let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let listing = page
+        .listings
+        .iter()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap()
+        .clone();
+    page.more = true;
+    (task, page, listing)
+}
+
+fn floor_rival(listing: &Listing, id: &str, price_cents: i64) -> Listing {
+    Listing {
+        listing_id: id.into(),
+        price_cents,
+        ..listing.clone()
+    }
+}
+
+#[tokio::test]
+async fn floor_closes_missing_opportunity_after_null_action_only_with_price_coverage() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db);
+    h.set_saldo(3608, SaldoSource::Manual);
+    let task = Task {
+        id: "r:moon".into(),
+        code: "G180420B6053004".into(),
+        name: MOON.into(),
+        wear: None,
+        seeds: vec![(59, 59)],
+        float: None,
+        score: 1.0,
+    };
+    h.lock().queue.set_tasks(vec![task.clone()]);
+    let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let listing = page
+        .listings
+        .into_iter()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap();
+    page.listings = vec![listing.clone()];
+    page.more = true;
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert!(h.lock().active.contains_key(ID_T1));
+    *bodies.listings.lock().unwrap() = json!({"data": null});
+    let error = scheduler::run_task(&h, &task).await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<crate::steam::client::Error>(),
+        Some(crate::steam::client::Error::ActionUnavailable { .. })
+    ));
+    assert!(h.lock().active.contains_key(ID_T1));
+
+    let mut other = listing;
+    other.listing_id = "other-listing".into();
+    other.seed = None;
+    other.price_cents -= 1;
+    page.listings = vec![other];
+    let out = detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert!(out.gone.is_empty());
+    assert!(h.lock().active.contains_key(ID_T1));
+
+    page.listings[0].price_cents += 2;
+    let out = detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    assert_eq!(out.gone, [ID_T1]);
+    assert!(!h.lock().active.contains_key(ID_T1));
 }
 
 #[tokio::test]

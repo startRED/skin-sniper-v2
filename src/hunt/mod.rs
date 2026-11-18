@@ -57,8 +57,8 @@ pub(crate) struct Active {
     pub attempted_at: i64,
 }
 
-/// Menor anúncio por (nome, grupo raro ou nenhum).
-pub(crate) type Rivals = HashMap<(String, Option<String>), i64>;
+/// Anúncios por (nome, grupo raro ou nenhum), em ordem de preço.
+pub(crate) type Rivals = HashMap<(String, Option<String>), Vec<(i64, String)>>;
 
 pub(crate) struct Shared {
     pub saldo: i64,
@@ -82,6 +82,8 @@ pub(crate) struct Shared {
     pub last_state_pub: i64,
     /// Último (preço, `history_at`, menor concorrente) com que cada anúncio foi avaliado: muda → avalia de novo.
     pub evaluated: HashMap<String, (i64, i64, Option<i64>)>,
+    // shortcut: o resultado do piso pendente de crédito na faixa fica em memória e se perde ao reiniciar.
+    floor_first: HashMap<String, scheduler::Found>,
     /// Balanço do ciclo de 10 min (o que foi conferido e o que chegou perto).
     pub cycle: detect::Cycle,
     /// Por tarefa: menor anúncio visto na última consulta (se havia algum) e quando foi.
@@ -194,6 +196,7 @@ impl Hunt {
                 empty_streak: HashMap::new(),
                 last_state_pub: 0,
                 evaluated: HashMap::new(),
+                floor_first: HashMap::new(),
                 cycle: detect::Cycle::default(),
                 floors: HashMap::new(),
                 rivals: HashMap::new(),
