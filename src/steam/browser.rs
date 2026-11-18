@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -15,9 +15,16 @@ type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 const HOME: &str = "https://steamcommunity.com/market/";
+// Intervalo mínimo entre dois envios pelo mesmo Chrome, o `MIN_SPACING` do cliente. O cliente dá a vez antes de o
+// pedido entrar aqui; se a trava do Chrome segura a fila (abertura, resposta lenta), ela não pode sair colada.
+const SPACING: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ResponseElapsed(pub Option<u64>);
+
+/// Número da visita (abertura do Chrome) que atendeu a resposta.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Visit(pub u64);
 
 pub struct Browser {
     exe: PathBuf,
@@ -26,6 +33,11 @@ pub struct Browser {
     proxy: Option<String>,
     live: Mutex<Option<(tokio::process::Child, Ws)>>,
     next_id: AtomicU64,
+    visit: AtomicU64,
+    /// Visita recusada pela Steam, a fechar antes do próximo pedido; 0 = nenhuma.
+    stale: AtomicU64,
+    /// Antes desta hora o próximo pedido não sai: último envio (ou abertura) mais `SPACING`.
+    hold: std::sync::Mutex<Option<Instant>>,
 }
 
 /// Chrome instalado no Windows, se houver.
@@ -50,19 +62,32 @@ impl Browser {
             proxy: proxy.map(str::to_string),
             live: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            visit: AtomicU64::new(0),
+            stale: AtomicU64::new(0),
+            hold: std::sync::Mutex::new(None),
         }
     }
 
-    /// GET same-origin pela aba do mercado. Devolve status e corpo. Erro = navegador caiu; o próximo pedido religa.
+    /// GET same-origin pela aba do mercado. Devolve status, corpo, tempo e visita. Erro = navegador caiu; o próximo pedido religa.
     pub async fn fetch(
         &self,
         url: &str,
         headers: &[(String, String)],
-    ) -> Result<(u16, Vec<u8>, Option<u64>), String> {
+    ) -> Result<(u16, Vec<u8>, Option<u64>, Visit), String> {
         let mut live = self.live.lock().await;
+        if live.is_some() && self.refused() {
+            *live = None; // kill_on_drop derruba o Chrome
+        }
         if live.is_none() {
             *live = Some(self.start().await?);
+            self.visit.fetch_add(1, Ordering::Relaxed);
+            self.left(Instant::now()); // a abertura carrega a página do mercado: conta como envio
         }
+        if let Some(at) = self.turn(Instant::now()) {
+            tokio::time::sleep_until(at.into()).await;
+        }
+        self.left(Instant::now()); // hora real: o sono pode acordar atrasado
+        let visit = Visit(self.visit.load(Ordering::Relaxed));
         let (_, ws) = live.as_mut().unwrap();
         let r = self.eval(ws, &fetch_js(url, headers), 40).await;
         let out = r.and_then(|v| {
@@ -73,12 +98,41 @@ impl Browser {
                 status,
                 v["b"].as_str().unwrap_or("").as_bytes().to_vec(),
                 parse_elapsed(&v),
+                visit,
             ))
         });
         if out.is_err() {
             *live = None; // kill_on_drop derruba o Chrome
         }
         out
+    }
+
+    /// O próximo pedido fecha esta visita e abre outra (cookie de sessão e conexões novos, mesmo perfil).
+    /// Pedir de novo a mesma visita, ou uma que já fechou, não fecha a que está aberta nem apaga o pedido dela.
+    /// Devolve se o pedido marcou agora a visita aberta (é o que vale registrar).
+    pub fn reset(&self, visit: Visit) -> bool {
+        let before = self.stale.fetch_max(visit.0, Ordering::Relaxed);
+        before < visit.0 && visit.0 == self.visit.load(Ordering::Relaxed)
+    }
+
+    /// Hora de sair de quem chegou colado no envio anterior; `None` = sai já, no ritmo de quem chamou.
+    fn turn(&self, now: Instant) -> Option<Instant> {
+        self.hold.lock().unwrap().filter(|at| *at > now)
+    }
+
+    /// Saiu um pedido agora (ou o Chrome abriu): o seguinte espera o intervalo a partir daqui.
+    fn left(&self, now: Instant) {
+        *self.hold.lock().unwrap() = Some(now + SPACING);
+    }
+
+    /// A visita aberta é a que a Steam recusou.
+    fn refused(&self) -> bool {
+        self.stale.load(Ordering::Relaxed) == self.visit.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stale(&self) -> Visit {
+        Visit(self.stale.load(Ordering::Relaxed))
     }
 
     #[cfg(test)]
@@ -297,6 +351,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn queries_queued_on_the_browser_leave_spaced() {
+        let b = Browser::new("chrome".into(), "perfil".into(), 9, None);
+        let open = Instant::now();
+        assert_eq!(b.turn(open), None);
+        b.left(open); // abertura
+        assert_eq!(b.turn(open), Some(open + SPACING));
+        // O primeiro acordou atrasado e a resposta dele demorou 5 s, com dois na fila.
+        let first = open + SPACING + Duration::from_millis(2900);
+        b.left(first);
+        let second = first + Duration::from_secs(5);
+        assert_eq!(b.turn(second), None); // já passou o intervalo desde o envio do primeiro
+        b.left(second);
+        // O terceiro pega a trava 300 ms depois e conta do envio real do segundo.
+        assert_eq!(
+            b.turn(second + Duration::from_millis(300)),
+            Some(second + SPACING)
+        );
+        b.left(second + SPACING);
+        assert_eq!(b.turn(second + 2 * SPACING), None); // no ritmo do cliente ninguém espera
+    }
+
+    #[test]
     fn fetch_timing_is_internal_and_optional() {
         let js = fetch_js("http://localhost", &[]);
         assert!(js.find("performance.now()").unwrap() < js.find("await fetch").unwrap());
@@ -309,6 +385,21 @@ mod tests {
         ] {
             assert!(parse_elapsed(&v).is_none());
         }
+    }
+
+    #[test]
+    fn only_the_refused_visit_is_closed() {
+        let b = Browser::new("chrome".into(), "perfil".into(), 9, None);
+        b.visit.store(4, Ordering::Relaxed);
+        assert!(!b.refused());
+        assert!(!b.reset(Visit(3))); // recusa atrasada de uma visita que já fechou
+        assert!(!b.refused());
+        assert!(b.reset(Visit(4)));
+        assert!(!b.reset(Visit(4))); // segunda recusa da mesma visita
+        assert!(!b.reset(Visit(3)));
+        assert!(b.refused());
+        b.visit.store(5, Ordering::Relaxed); // o pedido seguinte abriu outra
+        assert!(!b.refused());
     }
 
     #[test]
@@ -330,7 +421,7 @@ mod tests {
             "https://steamcommunity.com/market/actions?q=QueryListingsForItem&qp={}",
             urlencode(qp)
         );
-        let (s, body, _) = b
+        let (s, body, ..) = b
             .fetch(
                 &url,
                 &[("x-valve-request-type".into(), "queryAction".into())],

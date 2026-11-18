@@ -65,6 +65,10 @@ const PAUSE_START: Duration = Duration::from_secs(60);
 // 30 min: em 04/11 a Steam seguiu dando 429 por horas com uma tentativa a cada 10 min; uma consulta depois de
 // minutos quietos passou. Tentar menos deixa a penalidade esfriar.
 const PAUSE_MAX: Duration = Duration::from_secs(30 * 60);
+// Recusa com pausa deste tamanho ou maior pede visita nova do Chrome: em 18/11, 17 tentativas seguidas pela mesma
+// visita levaram 429 em 7h30 (as 15 últimas com pausa de 30 min), e a primeira de uma visita nova, 30 min depois da
+// última, passou. Hipótese, não prova (`docs/conhecimento.md`); nas pausas curtas a mesma visita volta sozinha.
+const FRESH_VISIT_PAUSE: Duration = Duration::from_secs(15 * 60);
 // Em 08/11 o render ainda recebeu 429 após 30 min quieto. De 08/11 05h a 09/11 12h, uma tentativa a cada 2 h levou
 // 429 em todas (31 h): a escada segue 30 min → 1 h → 2 h → 4 h → 6 h para tentar menos durante o bloqueio.
 const PUBLIC_PAUSE_MAX: Duration = Duration::from_secs(6 * 60 * 60);
@@ -971,13 +975,15 @@ impl SteamClient {
                         Some((k.to_string(), v.to_string()))
                     })
                     .collect();
-                let (status, body, elapsed) = b.fetch(request.url().as_str(), &headers).await?;
+                let (status, body, elapsed, visit) =
+                    b.fetch(request.url().as_str(), &headers).await?;
                 let mut resp = http::Response::builder()
                     .status(status)
                     .body(body)
                     .map_err(|e| e.to_string())?;
                 resp.extensions_mut()
                     .insert(super::browser::ResponseElapsed(elapsed));
+                resp.extensions_mut().insert(visit);
                 Ok(reqwest::Response::from(resp))
             }
             _ => {
@@ -1806,9 +1812,12 @@ impl SteamClient {
                     g.listings_rest
                         .limited(Instant::now(), unix_in(Duration::ZERO));
                 }
-                g.alt_limiter.on_429(Instant::now(), retry);
-                Self::notify_pace(&mut g, Instant::now());
+                let now = Instant::now();
+                g.alt_limiter.on_429(now, retry);
+                let pause = g.alt_limiter.pause_end(now);
+                Self::notify_pace(&mut g, now);
                 drop(g);
+                self.ask_fresh_visit(ep, &r, true, pause, now);
                 tracing::warn!(endpoint = ?ep,
                     servidor = ?r.headers().get("server").and_then(|v| v.to_str().ok()),
                     tipo_conteudo = ?r.headers().get("content-type").and_then(|v| v.to_str().ok()),
@@ -1836,6 +1845,25 @@ impl SteamClient {
                 g.alt_down_until = Some(Instant::now() + ALT_DOWN);
                 None
             }
+        }
+    }
+
+    /// Recusa com pausa longa: a visita do Chrome que respondeu fecha antes da próxima tentativa daquela saída.
+    fn ask_fresh_visit(
+        &self,
+        ep: Endpoint,
+        resp: &reqwest::Response,
+        via_alt: bool,
+        pause_end: Option<Instant>,
+        now: Instant,
+    ) {
+        if pause_end.is_some_and(|end| end.saturating_duration_since(now) >= FRESH_VISIT_PAUSE)
+            && let Some(visit) = resp.extensions().get::<super::browser::Visit>().copied()
+            && let Some(b) = &self.browsers[via_alt as usize]
+            && b.reset(visit)
+        {
+            tracing::info!(endpoint = ?ep, visita = visit.0, saida_extra = via_alt,
+                "Chrome do mercado: a próxima tentativa abre uma visita nova");
         }
     }
 
@@ -1892,6 +1920,8 @@ impl SteamClient {
                 .stats(now)
                 .paused_until
                 .unwrap_or_else(|| unix_in(PAUSE_START));
+            // Relógio monotônico: o `until` em segundos inteiros pode perder 1 s do degrau.
+            let pause = g.bucket(ep).pause_end(now);
             Self::notify_pace(&mut g, now);
             drop(g);
             // Qual consulta levou o 429 (e se ia logada): sem isso não dá para saber o que a Steam segura.
@@ -1906,6 +1936,7 @@ impl SteamClient {
                 eresult = ?eresult,
                 cabecalhos_resposta = ?resp.headers().keys().map(|h| h.as_str()).collect::<Vec<_>>(),
                 proxima_sem_login = logged_read, "Steam: 429");
+            self.ask_fresh_visit(ep, &resp, via_alt, pause, now);
             return Err(Error::RateLimited { until });
         }
         let browser_elapsed = resp
@@ -3861,5 +3892,77 @@ mod listing_diagnostic_tests {
         assert_eq!(field(lines[3], "response_elapsed_ms"), 42);
         assert!(!lines[4].contains("response_elapsed_ms="), "{log}");
         server.abort();
+    }
+
+    /// Só a recusa com pausa longa, vinda do Chrome, pede visita nova (`FRESH_VISIT_PAUSE`), e só da visita recusada.
+    #[tokio::test(flavor = "current_thread")]
+    async fn long_pause_429_asks_for_a_fresh_browser_visit() {
+        use super::super::browser::{Browser, Visit};
+        let browser = || Browser::new("chrome".into(), "perfil".into(), 9, None);
+        let client = SteamClient::with_base("http://127.0.0.1:9")
+            .unwrap()
+            .with_browsers(Some(browser()), Some(browser()));
+        // (pausa aplicada, visita que respondeu se veio do Chrome, visita marcada para fechar depois)
+        for (pause, visit, stale) in [
+            (PAUSE_START, Some(Visit(3)), Visit(0)),
+            (
+                FRESH_VISIT_PAUSE - Duration::from_secs(1),
+                Some(Visit(3)),
+                Visit(0),
+            ),
+            (PAUSE_MAX, None, Visit(0)),
+            (FRESH_VISIT_PAUSE, Some(Visit(3)), Visit(3)),
+            (PAUSE_MAX, Some(Visit(4)), Visit(4)),
+            // resposta atrasada de uma visita já fechada não apaga o pedido da atual
+            (PAUSE_MAX, Some(Visit(3)), Visit(4)),
+        ] {
+            {
+                let mut g = client.inner.lock().unwrap();
+                let limiter = g.bucket(Endpoint::Listings);
+                limiter.paused_until = None;
+                limiter.pause_len = pause;
+            }
+            let mut response = http::Response::builder()
+                .status(429)
+                .body(Vec::new())
+                .unwrap();
+            if let Some(visit) = visit {
+                response.extensions_mut().insert(visit);
+            }
+            let options = ResponseCheck {
+                check: None,
+                reset_on_success: true,
+                diagnostic: None,
+            };
+            let refused = client
+                .finish(
+                    Endpoint::Listings,
+                    response.into(),
+                    None,
+                    options,
+                    false,
+                    Instant::now(),
+                )
+                .await;
+            assert!(matches!(refused, Err(Error::RateLimited { .. })));
+            let asked = client.browsers[0].as_ref().unwrap().stale();
+            assert_eq!(asked, stale, "pausa {pause:?} visita {visit:?}");
+        }
+        // A recusa da saída extra marca o Chrome dela, não o da principal.
+        let mut response = http::Response::builder()
+            .status(429)
+            .body(Vec::new())
+            .unwrap();
+        response.extensions_mut().insert(Visit(7));
+        let now = Instant::now();
+        client.ask_fresh_visit(
+            Endpoint::Listings,
+            &response.into(),
+            true,
+            Some(now + PAUSE_MAX),
+            now,
+        );
+        assert_eq!(client.browsers[1].as_ref().unwrap().stale(), Visit(7));
+        assert_eq!(client.browsers[0].as_ref().unwrap().stale(), Visit(4));
     }
 }

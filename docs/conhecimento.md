@@ -323,6 +323,16 @@ sessionid=<sessionid>&currency=7&subtotal=<unPrice>&fee=<unFee>&total=<unPrice+u
   (`S/docs/ref/rate-limits.md:15-18`)
 - Reiniciar não zera a cota remota. Medir o 429 só isoladamente, porque há risco de bloqueio temporário de IP.
   (`S/docs/ref/rate-limits.md:406-410`)
+- **Visita do Chrome e bloqueio longo: HIPÓTESE / um caso.** Em 18/11/2026, das 07:41 às 15:07 UTC, 17 tentativas
+  seguidas de anúncios e histórico pela mesma visita do Chrome (aberta às 05:39) levaram 429, as 15 últimas com pausa
+  de 30 min; a caça por seed ficou sem nenhuma leitura boa, enquanto o render antigo da varredura do piso seguiu a
+  ~146 páginas/h e o livro respondeu 33 vezes. O programa foi reiniciado às 15:34 por outro motivo: a primeira
+  consulta da visita nova, às 15:37 (30 min depois da última recusa, o mesmo espaçamento), voltou 200 e não houve
+  429 nas 4h30 seguintes. Contra: em 13/11 uma visita aberta 8 min depois de um 429 levou 429 na hora (09:44) e a
+  mesma visita voltou sozinha depois das 11:00. Um caso não separa "a visita carrega a penalidade" de "o bloqueio
+  acabou naquela meia hora". Desde então, recusa com pausa de 15 min ou mais pede visita nova da saída recusada (`FRESH_VISIT_PAUSE`,
+  `src/steam/client.rs`); a medida que falta é o registro `a próxima tentativa abre uma visita nova` seguido de 200
+  ou de 429 nos próximos bloqueios.
 - **Sessão logada muda os limites? HIPÓTESE / não medido.** Desde 04/11 o v2 lê logado (pedido do Erick) e a 6 s, depois de horas de 429 anônimo a 4 s. O cliente antigo aceitava um cookie opcional "de conta secundária
   (read-only polling)", mas nenhuma medição comparou com e sem sessão. (`S/internal/steam/steam.go:31`,
   `S/docs/ref/steam-market-api.md:161`)
