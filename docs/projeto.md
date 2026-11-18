@@ -683,6 +683,8 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
      vendido a 28,9×) e vendido a 4,6×. Nessa conta o preço comum de cada nome é a mediana de todas as vendas
      guardadas dele, inclusive as posteriores à venda prevista. O aviso de seed com prova emprestada diz que o
      prêmio é um teto, sai com risco alto e confiança no máximo média: as vendas contadas são de outros seeds.
+     Quando a prova de um seed muda sem ele entrar nem sair (venda nova, teto novo), a oportunidade ativa dele
+     volta a ser avaliada na próxima consulta, para o lucro na tela não ficar com a prova antiga.
      Três ou mais fechamentos na Steam continuam substituindo a prova (e o teto): nos grupos nomeados são só os
      do próprio seed, porque a chave do grupo é por seed; em Glock-18 | Moonrise e High Beam, os do mesmo tier do
      guia. Custo conhecido: seed de tier alto que nunca vendeu fica avaliado pelo pior do grupo até ter venda

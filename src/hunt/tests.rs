@@ -4051,4 +4051,38 @@ async fn newly_learned_seed_sends_every_listing_back_to_evaluation() {
     remember();
     patterns::load(&h).await.unwrap(); // os mesmos seeds: a memória fica
     assert!(h.lock().evaluated.contains_key("x"));
+    // venda nova do 269 muda a prova dele: só a oportunidade ativa desse seed volta a ser avaliada
+    let mut opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    (opp.name, opp.seed) = (MOON.into(), Some(269));
+    let id = opp.id.clone();
+    {
+        let mut s = h.lock();
+        s.evaluated.insert(id.clone(), (1, 0, None));
+        let (task, attempted_at) = ("r:moon".into(), 0);
+        s.active.insert(
+            id.clone(),
+            Active {
+                opp,
+                task,
+                attempted_at,
+            },
+        );
+    }
+    patterns::load(&h).await.unwrap(); // a mesma prova: a memória fica
+    assert!(h.lock().evaluated.contains_key(&id));
+    db.call(|c| {
+        c.execute(
+            "INSERT INTO csfloat_sales(name, sold_at, price_usd_cents, base_usd_cents, multiple, seed, \"float\")
+             VALUES (?1, 99, 300, 100, 3.0, 269, 0.3)",
+            [MOON],
+        )
+    })
+    .await
+    .unwrap();
+    patterns::load(&h).await.unwrap();
+    let s = h.lock();
+    assert!(!s.evaluated.contains_key(&id) && s.evaluated.contains_key("x"));
 }

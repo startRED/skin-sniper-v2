@@ -363,6 +363,31 @@ pub async fn load(h: &Hunt) -> Result<()> {
             // Seed entrou ou saiu dos pagantes: o grupo raro do anúncio muda; cada um volta a ser avaliado na
             // próxima consulta (o piso avalia também os comuns, que podem virar raros aqui).
             s.evaluated.clear();
+        } else {
+            // Mesmos seeds, prova diferente (venda nova, teto novo): a oportunidade ativa do seed volta a ser
+            // avaliada na próxima consulta, para o lucro na tela não ficar com a prova antiga.
+            let stale: Vec<String> = s
+                .active
+                .values()
+                .map(|a| &a.opp)
+                .filter(|o| {
+                    let (base, wear) = (skin_base(&o.name), wear_index(&o.name));
+                    o.seed
+                        .and_then(|x| u16::try_from(x).ok())
+                        .is_some_and(|seed| {
+                            let proof = |l: &Learned| {
+                                l.get(base).and_then(|m| m.get(&(seed, wear))).cloned()
+                            };
+                            proof(&s.learned) != proof(&l)
+                                || is_borrowed(&s.borrowed, &o.name, Some(seed))
+                                    != is_borrowed(&lent, &o.name, Some(seed))
+                        })
+                })
+                .map(|o| o.id.clone())
+                .collect();
+            for id in stale {
+                s.evaluated.remove(&id);
+            }
         }
         s.learned = l;
         s.borrowed = lent;
