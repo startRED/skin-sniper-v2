@@ -95,7 +95,15 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
             let rare = t.rare();
             // o seed que paga traz a própria prova (`patterns`); sem medida, vale o grupo da tabela
             let seed = t.seeds.first().map(|r| r.0);
-            let learned = super::patterns::group(&h.lock().learned, &t.name, seed);
+            // prova e marca de emprestada na mesma leitura: são trocadas juntas
+            let (learned, lent) = {
+                let s = h.lock();
+                (
+                    super::patterns::group(&s.learned, &t.name, seed),
+                    super::patterns::is_borrowed(&s.borrowed, &t.name, seed),
+                )
+            };
+            let borrowed = lent && learned.is_some();
             let group = learned
                 .as_ref()
                 .map(|(g, _)| g.clone())
@@ -115,7 +123,7 @@ async fn rows(h: &Hunt, book_rival: bool) -> Result<Vec<WatchRow>> {
                 };
                 (multiples.len() >= RARE_MIN_SALES).then_some(RareEvidence {
                     multiples,
-                    borrowed: false,
+                    borrowed,
                 })
             } else {
                 None
