@@ -687,8 +687,18 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
      volta a ser avaliada na próxima consulta, para o lucro na tela não ficar com a prova antiga.
      Três ou mais fechamentos na Steam continuam substituindo a prova (e o teto): nos grupos nomeados são só os
      do próprio seed, porque a chave do grupo é por seed; em Glock-18 | Moonrise e High Beam, os do mesmo tier do
-     guia. Custo conhecido: seed de tier alto que nunca vendeu fica avaliado pelo pior do grupo até ter venda
-     própria; separar os grupos por tier na tabela não foi feito;
+     guia. Custo medido (18/11, 73.645 vendas guardadas): nas 7 primeiras vendas de seed de tabela que nunca
+     tinha vendido, a venda real saiu a 1,9× o pior do grupo (mediana; a menor a 0,8×, 3 acima do dobro). O
+     quartil de baixo do grupo centra melhor (0,83×) mas previu acima do real em 4 das 7 (0,42×, 0,56×, 0,73× e
+     0,83×): o teto fica no pior, porque errar para cima é comprar caro. Separar os grupos por tier não resolve:
+     dentro do mesmo grupo a mediana por seed varia 11× na Grinder "Full Black", 35× na MAC-10 | Snow Splash
+     "Max White" e 54× na Galil AR | Sandstorm "Max Purple", e o guia da Grinder põe o #593 no mesmo tier do #916
+     (`docs/pesquisa-web.md`, seção 5). Só a venda do próprio seed diz quanto ele paga.
+     A mesma conta por regra (`catalog_on_a_real_db`, venda real ÷ prevista, mediana): regra 1, 558 vendas a
+     1,04× (56 abaixo da metade do previsto); regra 2, 71 a 1,15× (4); regra 3, 27 a 1,14× (2); regra 4, 7 a
+     0,84–0,95× (1). Na regra 4 em skin com piso abaixo de US$ 0,50 não há venda posterior para conferir: não
+     medido. Fechamentos na Steam por tier do guia: 42 sumiços, cada um previsto pela mediana dos outros do
+     mesmo nome e tier (sem o filtro de nota), saíram a 1,05× (3 abaixo da metade, 6 acima do dobro);
   4. não está em tabela nenhuma: 3+ vendas próprias com o quartil de baixo a ≥ 2×.
   O quartil de baixo arredonda para baixo: com 3 ou 4 vendas é a pior delas. O seed pagante sem grupo de tabela
   vira `learned:<skin>:<seed>` ("Pattern #seed"); o prêmio são as razões da prova.
