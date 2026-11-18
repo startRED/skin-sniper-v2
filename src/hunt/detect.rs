@@ -401,6 +401,7 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
         .await?;
     Ok(RareEvidence {
         multiples: rare_multiples(&rows, name, group_key),
+        borrowed: false,
     })
 }
 
@@ -771,7 +772,10 @@ async fn appraise(
         .map(|e| e.mid.price_cents);
     let mut rare = match (&group, learned) {
         // pattern aprendido: o prêmio são as vendas que ensinaram (no desgaste do anúncio ou pior), não as da página
-        (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
+        (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence {
+            borrowed: super::patterns::is_borrowed(&h.lock().borrowed, &l.name, l.seed),
+            multiples,
+        }),
         (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
         (None, _) => None,
     };
@@ -780,7 +784,7 @@ async fn appraise(
     if let (Some(g), Some(b), Some(r)) = (&group, base_cents.filter(|b| *b > 0), rare.as_mut()) {
         let closed = steam_closed(h, l, &g.key, b).await?;
         if closed.len() >= sell::RARE_MIN_SALES {
-            (r.multiples, on_steam) = (closed, true);
+            (r.multiples, r.borrowed, on_steam) = (closed, false, true);
         }
     }
     let better = match &group {

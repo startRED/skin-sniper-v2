@@ -674,7 +674,19 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   1. a skin tem nota por seed (% de azul ou % do fade): as 8 vendas de nota igual ou pior mais próximas da dele
      têm mediana ≥ 1,5× e quartil de baixo ≥ 1,2×. Seed melhor herda a prova do pior;
   2. é seed de tabela com 3+ vendas próprias: as vendas dele passam no mesmo teste;
-  3. é seed de tabela com menos de 3 vendas: as vendas do grupo dele passam com quartil de baixo ≥ 1,5×;
+  3. é seed de tabela com menos de 3 vendas: as vendas do grupo dele passam com quartil de baixo ≥ 1,5×. O grupo
+     prova que o seed paga, não quanto: cada razão da prova fica limitada à pior venda própria do seed ou, se ele
+     nunca vendeu, à pior venda do grupo (18/11). O grupo de tabela junta seeds de tiers diferentes e a mediana
+     dele é puxada pelos melhores: em 73.310 vendas guardadas, nas 27 de seed com prova emprestada a venda real
+     saiu a 0,74× o previsto (mediana) e 12 saíram abaixo da metade do previsto; com o limite, 1,14× e 2. Caso que
+     mostrou: Glock-18 | Grinder #593 Minimal Wear, previsto a 17,2× pelo grupo "Full Black" (que tem o #916,
+     vendido a 28,9×) e vendido a 4,6×. Nessa conta o preço comum de cada nome é a mediana de todas as vendas
+     guardadas dele, inclusive as posteriores à venda prevista. O aviso de seed com prova emprestada diz que o
+     prêmio é um teto, sai com risco alto e confiança no máximo média: as vendas contadas são de outros seeds.
+     Três ou mais fechamentos na Steam continuam substituindo a prova (e o teto): nos grupos nomeados são só os
+     do próprio seed, porque a chave do grupo é por seed; em Glock-18 | Moonrise e High Beam, os do mesmo tier do
+     guia. Custo conhecido: seed de tier alto que nunca vendeu fica avaliado pelo pior do grupo até ter venda
+     própria; separar os grupos por tier na tabela não foi feito;
   4. não está em tabela nenhuma: 3+ vendas próprias com o quartil de baixo a ≥ 2×.
   O quartil de baixo arredonda para baixo: com 3 ou 4 vendas é a pior delas. O seed pagante sem grupo de tabela
   vira `learned:<skin>:<seed>` ("Pattern #seed"); o prêmio são as razões da prova.
