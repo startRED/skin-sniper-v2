@@ -309,7 +309,8 @@ async fn agenda_on_a_real_db() {
         learned: &learned,
         deals: &deals,
     };
-    let (mut tasks, ranges) = select_ranges(&items, &ctx);
+    let all = catalog::load_pattern_items(&db).await.unwrap();
+    let (mut tasks, ranges) = select_ranges(&items, &all, &ctx);
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
     tasks.retain(Task::rare);
     let observed = observed_rates(&raw, &tasks, saldo, end - 7 * DAY, end);
