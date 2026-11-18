@@ -974,7 +974,7 @@ mod tests {
         );
         // a mesma prova retroativa separada pela regra que provou o seed e, na regra 4, pelo piso da skin
         let mut by_rule: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
-        // regra 3 com seed que nunca vendeu: o que a venda real foi contra o pior, o quartil e a mediana do grupo
+        // regra 3 com seed sem venda própria neste desgaste ou pior: o que a venda real foi contra o pior, o quartil e a mediana do grupo
         let mut first: [Vec<(f64, f64)>; 3] = Default::default();
         for (base, v) in &comps {
             for c in v {
@@ -1035,7 +1035,7 @@ mod tests {
         {
             let (n, paid, ratio) = crate::hunt::value::backtest_summary(pairs);
             println!(
-                "seed de tabela na 1ª venda, previsto pelo {label}: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}, {} abaixo da metade, {} acima do dobro",
+                "seed de tabela sem venda própria neste desgaste ou pior, previsto pelo {label}: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}, {} abaixo da metade, {} acima do dobro",
                 pairs.iter().filter(|p| p.1 < p.0 / 2.0).count(),
                 pairs.iter().filter(|p| p.1 > p.0 * 2.0).count()
             );

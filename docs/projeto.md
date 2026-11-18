@@ -687,10 +687,13 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
      volta a ser avaliada na próxima consulta, para o lucro na tela não ficar com a prova antiga.
      Três ou mais fechamentos na Steam continuam substituindo a prova (e o teto): nos grupos nomeados são só os
      do próprio seed, porque a chave do grupo é por seed; em Glock-18 | Moonrise e High Beam, os do mesmo tier do
-     guia. Custo medido (18/11, 73.645 vendas guardadas): nas 7 primeiras vendas de seed de tabela que nunca
-     tinha vendido, a venda real saiu a 1,9× o pior do grupo (mediana; a menor a 0,8×, 3 acima do dobro). O
-     quartil de baixo do grupo centra melhor (0,83×) mas previu acima do real em 4 das 7 (0,42×, 0,56×, 0,73× e
-     0,83×): o teto fica no pior, porque errar para cima é comprar caro. Separar os grupos por tier não resolve:
+     guia. Custo medido (18/11, 73.645 vendas guardadas, com a mesma ressalva do preço comum acima): em 7 vendas
+     de seed de tabela ainda sem venda própria naquele desgaste ou pior (6 seeds; o MAC-10 | Snow Splash #309
+     conta em Factory New e depois em Field-Tested), a venda real saiu a 1,9× o pior do grupo (mediana; 3 acima
+     do dobro; uma abaixo do previsto, o Grinder #907, a 0,8×). O quartil de baixo do grupo centra melhor (0,83×)
+     mas previu acima do real em 4 das 7 (0,42×, 0,56×, 0,73× e 0,83×). O teto fica no pior porque foi o que
+     menos errou para cima, e errar para cima é comprar caro; 7 vendas não provam que ele nunca erra, nem medem
+     a procura pelo seed. Separar os grupos por tier não resolve:
      dentro do mesmo grupo a mediana por seed varia 11× na Grinder "Full Black", 35× na MAC-10 | Snow Splash
      "Max White" e 54× na Galil AR | Sandstorm "Max Purple", e o guia da Grinder põe o #593 no mesmo tier do #916
      (`docs/pesquisa-web.md`, seção 5). Só a venda do próprio seed diz quanto ele paga.
