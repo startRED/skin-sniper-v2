@@ -192,6 +192,24 @@ anúncios. Por isso o alvo que volta nulo descansa (`FAIL_REST_SECS` no `schedul
 vez de repetir. **Não medido:** por que essas consultas falham (item com muitos anúncios é hipótese) nem se o
 filtro de desgaste as alivia; as sondas por curl voltaram 429 nesse dia.
 
+**Medido em 18/11/2026: a falha de leitura se concentra em cinco skins, e a resposta boa delas leva segundos.**
+Conta feita em 18/11 sobre o banco e o registro da cópia instalada, que têm retenção: depois que esses dias saírem
+de lá ela não pode ser refeita, ficam estes números. Leituras por faixa de seed de 15/11 21:20 a 18/11 21:20 UTC
+(tabela `reads`, `arm` `r:<código>`, que marca a leitura como falha sem dizer o motivo: nulo, 429 ou outro erro),
+todas as cinco em Battle-Scarred: Desert Eagle | Heat Treated falhou 233 de 651 (36 %), Five-SeveN | Case Hardened
+49 de 188 (26 %), MP7 | Amberline 48 de 226 (21 %), Desert Eagle | Serpent Strike 42 de 201 (21 %) e Five-SeveN |
+Heat Treated 32 de 613 (5 %): 404 de 1 879 nas cinco (22 %), contra 32 de 3 353 (1,0 %) nos outros 23 alvos. Nas 22
+horas do dia (UTC) com 40 ou mais leituras, a falha das cinco ficou entre 11 % e 29 %. Tempo de resposta dentro do
+Chrome (`response_elapsed_ms` nas linhas de `steam::client` do registro de 17/11 e de 18/11 até 21:20 UTC; as
+respostas boas registradas são amostra): mediana da resposta boa de 8,76 s, 8,03 s, 6,01 s, 3,65 s e 8,95 s nessas
+cinco, na mesma ordem, contra 0,23 a 1,94 s nos outros 12 alvos com 10+ respostas boas no registro. A mediana de
+todas as respostas `data` nula do registro foi 0,2 s em quatro das cinco e 1,5 s no Serpent Strike; entre elas, 126
+levaram de 9,0 a 10,0 s (mediana 9,6 s), só nas três skins cuja mediana das respostas boas passa de 8 s. No Desert
+Eagle | Heat Treated em 18/11, das 67 primeiras tentativas nulas 60 vieram em menos de 2 s; nos registros
+consecutivos da mesma skin e faixa de seed, a tentativa 2 foi boa em 19 pares e nula em 48. **Hipótese, não
+prova:** a consulta filtrada dessas skins custa à Steam quase o limite de ~9,6 s dela, que ora recusa na hora, ora
+corta no limite. **Segue não medido:** se o filtro de desgaste alivia e o que decide a recusa na hora.
+
 ### 1.4 Moeda
 
 - `eCurrency: 7` = BRL. As listagens do fixture real vêm em `eCurrency:7` com `strSubtotal "R$202.80"`.
