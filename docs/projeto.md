@@ -250,6 +250,10 @@ saldo e mercado podem variar. O relatório mostra associação com a agenda, sem
      de anúncio bom acima do saldo para essas skins (nenhum `acima_do_saldo_boa` nos 14 dias até 18/11); ele continua
      para as skins cujo comum cabe no saldo. Quando o saldo sobe, elas voltam a concorrer na seleção seguinte (o
      limite de 24 alvos continua valendo).
+     Medido no programa instalado nos 67 min depois da troca (02:38:50 a 03:46:09 de 18/11), contra os 66 min anteriores:
+     leituras nessas 3 skins de 38 para 0; leituras de faixa com resposta de 89 para 99 por hora e com erro de 36
+     para 21 por hora; páginas da varredura do piso de 115 para 121 por hora; total de 315 para 313 tentativas por
+     hora; `principal_429`, `extra_429` e `livro_429` em zero nas 6 janelas de 10 min do registro depois da troca; nenhuma oportunidade nova nos dois períodos.
      A seleção é refeita a cada 15 min e no próximo passo após observar um piso novo acima do saldo.
      Entrada rara exige código, desgaste normal, referência disponível e seed admitida por `patterns::learn`
      para aquele desgaste; sem medida alguma usa as tabelas de instalação. Os limites da prova não mudam.
@@ -441,6 +445,11 @@ saldo e mercado podem variar. O relatório mostra associação com a agenda, sem
    lucro com prejuízo médio entre R$ 1 e zero e perda ≤ R$ 0,50 vendido como comum grava `zona_amarela`: candidato
    virtual, sem compra nem aviso; o painel conta os três tipos por hora (24 h) e rotula os virtuais pelo registro
    (sumiu, em até 48 h sem relistagem, relistado), o que não prova venda.
+   Medido em 18/11/2026 às 02:40 numa cópia do banco instalado (`over_saldo_on_a_real_db`, sem rede, regras de
+   hoje): dos 3.189 anúncios gravados como `acima_do_saldo` em 7 dias, 0 seriam aprovados e 0 avisariam; 2.703 sem
+   lucro (3 deles com prejuízo médio de até R$ 1, nenhum na zona amarela), 286 sem histórico, 184 com poucos dias de venda e 16 com poucas
+   vendas. Vale só para os anúncios que a caça leu (alvos escolhidos para o saldo de R$ 41,91) e avalia com o banco
+   de agora, não com o de cada momento; não mede o que mais saldo traria em skins que a caça não lê.
 
 ## Aprendizado (mina de ouro)
 
