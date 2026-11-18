@@ -635,7 +635,7 @@ fn why(
         ),
         // prova emprestada (`patterns`, regra 3): quem vendeu bem foram os outros seeds do grupo, não este
         "learned" if borrowed => format!(
-            "{label}: o seed {seed} entrou porque outros seeds do mesmo grupo da tabela venderam bem acima do preço comum no CSFloat; este tem menos de 3 vendas próprias, então o prêmio dele é só um teto. Confira a estampa antes de pagar mais."
+            "{label}: o seed {seed} entrou porque outros seeds do mesmo grupo da tabela venderam bem acima do preço comum no CSFloat; este tem menos de 3 vendas próprias lá. Confira a estampa antes de pagar mais."
         ),
         "learned" => format!(
             "{label}: o seed {seed} entrou porque as vendas do CSFloat dele (ou de seeds iguais ou piores) saíram bem acima do preço comum desta skin; confira a estampa antes de pagar mais."
@@ -766,7 +766,8 @@ fn rare_group(h: &Hunt, l: &Listing) -> (Option<Group>, Option<Proof>, bool) {
 /// O que o anúncio vale com os pontos de preço dados: grupo raro, preço comum e a estimativa de venda.
 struct Appraisal {
     group: Option<Group>,
-    /// O seed entrou pela prova emprestada do grupo (vale para a explicação mesmo quando a Steam troca o prêmio).
+    /// O seed entrou pela prova emprestada do grupo: a explicação diz isso mesmo quando a Steam troca o prêmio, e por
+    /// isso não fala do teto (quem fala é a evidência da estimativa, só quando ele vale).
     borrowed: bool,
     correction: f64,
     base_cents: Option<i64>,
