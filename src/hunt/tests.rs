@@ -1528,7 +1528,9 @@ async fn over_saldo_listing_is_appraised_offline_without_becoming_an_opportunity
     // outro processo, sem nada ativo e com saldo que não cobre nenhum dos dois achados (R$ 4,00 e R$ 7,00)
     let (h2, _rx) = hunt_against(&base, db.clone());
     h2.set_saldo(300, SaldoSource::Manual);
-    let out = detect::process(&h2, &task, &page).await.unwrap();
+    let out = detect::process_page(&h2, &task, &page, Some(MOON))
+        .await
+        .unwrap();
     assert!(out.found.is_empty() && h2.lock().active.is_empty());
     assert_eq!(
         out.rewarded.finds + out.rewarded.fresh,
@@ -3940,4 +3942,76 @@ fn unproven_rare_is_shown_only_when_selling_as_common_loses_cents() {
     assert!(!refused(-50));
     assert!(refused(-51));
     assert!(refused(-91)); // Serpent Strike #804, 11/11
+}
+
+#[tokio::test]
+async fn floor_skips_only_common_unprofitable_audit() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    let (task, mut page, rare) = floor_rival_fixture();
+    let mut common = floor_rival(&rare, "common-floor-audit", 1450);
+    common.seed = None;
+    page.listings = vec![common.clone(), rare];
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    let rows: Vec<String> = db
+        .call(|c| {
+            let mut s = c.prepare("SELECT listing_id FROM evaluations ORDER BY id")?;
+            s.query_map([], |r| r.get(0))?.collect()
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![ID_T1.to_string()]);
+    h.lock().evaluated.clear();
+    page.listings = vec![common];
+    detect::process(&h, &task, &page).await.unwrap();
+    let count: i64 = db.call(|c| c.query_row("SELECT count(*) FROM evaluations WHERE listing_id = 'common-floor-audit' AND reason = 'sem_lucro'", [], |r| r.get(0))).await.unwrap();
+    assert_eq!(count, 1);
+    // acima do saldo: a página do piso não grava nem tira a vez da consulta normal do mesmo ciclo
+    h.set_saldo(300, SaldoSource::Manual);
+    detect::process_page(&h, &task, &page, Some(MOON))
+        .await
+        .unwrap();
+    let over = || {
+        db.call(|c| c.query_row("SELECT count(*) FROM evaluations WHERE listing_id = 'common-floor-audit' AND reason = 'acima_do_saldo'", [], |r| r.get::<_, i64>(0)))
+    };
+    assert_eq!(over().await.unwrap(), 0);
+    detect::process(&h, &task, &page).await.unwrap();
+    assert_eq!(over().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn newly_learned_seed_sends_every_listing_back_to_evaluation() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against(&base, db.clone());
+    let remember = || h.lock().evaluated.insert("x".into(), (1, 0, None));
+    remember();
+    patterns::load(&h).await.unwrap(); // nenhum seed aprendido: nada muda
+    assert!(h.lock().evaluated.contains_key("x"));
+    // as mesmas vendas de `learned_pattern_listing_is_priced_by_the_sales_that_taught_it`: o seed 269 passa a pagar
+    db.call(|c| {
+        let commons = (1..=12).map(|i| (900 + i, 1.0));
+        for (at, (seed, multiple)) in commons
+            .chain([(269, 2.0), (269, 2.4), (269, 2.2)])
+            .enumerate()
+        {
+            c.execute(
+                "INSERT INTO csfloat_sales(name, sold_at, price_usd_cents, base_usd_cents, multiple, seed, \"float\")
+                 VALUES (?1, ?2, ?3, 100, ?4, ?5, 0.3)",
+                rusqlite::params![MOON, at as i64 + 1, (multiple * 100.0) as i64, multiple, seed],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    patterns::load(&h).await.unwrap();
+    assert!(h.lock().evaluated.is_empty());
+    remember();
+    patterns::load(&h).await.unwrap(); // os mesmos seeds: a memória fica
+    assert!(h.lock().evaluated.contains_key("x"));
 }

@@ -75,6 +75,7 @@ const MIN_SPACING: Duration = Duration::from_secs(3);
 // Teto de leituras somando todos os endpoints (300/h). Tabela research_attempts: 290–380/h no total rodaram
 // 4–5 h sem bloqueio em 07/11; ~500/h bloquearam em 1–2 h; ~1 000/h às 05h de 08/11 abriram o bloqueio de 1+ dia.
 const READ_SPACING: Duration = Duration::from_secs(12);
+const READ_JITTER_PER_MILLE: u64 = 300;
 const ANON_AFTER_429: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Saída extra: proxy local que sai por outro IP público (o `saida-celular` deste PC, pela Starlink). Leva só
@@ -1592,12 +1593,24 @@ impl SteamClient {
             })?;
         }
         let allow_alt = !(main_only || ep == Endpoint::Legacy && auth);
-        let deadline = main_only.then(|| Instant::now() + Duration::from_secs(3));
+        // A próxima leitura normal precisa caber no prazo mesmo com o maior desvio do ritmo.
+        let deadline = main_only.then(|| {
+            let read_spacing = self.inner.lock().unwrap().read_spacing;
+            let jitter = read_spacing.mul_f64(READ_JITTER_PER_MILLE as f64 / 1000.0);
+            Instant::now() + read_spacing + Duration::from_secs(3).max(jitter)
+        });
         if let Some(at) = deadline {
             // Confere também o relógio do envio antes de ocupar uma vaga no limitador.
             let pace = self.main_send_pace.lock().await;
-            let g = self.inner.lock().unwrap();
-            if pace.ready_at(&g, Instant::now(), 1, false, g.side.gap) > at {
+            let mut g = self.inner.lock().unwrap();
+            let now = Instant::now();
+            // Balde em pausa por 429: responde a pausa, como o laço abaixo, qualquer que seja a vaga.
+            if let Some(end) = g.bucket(ep).pause_end(now) {
+                return Err(Error::RateLimited {
+                    until: unix_in(end - now),
+                });
+            }
+            if pace.ready_at(&g, now, 1, false, g.side.gap) > at {
                 return Err(Error::MainSlotBusy);
             }
         }
@@ -3006,6 +3019,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn floor_legacy_waits_for_the_shared_read_slot() {
+        let app = Router::new().route("/ok", get(|| async { "{}" }));
+        let c = fast(&serve(app).await);
+        let read_spacing = Duration::from_secs(4);
+        c.inner.lock().unwrap().read_spacing = read_spacing;
+
+        c.get_json(Endpoint::History, "/ok", &[]).await.unwrap();
+        let first_send = c.inner.lock().unwrap().last_any.unwrap();
+        c.inner.lock().unwrap().last_read = Some(Instant::now() + read_spacing.mul_f64(0.3));
+        let earliest_read = c.inner.lock().unwrap().last_read.unwrap() + read_spacing;
+        tokio::time::timeout(Duration::from_secs(8), c.legacy_json_main("/ok", &[]))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let sweep_send = c.inner.lock().unwrap().last_any.unwrap();
+        assert!(sweep_send >= earliest_read);
+        assert!(sweep_send >= first_send + MIN_SPACING);
+        assert_eq!(c.sent(), 2);
+    }
+
+    #[tokio::test]
+    async fn floor_legacy_answers_the_pause_whatever_the_slot() {
+        let c = SteamClient::with_base("http://127.0.0.1:1").unwrap();
+        for (pause_secs, send_busy) in [(2, false), (600, false), (600, true)] {
+            let now = Instant::now();
+            c.inner
+                .lock()
+                .unwrap()
+                .bucket(Endpoint::Legacy)
+                .paused_until = Some(now + Duration::from_secs(pause_secs));
+            c.main_send_pace.lock().await.last_bucket[1] =
+                send_busy.then_some(now + Duration::from_secs(60));
+            let result = c.legacy_json_main("/unused", &[]).await;
+            assert!(matches!(result, Err(Error::RateLimited { .. })));
+            assert_eq!(c.sent(), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn floor_legacy_skips_a_distant_slot_without_sending() {
         let c = SteamClient::with_base("http://127.0.0.1:1").unwrap();
         for blocked_gate in ["bucket", "global", "read", "send"] {
@@ -3016,7 +3069,7 @@ mod tests {
                 g.next_any = if blocked_gate == "global" { later } else { now };
                 g.bucket(Endpoint::Legacy).next_at =
                     if blocked_gate == "bucket" { later } else { now };
-                g.last_read = (blocked_gate == "read").then_some(now);
+                g.last_read = (blocked_gate == "read").then_some(later);
             }
             c.main_send_pace.lock().await.last_bucket[1] =
                 (blocked_gate == "send").then_some(later);
@@ -3529,8 +3582,9 @@ fn jittered(now: Instant, spacing: Duration) -> Instant {
         return now;
     }
     use std::hash::BuildHasher;
-    let r = std::collections::hash_map::RandomState::new().hash_one(now) % 601;
-    let f = (r as f64 - 300.0) / 1000.0;
+    let r = std::collections::hash_map::RandomState::new().hash_one(now)
+        % (2 * READ_JITTER_PER_MILLE + 1);
+    let f = (r as f64 - READ_JITTER_PER_MILLE as f64) / 1000.0;
     let d = spacing.mul_f64(f.abs());
     if f >= 0.0 {
         now + d

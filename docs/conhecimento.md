@@ -24,6 +24,26 @@ Glossário: *ask* = preço pedido num anúncio; *venda paga* = transação fecha
   100 anúncios mais baratos do nome, com seed e float. As leituras levaram 250 a 1.650 ms (~600 KB por
   resposta). A captura de P250 | Nevermore (Minimal Wear) tinha 331 anúncios no total e os 100 da
   primeira página foram preservados na amostra do teste.
+- Série ao vivo de 17/11/2026 às 22:39 a 18/11 às 00:21, com o programa desligado: 204 leituras com
+  `count=100`, uma a cada 30 s, em rodízio de 13 nomes. Cada nome de Desert Eagle | Heat Treated foi
+  relido a cada ~3 min. Foram 199 respostas com página, 5 vazias e nenhum 429. Entraram 137 anúncios
+  novos entre os 100 mais baratos. Nenhum tinha seed pagante (3,64 esperados se os seeds chegassem ao
+  acaso). Um anúncio pagante que entrasse e saísse em menos de ~3 min poderia passar despercebido.
+- Censo do estoque em 18/11/2026, das 00:25 às 00:38, com o programa desligado: 120 leituras com
+  `count=100`, uma a cada 6 s, em páginas `start=0,100,...`. Foram 104 respostas com página, 16 vazias
+  e nenhum 429. Nos quatro desgastes WW/BS/FT/MW de Desert Eagle | Heat Treated e Five-SeveN | Heat
+  Treated, foram lidos 9.857 dos 10.734 anúncios informados. Havia 1.552 anúncios com seed pagante
+  (Desert Eagle: 1.040 de 7.989, com 105 seeds pagantes entre 1.001 possíveis. Five-SeveN: 512 de
+  1.868, com 55 entre 1.001). Os seeds pagantes representam 13% dos anúncios lidos da Desert Eagle e 27% dos da Five-SeveN, contra 10,5% e 5,5% dos seeds possíveis. Hipótese, não medida: sobram no estoque porque são anunciados acima do que os compradores pagam. Entre os 300
+  Desert Eagle | Heat Treated (Well-Worn) mais baratos, não havia nenhum pagante (~31 esperados ao acaso).
+  Dividindo o preço pedido pelo múltiplo mediano medido nas vendas do CSFloat vezes o menor preço do
+  nome na Steam (no denominador), a razão foi 1,78 no percentil 10, 2,70 no 25, 4,40 na mediana e
+  8,26 no percentil 75. Só 8 de 1.552 ficaram abaixo de 0,87.
+  Com saldo de R$ 41,91, cabiam 30 dos 1.552 (1,9%). Pela estimativa de bancada, 28 davam prejuízo
+  no cenário médio. Os outros 2, Five-SeveN | Heat Treated (Battle-Scarred), seeds 730 a R$ 25,59 e
+  882 a R$ 34,89, rendiam cerca de R$ 9 no cenário médio e davam prejuízo no pessimista. O seed
+  730 apareceu entre os 100 mais baratos em cerca de uma hora. Pela avaliação do programa, o
+  anúncio do seed 882 rendia R$ 0,70 no cenário médio, abaixo do mínimo de R$ 1,00. Na tabela `evaluations`, de 17/11 às 12:00 até 22:00 (horário de Brasília), entre os anúncios com grupo raro houve 5.955 avaliações `acima_do_saldo` (1.355 anúncios distintos) e 486 `sem_lucro` (183 distintos).
 - O endpoint clássico `/market/pricehistory/` foi medido em 06/11: sem login respondeu 400; com a sessão
   do app e a opção antiga respondeu 200 com pontos em BRL, identificados por `price_prefix="R$"`.
   Contrato e limitações: `pesquisa-web.md`, seção 10. A página SSR continua como conhecimento de referência (1.6).
