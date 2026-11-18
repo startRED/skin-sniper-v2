@@ -401,6 +401,7 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
         .await?;
     Ok(RareEvidence {
         multiples: rare_multiples(&rows, name, group_key),
+        borrowed: false,
     })
 }
 
@@ -602,6 +603,7 @@ fn why(
     group: Option<&crate::pricing::groups::Group>,
     seed: Option<u16>,
     float: Option<f64>,
+    borrowed: bool,
 ) -> String {
     if let Some(w) = seed.and_then(|s| crate::pricing::groups::named_why(name, s))
         && let Some(g) = group
@@ -630,6 +632,10 @@ fn why(
         ),
         "phase" => format!(
             "Fase {label}: a cor desta faca/arma Doppler ou Gamma é mais rara que as fases comuns."
+        ),
+        // prova emprestada (`patterns`, regra 3): quem vendeu bem foram os outros seeds do grupo, não este
+        "learned" if borrowed => format!(
+            "{label}: o seed {seed} entrou porque outros seeds do mesmo grupo da tabela venderam bem acima do preço comum no CSFloat; este tem menos de 3 vendas próprias lá. Confira a estampa antes de pagar mais."
         ),
         "learned" => format!(
             "{label}: o seed {seed} entrou porque as vendas do CSFloat dele (ou de seeds iguais ou piores) saíram bem acima do preço comum desta skin; confira a estampa antes de pagar mais."
@@ -738,17 +744,31 @@ async fn charm_gain(h: &Hunt, l: &Listing, now: i64) -> Result<Option<(i64, Stri
     Ok((total > 0).then_some((total, text)))
 }
 
-/// Grupo raro do anúncio (tabela ou seed aprendido) e, quando aprendido, as razões que o provam.
-fn rare_group(h: &Hunt, l: &Listing) -> (Option<Group>, Option<(Group, Vec<f64>)>) {
-    let learned = super::patterns::group(&h.lock().learned, &l.name, l.seed);
+/// Grupo do seed aprendido e as razões que o provam (`patterns::group`).
+type Proof = (Group, Vec<f64>);
+
+/// Grupo raro do anúncio (tabela ou seed aprendido) e, quando aprendido, as razões que o provam e se elas são
+/// emprestadas do grupo (`patterns::borrowed`). Prova e marca saem da mesma leitura: são trocadas juntas.
+fn rare_group(h: &Hunt, l: &Listing) -> (Option<Group>, Option<Proof>, bool) {
+    let (learned, lent) = {
+        let s = h.lock();
+        (
+            super::patterns::group(&s.learned, &l.name, l.seed),
+            super::patterns::is_borrowed(&s.borrowed, &l.name, l.seed),
+        )
+    };
     let group = group_of(&l.name, l.seed.map(u32::from), l.paint_index, l.float)
         .or_else(|| learned.as_ref().map(|(g, _)| g.clone()));
-    (group, learned)
+    let lent = lent && learned.is_some();
+    (group, learned, lent)
 }
 
 /// O que o anúncio vale com os pontos de preço dados: grupo raro, preço comum e a estimativa de venda.
 struct Appraisal {
     group: Option<Group>,
+    /// O seed entrou pela prova emprestada do grupo: a explicação diz isso mesmo quando a Steam troca o prêmio, e por
+    /// isso não fala do teto (quem fala é a evidência da estimativa, só quando ele vale).
+    borrowed: bool,
     correction: f64,
     base_cents: Option<i64>,
     est: std::result::Result<sell::SellEstimate, sell::NoEstimate>,
@@ -761,7 +781,7 @@ async fn appraise(
     others_min: Option<i64>,
     now: i64,
 ) -> Result<Appraisal> {
-    let (group, learned) = rare_group(h, l);
+    let (group, learned, borrowed) = rare_group(h, l);
     let correction = h.correction(group.is_some());
     sell::discount(&mut points, correction);
     // raro: preço médio comum da mesma skin, sem o prêmio do grupo (base do múltiplo e do selo)
@@ -771,7 +791,10 @@ async fn appraise(
         .map(|e| e.mid.price_cents);
     let mut rare = match (&group, learned) {
         // pattern aprendido: o prêmio são as vendas que ensinaram (no desgaste do anúncio ou pior), não as da página
-        (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence { multiples }),
+        (Some(g), Some((lg, multiples))) if g.key == lg.key => Some(RareEvidence {
+            multiples,
+            borrowed,
+        }),
         (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
         (None, _) => None,
     };
@@ -780,7 +803,7 @@ async fn appraise(
     if let (Some(g), Some(b), Some(r)) = (&group, base_cents.filter(|b| *b > 0), rare.as_mut()) {
         let closed = steam_closed(h, l, &g.key, b).await?;
         if closed.len() >= sell::RARE_MIN_SALES {
-            (r.multiples, on_steam) = (closed, true);
+            (r.multiples, r.borrowed, on_steam) = (closed, false, true);
         }
     }
     let better = match &group {
@@ -803,6 +826,7 @@ async fn appraise(
     }
     Ok(Appraisal {
         group,
+        borrowed,
         correction,
         base_cents,
         est,
@@ -862,6 +886,7 @@ async fn evaluate_one(
     let hist_age = history_at(h, &l.name).await?.map_or(0, |t| now - t);
     let Appraisal {
         group,
+        borrowed,
         correction,
         base_cents,
         est,
@@ -976,7 +1001,7 @@ async fn evaluate_one(
         float: l.float,
         seed: l.seed.map(i64::from),
         group: group.as_ref().map(|g| g.label.clone()),
-        why: Some(why(&l.name, group.as_ref(), l.seed, l.float)),
+        why: Some(why(&l.name, group.as_ref(), l.seed, l.float, borrowed)),
         kind: if group.is_some() {
             Kind::Raro
         } else {
@@ -1801,19 +1826,25 @@ mod tests {
             key: key.into(),
             label: label.into(),
         };
-        assert!(super::why("", None, Some(1), Some(0.2)).starts_with("Desconto"));
+        assert!(super::why("", None, Some(1), Some(0.2), false).starts_with("Desconto"));
         let learned = g(
             "learned:Desert Eagle | Serpent Strike:804",
             "Max Orange #804",
         );
-        let w = super::why("", Some(&learned), Some(804), Some(0.21));
+        let w = super::why("", Some(&learned), Some(804), Some(0.21), false);
         assert!(
-            w.starts_with("Max Orange #804: o seed 804") && w.contains("CSFloat"),
+            w.starts_with("Max Orange #804: o seed 804") && w.contains("CSFloat dele"),
+            "{w}"
+        );
+        // prova emprestada: não diz que este seed vendeu bem
+        let w = super::why("", Some(&learned), Some(804), Some(0.21), true);
+        assert!(
+            w.contains("outros seeds do mesmo grupo") && !w.contains("CSFloat dele"),
             "{w}"
         );
         let cs = g("cs:Glock-18 | Moonrise:t1", "T1 Center Star");
         assert!(
-            super::why("", Some(&cs), Some(694), None)
+            super::why("", Some(&cs), Some(694), None, false)
                 .contains("Pattern de tabela (T1 Center Star)")
         );
     }

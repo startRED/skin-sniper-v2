@@ -49,6 +49,9 @@ pub struct PricePoint {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RareEvidence {
     pub multiples: Vec<f64>,
+    /// Prova emprestada do grupo de catálogo (`hunt::patterns`, regra 3): os múltiplos são vendas de outros seeds
+    /// limitadas a um teto, não vendas deste seed.
+    pub borrowed: bool,
 }
 
 /// Mínimo de vendas do grupo para o prêmio virar preço.
@@ -382,14 +385,22 @@ pub fn estimate(
             // (previsto 2,33×, vendido 0,96×). Assim `safe` só marca o que paga mesmo sem prêmio.
             (p25, p50, p75) = (p25 * m25.min(1.0), p50 * m50, p75 * m75);
             proven_rare = true;
-            evidence += &format!(
-                " · grupo raro: {}, {}x a {}x o preço comum",
-                sales_word(m.len()),
-                num(m25, 1),
-                num(m75, 1)
-            );
-            // prêmio com poucas vendas não sustenta confiança alta
-            let cap = if m.len() >= RARE_HIGH_CONFIDENCE_SALES {
+            evidence += &if r.borrowed {
+                format!(
+                    " · grupo raro: {} do grupo, prêmio limitado a {}x o preço comum porque este seed tem menos de 3 vendas próprias",
+                    sales_word(m.len()),
+                    num(m.iter().map(|p| p.0).fold(0.0, f64::max), 1)
+                )
+            } else {
+                format!(
+                    " · grupo raro: {}, {}x a {}x o preço comum",
+                    sales_word(m.len()),
+                    num(m25, 1),
+                    num(m75, 1)
+                )
+            };
+            // prêmio com poucas vendas (ou só com as dos outros seeds) não sustenta confiança alta
+            let cap = if m.len() >= RARE_HIGH_CONFIDENCE_SALES && !r.borrowed {
                 Confidence::High
             } else {
                 Confidence::Medium
@@ -450,6 +461,8 @@ pub fn estimate(
     let volatility = daily_volatility(&medians);
     let week_move = week_move(&medians);
     let risk = match volatility {
+        // as vendas contadas são de outros seeds: o número delas não baixa o risco deste
+        _ if rare.as_ref().is_some_and(|r| r.borrowed) => Risk::High,
         Some(v)
             if v <= 0.02
                 && sales_per_day >= 20.0
@@ -606,6 +619,7 @@ mod tests {
     fn rare(m: &[f64]) -> RareEvidence {
         RareEvidence {
             multiples: m.to_vec(),
+            borrowed: false,
         }
     }
 
@@ -1020,6 +1034,27 @@ mod tests {
         let rare = estimate(&flat(1000, 16), NOW, None, Some(rare(&[2.0; 3]))).unwrap();
         assert_eq!(rare.risk, Risk::Medium);
         assert_eq!(evaluate(500, &rare, 0).profit_per_day_cents, None);
+        // prova emprestada: mesmo preço, mas o aviso diz que é teto e as vendas dos outros seeds não dão confiança
+        let nine = |borrowed| {
+            let rare = RareEvidence {
+                multiples: vec![2.0; 9],
+                borrowed,
+            };
+            estimate(&flat(1000, 16), NOW, None, Some(rare)).unwrap()
+        };
+        let (own, lent) = (nine(false), nine(true));
+        assert_eq!(lent.mid, own.mid);
+        assert_eq!((own.confidence, own.risk), (Confidence::High, Risk::Low));
+        assert_eq!(
+            (lent.confidence, lent.risk),
+            (Confidence::Medium, Risk::High)
+        );
+        assert!(
+            lent.evidence
+                .contains("9 vendas do grupo, prêmio limitado a 2,0x"),
+            "{}",
+            lent.evidence
+        );
         let mut volatile = flat(1000, 16);
         for p in &mut volatile {
             if p.ts.div_euclid(DAY) % 2 == 0 {

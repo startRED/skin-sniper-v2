@@ -5,7 +5,8 @@
 //! 1. a skin tem nota por seed (% de azul, % do fade): as `NEAR` vendas de nota igual ou pior mais próximas da
 //!    dele pagam (mediana ≥ `PAY_MEDIAN`, quartil de baixo ≥ `PAY_P25`). Seed melhor herda a prova do pior;
 //! 2. é seed de catálogo com 3+ vendas próprias: as vendas dele passam no mesmo teste;
-//! 3. é seed de catálogo com menos de 3 vendas: as vendas do grupo dele passam no teste mais duro (`POOL_P25`);
+//! 3. é seed de catálogo com menos de 3 vendas: as vendas do grupo dele passam no teste mais duro (`POOL_P25`),
+//!    mas o prêmio dele não passa da pior venda própria ou, se nunca vendeu, da pior venda do grupo;
 //! 4. não está em catálogo nenhum: 3+ vendas próprias, com o quartil de baixo a `MIN_RATIO` × ou mais.
 //!
 //! Nas regras 2 a 4 (skin sem nota) a prova vale por desgaste: só contam vendas no desgaste do anúncio ou num pior.
@@ -17,6 +18,12 @@
 //! Heat Treated foi de 43 para 104 seeds, e saíram seeds de tier 1 que vendem a preço comum (Solitude 95/112/154,
 //! Trace Lock 309/390). Prevendo cada venda só com as anteriores (`backtest`): 336 vendas de seed pagante, 97 %
 //! saíram a ≥ 1,15× o comum, real ÷ previsto 1,12 (mediana). Medida repetível: teste `catalog_on_a_real_db`.
+//! O teto da regra 3 é de 18/11/2026: o grupo de catálogo junta seeds de tiers diferentes e a mediana dele é puxada
+//! pelos melhores. Em 73 310 vendas, nas 27 de seed com prova emprestada a venda real saiu a 0,74× o previsto
+//! (mediana) e 12 saíram abaixo da metade; nas 7 de seed que nunca tinha vendido, a 0,33×. O caso que mostrou:
+//! Glock-18 Grinder #593 Minimal Wear previsto a 17,2× pelo grupo "Full Black" (que tem o #916, vendido a 28,9×)
+//! e vendido a 4,6×. Nessa conta (e em `backtest`) o preço comum do nome é a mediana de todas as vendas guardadas
+//! dele, inclusive as posteriores à venda prevista.
 //! shortcut: os limites (1,5 / 1,2 / 2,0, 8 vizinhas) foram escolhidos olhando o mesmo retrato de 12/11 em que a
 //! prova retroativa foi medida; o placar de `hunt::value` refaz a conta a cada hora com as vendas novas,
 //! recalibrar por ele.
@@ -157,15 +164,44 @@ pub fn evidence_for(
         .collect();
     match siblings(base, seed) {
         Some(_) if own.len() >= RARE_MIN_SALES => pays(own, PAY_MEDIAN, PAY_P25),
-        Some(group) => pays(
-            past.filter(|c| group.contains(&c.seed))
-                .map(|c| c.ratio)
-                .collect(),
-            0.0,
-            POOL_P25,
-        ),
+        Some(group) => {
+            let pool = pays(
+                past.filter(|c| group.contains(&c.seed))
+                    .map(|c| c.ratio)
+                    .collect(),
+                0.0,
+                POOL_P25,
+            )?;
+            // o grupo prova que o seed paga, não quanto: os seeds melhores do grupo não sobem o preço dele
+            let cap = own.iter().copied().reduce(f64::min).unwrap_or(pool[0]);
+            Some(pool.into_iter().map(|r| r.min(cap)).collect())
+        }
         None => pays(own, 0.0, MIN_RATIO),
     }
+}
+
+/// `(skin-base, seed, desgaste)` cuja prova é emprestada do grupo (regra 3): o aviso diz que o prêmio é um teto e
+/// não ganha confiança pelas vendas dos outros seeds.
+pub type Borrowed = HashSet<(String, u16, u8)>;
+
+pub fn borrowed(comps: &HashMap<String, Vec<Comp>>, l: &Learned) -> Borrowed {
+    l.iter()
+        .flat_map(|(base, m)| {
+            let v = comps.get(base).map_or(&[][..], Vec::as_slice);
+            m.keys()
+                .filter(move |(seed, wear)| {
+                    let own = v.iter().filter(|c| c.seed == *seed && c.wear >= *wear);
+                    score(base, *seed).is_none()
+                        && siblings(base, *seed).is_some()
+                        && own.count() < RARE_MIN_SALES
+                })
+                .map(move |(seed, wear)| (base.clone(), *seed, *wear))
+        })
+        .collect()
+}
+
+pub fn is_borrowed(b: &Borrowed, name: &str, seed: Option<u16>) -> bool {
+    seed.is_some_and(|s| b.contains(&(skin_base(name).to_string(), s, wear_index(name))))
 }
 
 /// Os seeds que pagam em cada skin medida, com a prova de cada um.
@@ -305,7 +341,13 @@ pub(crate) async fn sale_rows(h: &Hunt) -> Result<Vec<SaleRow>> {
 pub async fn load(h: &Hunt) -> Result<()> {
     let rows = sale_rows(h).await?;
     // skin com nota confere os 1 001 seeds contra todas as vendas dela: fora do laço da caça
-    let l = tokio::task::spawn_blocking(move || learn(&comps(&rows))).await?;
+    let (l, lent) = tokio::task::spawn_blocking(move || {
+        let comps = comps(&rows);
+        let l = learn(&comps);
+        let lent = borrowed(&comps, &l);
+        (l, lent)
+    })
+    .await?;
     set_paying(
         l.iter()
             .map(|(base, m)| (base.clone(), m.keys().copied().collect()))
@@ -321,8 +363,34 @@ pub async fn load(h: &Hunt) -> Result<()> {
             // Seed entrou ou saiu dos pagantes: o grupo raro do anúncio muda; cada um volta a ser avaliado na
             // próxima consulta (o piso avalia também os comuns, que podem virar raros aqui).
             s.evaluated.clear();
+        } else {
+            // Mesmos seeds, prova diferente (venda nova, teto novo): a oportunidade ativa do seed volta a ser
+            // avaliada na próxima consulta, para o lucro na tela não ficar com a prova antiga.
+            let stale: Vec<String> = s
+                .active
+                .values()
+                .map(|a| &a.opp)
+                .filter(|o| {
+                    let (base, wear) = (skin_base(&o.name), wear_index(&o.name));
+                    o.seed
+                        .and_then(|x| u16::try_from(x).ok())
+                        .is_some_and(|seed| {
+                            let proof = |l: &Learned| {
+                                l.get(base).and_then(|m| m.get(&(seed, wear))).cloned()
+                            };
+                            proof(&s.learned) != proof(&l)
+                                || is_borrowed(&s.borrowed, &o.name, Some(seed))
+                                    != is_borrowed(&lent, &o.name, Some(seed))
+                        })
+                })
+                .map(|o| o.id.clone())
+                .collect();
+            for id in stale {
+                s.evaluated.remove(&id);
+            }
         }
         s.learned = l;
+        s.borrowed = lent;
     }
     if old != new {
         tracing::info!(skins = new.0, seeds = new.1, "catálogo de patterns medido");
@@ -759,7 +827,17 @@ mod tests {
         let (g, e) = group(&l, "StatTrak™ AWP | PAW (Minimal Wear)", Some(350)).unwrap();
         assert_eq!(g.key, "learned:AWP | PAW:350");
         assert!(g.label.ends_with("#350"), "{}", g.label);
-        assert_eq!(e, [1.5, 1.6, 2.0]);
+        // nunca vendeu: vale a pior venda do grupo, não a mediana (18/11: Grinder #593 previsto pelo #916)
+        assert_eq!(e, [1.5, 1.5, 1.5]);
+        // vendeu uma vez: vale até essa venda, e quem vendeu melhor no grupo não sobe o preço dele
+        let c = comps(&rows(PAW, &[(41, 2.0), (41, 1.6), (41, 1.5), (350, 1.7)]));
+        let l = learn(&c);
+        let lent = borrowed(&c, &l);
+        assert!(is_borrowed(&lent, PAW, Some(350)));
+        assert!(!is_borrowed(&lent, PAW, Some(41)) && !is_borrowed(&lent, PAW, None));
+        assert_eq!(group(&l, PAW, Some(350)).unwrap().1, [1.5, 1.6, 1.7, 1.7]);
+        assert_eq!(group(&l, PAW, Some(41)).unwrap().1, [1.5, 1.6, 2.0]);
+        let l = learn(&comps(&rows(PAW, &[(41, 2.0), (41, 1.6), (41, 1.5)])));
         assert_eq!(group(&l, PAW, Some(1)), None);
         // as vendas são Field-Tested: provam o Factory New, não o Battle-Scarred (13/11: Snow Splash #309)
         assert!(group(&l, "AWP | PAW (Factory New)", Some(41)).is_some());
@@ -869,6 +947,31 @@ mod tests {
         println!("total (skins, seeds): {:?}", size(&l));
         let (n, paid, ratio) = crate::hunt::value::backtest_summary(&backtest(&comps));
         println!("prova retroativa: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}");
+        // só a prova emprestada do grupo (regra 3): vendas de seed de catálogo com menos de 3 vendas próprias antes
+        let borrowed: Vec<(f64, f64)> = comps
+            .iter()
+            .flat_map(|(base, v)| {
+                v.iter().filter_map(move |c| {
+                    let own = v
+                        .iter()
+                        .filter(|o| o.seed == c.seed && o.wear >= c.wear && o.sold_at < c.sold_at)
+                        .count();
+                    if score(base, c.seed).is_some()
+                        || siblings(base, c.seed).is_none()
+                        || own >= RARE_MIN_SALES
+                    {
+                        return None;
+                    }
+                    let e = evidence_for(base, c.seed, c.wear, v, c.sold_at)?;
+                    Some((e[e.len() / 2], c.ratio))
+                })
+            })
+            .collect();
+        let (n, paid, ratio) = crate::hunt::value::backtest_summary(&borrowed);
+        println!(
+            "prova emprestada: {n} vendas, pagaram {paid:?}, real/previsto {ratio:?}, {} abaixo da metade do previsto",
+            borrowed.iter().filter(|p| p.1 < p.0 / 2.0).count()
+        );
     }
 
     #[test]

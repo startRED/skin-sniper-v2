@@ -99,6 +99,8 @@ pub(crate) struct Shared {
     pub book_at: i64,
     /// Patterns aprendidos das vendas do CSFloat (`patterns`).
     pub learned: patterns::Learned,
+    /// Seeds de `learned` com prova emprestada do grupo (`patterns::borrowed`).
+    pub borrowed: patterns::Borrowed,
     /// Última leitura do coletor de patterns (0 = ainda não ligou) e quando cada skin foi lida.
     pub learn_at: i64,
     pub learn_seen: HashMap<String, i64>,
@@ -204,6 +206,7 @@ impl Hunt {
                 books: HashMap::new(),
                 book_at: 0,
                 learned: patterns::Learned::new(),
+                borrowed: patterns::Borrowed::new(),
                 learn_at: 0,
                 learn_seen: HashMap::new(),
                 ledger_prev: HashMap::new(),
