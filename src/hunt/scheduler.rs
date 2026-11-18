@@ -50,7 +50,9 @@ const ACTIVE_RECHECK_MAX_SECS: i64 = 30 * 60;
 /// Descanso inicial; em operação o cliente mantém o degrau persistente de 28 até 20 s.
 #[cfg(test)]
 pub(super) const LISTINGS_REST_SECS: i64 = 28;
-const FLOOR_SWEEP_GAP_SECS: i64 = 60;
+/// Espera da varredura quando a caça não enviou leitura desde a última (ver `floor_after`): duas vagas de
+/// leitura (12 s em média cada), o que limita a varredura a cerca de 150 leituras por hora.
+const FLOOR_SWEEP_GAP_SECS: i64 = 24;
 const FLOOR_SWEEP_RETRY_SECS: i64 = 3;
 const FLOOR_MIN_REVISIT_SECS: i64 = 180;
 /// Descanso do alvo cuja consulta voltou `data` nula: 5 min, dobrando a cada falha seguida, até 1 h.
@@ -1967,6 +1969,19 @@ fn floor_due(now: i64, next: i64, balance: i64, blocked: bool) -> bool {
     now >= next && balance > 0 && !blocked
 }
 
+/// Vez sim, vez não: depois de um turno da caça que enviou leitura (`Tick::Watched`) a varredura do piso pode
+/// usar a próxima vaga. O teto de leituras não muda: a vaga é a mesma. Motivo e medidas em `docs/projeto.md`
+/// (metade das leituras para o piso). Nunca adianta a nova tentativa de `FLOOR_SWEEP_RETRY_SECS` já marcada.
+/// shortcut: conta o turno, não a vaga usada; com a saída extra ligada (nenhuma leitura por ela nas 48 h até
+/// 18/11/2026) a varredura poderia usar todas as vagas da principal: rever esta regra antes de religar a saída.
+fn floor_after(turn: &Tick, next: i64, now: i64) -> i64 {
+    if matches!(turn, Tick::Watched(_)) {
+        next.min(now + FLOOR_SWEEP_RETRY_SECS)
+    } else {
+        next
+    }
+}
+
 pub async fn run(h: Arc<Hunt>) {
     let mut saved = h.now();
     let mut parallel = super::parallel::Reader::default();
@@ -1993,7 +2008,9 @@ pub async fn run(h: Arc<Hunt>) {
             };
             next_floor = h.now() + gap;
         }
-        let idle = tick(&h).await == Tick::Idle;
+        let turn = tick(&h).await;
+        next_floor = floor_after(&turn, next_floor, h.now());
+        let idle = turn == Tick::Idle;
         if idle {
             tokio::select! {
                 () = h.wake.notified() => {}
@@ -2032,6 +2049,17 @@ mod tests {
     #[test]
     fn floor_requires_positive_balance_even_with_active_opportunity() {
         assert!(floor_priority(0, None, None, 1, 1.0, true).is_none());
+    }
+
+    #[test]
+    fn floor_takes_the_slot_after_a_task_read_and_waits_the_gap_otherwise() {
+        assert_eq!(floor_after(&Tick::Watched("r:x".into()), 124, 112), 115);
+        // Vaga ocupada às 111 marcou nova tentativa para 114: a leitura da caça às 112 não a adianta.
+        assert_eq!(floor_after(&Tick::Watched("r:x".into()), 114, 112), 114);
+        assert_eq!(floor_after(&Tick::Watched("r:x".into()), 100, 112), 100);
+        for turn in [Tick::Idle, Tick::Discovery, Tick::Book] {
+            assert_eq!(floor_after(&turn, 124, 112), 124);
+        }
     }
 
     #[test]

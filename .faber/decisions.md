@@ -6,3 +6,5 @@
 - Coletor de vendas guarda a volta em `pattern_seen` (só o que o CSFloat respondeu) e escolhe, entre os nomes vencidos, o nunca lido e depois o lido há mais tempo; a vez é da lista atendida há mais tempo, não do relógio. [by AI]
 
 - Caça aos raros lê também o piso de cada nome pela interface antiga do mercado (100 anúncios mais baratos por leitura, um nome a cada ~60 s), ao lado das leituras por faixa de seed e fora do registro de observações: medido em 17/11/2026, a leitura por faixa do Desert Eagle | Heat Treated quase nunca responde e a antiga responde sempre. [by AI]
+
+- Varredura do piso alterna com a caça: fica devida logo depois de cada turno que enviou leitura e, sem esse turno, a cada 24 s (limite de cerca de 150 por hora), sempre na mesma vaga de leitura das outras consultas; o teto de leituras por hora não muda. Ganho em achados não medido em 18/11/2026. [by AI]
