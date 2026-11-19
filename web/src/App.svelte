@@ -5,6 +5,7 @@
   import TopBar from './lib/TopBar.svelte';
   import ComboBar from './lib/ComboBar.svelte';
   import OppTable from './lib/OppTable.svelte';
+  import Bets from './lib/Bets.svelte';
   import Watch from './lib/Watch.svelte';
   import Purchases from './lib/Purchases.svelte';
   import Learning from './lib/Learning.svelte';
@@ -98,6 +99,7 @@
       {:else}
         <OppTable />
       {/if}
+      {#if !noSaldo}<Bets />{/if}
       <Watch bids />
       {#if lostCount > 0}
         <h3 class="lost">Perdidas nas últimas 24 h <span class="muted">{lostCount}</span></h3>

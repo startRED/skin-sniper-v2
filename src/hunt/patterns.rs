@@ -369,6 +369,7 @@ pub async fn load(h: &Hunt) -> Result<()> {
             let stale: Vec<String> = s
                 .active
                 .values()
+                .chain(s.bets.values())
                 .map(|a| &a.opp)
                 .filter(|o| {
                     let (base, wear) = (skin_base(&o.name), wear_index(&o.name));
