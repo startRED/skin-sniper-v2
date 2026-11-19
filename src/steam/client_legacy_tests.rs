@@ -14,9 +14,7 @@ async fn both_exits_share_read_spacing_and_leave_room_for_user_actions() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let hits = seen.clone();
     let base = serve(Router::new().fallback(get(move |uri: axum::http::Uri| {
-        hits.lock()
-            .unwrap()
-            .push((uri.path().to_owned(), Instant::now()));
+        hits.lock().unwrap().push(uri.path().to_owned());
         async { "{}" }
     })))
     .await;
@@ -30,18 +28,40 @@ async fn both_exits_share_read_spacing_and_leave_room_for_user_actions() {
         g.alt_limiter.gap = Duration::ZERO;
     }
     c.get_json(Endpoint::History, "/main", &[]).await.unwrap();
-    let (alt, control) = tokio::join!(
-        c.legacy_json_public_alt("/alt", &[]),
-        c.get_json(Endpoint::Session, "/account", &[])
-    );
-    alt.unwrap().unwrap();
-    control.unwrap();
-    let hits = seen.lock().unwrap();
-    let at = |path: &str| hits.iter().find(|(p, _)| p == path).unwrap().1;
-    assert!(at("/alt") - at("/main") >= read_gap - Duration::from_millis(10));
-    assert!(at("/account") - at("/main") < read_gap);
-    for pair in hits.windows(2) {
-        assert!(pair[1].1 - pair[0].1 >= any_gap - Duration::from_millis(10));
+    // Com o relógio parado no envio da leitura, a ação do usuário só espera o intervalo geral, não o de leitura.
+    {
+        let pace = c.main_send_pace.lock().await;
+        let g = c.inner.lock().unwrap();
+        let first = g.probe.sent_at[0];
+        assert_eq!(
+            pace.ready_at(&g, first, 2, false, g.control.gap),
+            first + any_gap
+        );
+    }
+    // A segunda leitura entra na fila do envio e fica sem ser retomada enquanto a ação do usuário vai e volta:
+    // a ação termina com uma leitura parada na fila, e nenhum limite de relógio decide o teste.
+    let mut read = std::pin::pin!(c.legacy_json_public_alt("/alt", &[]));
+    std::future::poll_fn(|cx| {
+        assert!(read.as_mut().poll(cx).is_pending());
+        if c.inner.lock().unwrap().probe.queued == 2 {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    c.get_json(Endpoint::Session, "/account", &[])
+        .await
+        .unwrap();
+    read.await.unwrap().unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 3);
+    // Instantes em que o cliente liberou cada envio: a chegada no servidor atrasa com a máquina carregada. A
+    // última saída fica a um espaçamento de leitura da primeira, seja qual for a ordem das duas últimas.
+    let sent = c.sent_at();
+    assert_eq!(sent.len(), 3);
+    assert!(sent[2] - sent[0] >= read_gap);
+    for pair in sent.windows(2) {
+        assert!(pair[1] - pair[0] >= any_gap);
     }
 }
 
@@ -180,9 +200,7 @@ async fn read_spacing_covers_endpoint_groups_and_each_exit_without_holding_user_
     let seen = Arc::new(Mutex::new(Vec::new()));
     let hits = seen.clone();
     let base = serve(Router::new().fallback(get(move |uri: axum::http::Uri| {
-        hits.lock()
-            .unwrap()
-            .push((uri.path().to_owned(), Instant::now()));
+        hits.lock().unwrap().push(uri.path().to_owned());
         async { "{}" }
     })))
     .await;
@@ -191,7 +209,22 @@ async fn read_spacing_covers_endpoint_groups_and_each_exit_without_holding_user_
     c.inner.lock().unwrap().read_spacing = gap;
     c.get_json(Endpoint::History, "/a", &[]).await.unwrap();
     c.get_json(Endpoint::Legacy, "/b", &[]).await.unwrap();
+    // Com um ano de espaçamento de leitura, a ação do usuário não pode entrar na fila de leitura: com o relógio
+    // parado no último envio, só o intervalo geral a segura (conferido sem esperar nada), e o envio de verdade
+    // termina. Se entrasse na fila, o teste ficaria parado em vez de passar; nenhum limite de relógio o decide.
+    c.inner.lock().unwrap().read_spacing = Duration::from_secs(365 * 24 * 3600);
+    {
+        let pace = c.main_send_pace.lock().await;
+        let g = c.inner.lock().unwrap();
+        let last = g.probe.sent_at[1];
+        assert_eq!(
+            pace.ready_at(&g, last, 2, false, g.control.gap),
+            last + g.spacing,
+            "ação do usuário não espera a fila de leitura"
+        );
+    }
     c.get_json(Endpoint::Buy, "/buy", &[]).await.unwrap();
+    c.inner.lock().unwrap().read_spacing = gap;
     c.get_json(Endpoint::Book, "/c", &[]).await.unwrap();
     let alt = fast(&base).with_public_alt_for_test(http_builder().build().unwrap());
     {
@@ -204,20 +237,18 @@ async fn read_spacing_covers_endpoint_groups_and_each_exit_without_holding_user_
         .unwrap()
         .unwrap();
     alt.get_json(Endpoint::Book, "/alt-b", &[]).await.unwrap();
-    let hits = seen.lock().unwrap();
     assert_eq!(
-        hits.iter()
-            .map(|(path, _)| path.as_str())
-            .collect::<Vec<_>>(),
+        *seen.lock().unwrap(),
         ["/a", "/b", "/buy", "/c", "/alt-a", "/alt-b"]
     );
-    for (before, after) in [(0, 1), (1, 3), (4, 5)] {
-        assert!(hits[after].1.duration_since(hits[before].1) >= gap - Duration::from_millis(10));
-    }
-    assert!(
-        hits[2].1.duration_since(hits[1].1) < gap,
-        "ação do usuário não espera a fila de leitura"
-    );
+    // Instantes em que o cliente liberou cada envio: a chegada no servidor atrasa com a máquina carregada.
+    let sent = c.sent_at();
+    assert_eq!(sent.len(), 4);
+    assert!(sent[1] - sent[0] >= gap);
+    assert!(sent[3] - sent[1] >= gap);
+    let sent = alt.sent_at();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[1] - sent[0] >= gap);
 }
 
 #[tokio::test]
