@@ -638,6 +638,8 @@ struct Inner {
     /// [principal, extra, livro e busca], para o balanço de 10 min no log.
     calls: [Calls; 3],
     sent: u64,
+    #[cfg(test)]
+    probe: Probe,
     filtered_success_sample: u8,
 }
 
@@ -686,6 +688,20 @@ pub struct SteamClient {
     alt_send_pace: tokio::sync::Mutex<SendPace>,
     /// Chrome sem login que lê os anúncios (principal, extra); `None` nos testes e sem Chrome instalado.
     browsers: [Option<Arc<super::browser::Browser>>; 2],
+}
+
+/// Só para teste: o que o cliente fez com cada envio, lido pelos testes de ritmo.
+#[cfg(test)]
+#[derive(Default)]
+struct Probe {
+    /// Consultas que já chegaram à fila do envio.
+    queued: usize,
+    /// Instante em que cada envio foi liberado, na ordem.
+    sent_at: Vec<Instant>,
+    /// Retomada da tarefa (contada pelo teste) em que cada envio foi liberado e em que foi entregue ao transporte.
+    poll: u64,
+    sent_poll: Vec<u64>,
+    handed_poll: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -812,6 +828,8 @@ impl SteamClient {
                 calls: [Calls::default(); 3],
                 filtered_success_sample: 0,
                 sent: 0,
+                #[cfg(test)]
+                probe: Probe::default(),
                 alt_down_until: None,
             }),
         })
@@ -843,6 +861,10 @@ impl SteamClient {
         } else {
             0
         };
+        #[cfg(test)]
+        {
+            self.inner.lock().unwrap().probe.queued += 1;
+        }
         loop {
             let at = {
                 let mut pace = gate.lock().await;
@@ -882,6 +904,12 @@ impl SteamClient {
                 if at <= now {
                     // O contador representa transporte iniciado, não vaga reservada.
                     inner.sent += 1;
+                    #[cfg(test)]
+                    {
+                        let poll = inner.probe.poll;
+                        inner.probe.sent_at.push(now);
+                        inner.probe.sent_poll.push(poll);
+                    }
                     if alt {
                         inner.alt_limiter.note_query(now);
                     } else {
@@ -953,6 +981,12 @@ impl SteamClient {
         request: reqwest::Request,
         via_alt: bool,
     ) -> std::result::Result<reqwest::Response, String> {
+        #[cfg(test)]
+        {
+            let mut g = self.inner.lock().unwrap();
+            let poll = g.probe.poll;
+            g.probe.handed_poll.push(poll);
+        }
         match &self.browsers[via_alt as usize] {
             // Só leitura pública em JSON: o `fetch` segue redirecionamento (o 302 do código G fica no reqwest)
             // e não manda o cookie de login nem o `bMarketOptOut` da interface antiga.
@@ -1183,6 +1217,13 @@ impl SteamClient {
         g.control.gap = gap;
         g.spacing = gap;
         g.read_spacing = gap;
+    }
+
+    /// Só para teste: instante em que cada envio foi liberado, na ordem. É o relógio que decide o ritmo; a
+    /// chegada no servidor atrasa com a máquina carregada e não serve para medir espaçamento.
+    #[cfg(test)]
+    pub(crate) fn sent_at(&self) -> Vec<Instant> {
+        self.inner.lock().unwrap().probe.sent_at.clone()
     }
 
     /// Só para teste: a fila nativa fica sem vaga por `wait`, como logo depois de uma consulta num intervalo longo.
@@ -2444,47 +2485,86 @@ mod tests {
     #[tokio::test]
     async fn slow_database_cannot_collapse_actual_send_spacing() {
         use std::sync::Arc;
-        let times = Arc::new(Mutex::new(Vec::new()));
-        let seen = times.clone();
-        let app = Router::new().route(
-            "/ok",
-            get(move || {
-                let seen = seen.clone();
-                async move {
-                    seen.lock().unwrap().push(Instant::now());
-                    "{}"
-                }
-            }),
-        );
+        let app = Router::new().route("/ok", get(|| async { "{}" }));
         let c = Arc::new(fast(&serve(app).await));
         let (db, _dir) = crate::db::temp_db();
         c.set_research_db(db.clone());
         let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
         let db2 = db.clone();
         let hold = tokio::spawn(async move {
             db2.call(move |_| {
                 let _ = started.send(());
-                std::thread::sleep(Duration::from_millis(500));
+                let _ = held.recv();
                 Ok(())
             })
             .await
             .unwrap()
         });
         ready.await.unwrap();
-        let a = {
-            let c = c.clone();
-            tokio::spawn(async move { c.get_json(Endpoint::History, "/ok", &[]).await.unwrap() })
-        };
-        let b = {
-            let c = c.clone();
-            tokio::spawn(async move { c.get_json(Endpoint::History, "/ok", &[]).await.unwrap() })
-        };
-        a.await.unwrap();
-        b.await.unwrap();
+        // Cada consulta reserva a vaga com o banco preso, como num banco lento.
+        let mut queries = Vec::new();
+        for _ in 0..2 {
+            let before = c.inner.lock().unwrap().limiter.next_at;
+            let q = c.clone();
+            queries.push(tokio::spawn(async move {
+                q.get_json(Endpoint::History, "/ok", &[]).await.unwrap()
+            }));
+            while c.inner.lock().unwrap().limiter.next_at == before {
+                assert!(!queries.iter().any(|q| q.is_finished()));
+                tokio::task::yield_now().await;
+            }
+        }
+        // O teste segura a fila do envio até as duas saírem do banco e pararem nela: soltas dali, chegam juntas à
+        // decisão do ritmo, por mais lenta que a máquina esteja.
+        let gate = c.main_send_pace.lock().await;
+        release.send(()).unwrap();
+        while c.inner.lock().unwrap().probe.queued < 2 {
+            assert!(!queries.iter().any(|q| q.is_finished()));
+            tokio::task::yield_now().await;
+        }
+        assert!(c.sent_at().is_empty());
+        drop(gate);
+        for q in queries {
+            q.await.unwrap();
+        }
         hold.await.unwrap();
-        let times = times.lock().unwrap();
-        assert_eq!(times.len(), 2);
-        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(80));
+        // Instantes em que o cliente liberou cada envio: o intervalo de `fast` vale inteiro entre os dois.
+        let sent = c.sent_at();
+        assert_eq!(sent.len(), 2);
+        assert!(sent[1].duration_since(sent[0]) >= Duration::from_millis(100));
+    }
+
+    /// `sent_at` só mede o ritmo se o envio liberado chegar ao transporte sem a tarefa ser suspensa no meio: num
+    /// ponto de espera ali, outra tarefa passa na frente e os envios saem mais juntos do que o registro mostra.
+    #[tokio::test]
+    async fn released_send_reaches_transport_in_the_same_poll() {
+        let app = Router::new().fallback(get(|| async { "{}" }));
+        let c = fast(&serve(app).await).with_public_alt_for_test(http_builder().build().unwrap());
+        c.inner.lock().unwrap().alt_limiter.gap = Duration::ZERO;
+        // As leituras saem pela extra e a ação do usuário pela principal: os dois caminhos de envio passam aqui.
+        let mut sends = std::pin::pin!(async {
+            c.get_json(Endpoint::History, "/read", &[]).await.unwrap();
+            c.get_json(Endpoint::Session, "/account", &[])
+                .await
+                .unwrap();
+            c.legacy_json_public_alt("/alt", &[])
+                .await
+                .unwrap()
+                .unwrap();
+        });
+        // Cada retomada das consultas é contada aqui: liberação e entrega com o mesmo número não tiveram suspensão
+        // entre elas, seja qual for a ordem em que o executor roda as tarefas.
+        std::future::poll_fn(|cx| {
+            c.inner.lock().unwrap().probe.poll += 1;
+            sends.as_mut().poll(cx)
+        })
+        .await;
+        let g = c.inner.lock().unwrap();
+        assert_eq!((g.calls[0].ok, g.calls[1].ok), (1, 2));
+        assert_eq!(g.probe.sent_poll.len(), 3);
+        assert!(g.probe.sent_poll.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(g.probe.sent_poll, g.probe.handed_poll);
     }
 
     #[tokio::test]
