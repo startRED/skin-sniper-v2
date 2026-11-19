@@ -210,6 +210,20 @@ consecutivos da mesma skin e faixa de seed, a tentativa 2 foi boa em 19 pares e 
 prova:** a consulta filtrada dessas skins custa à Steam quase o limite de ~9,6 s dela, que ora recusa na hora, ora
 corta no limite. **Segue não medido:** se o filtro de desgaste alivia e o que decide a recusa na hora.
 
+**Medido em 19/11/2026, de 16/11 15:00 até antes de 19/11 15:00 UTC.** Os quatro achados registrados
+vieram da varredura dos anúncios mais baratos, com 4.378 respostas `ok` pela interface antiga. A busca
+por faixa teve 5.459 respostas `ok` e nenhum achado atribuído aos turnos normais ou de exploração interna.
+Das 1.084 decisões de faixa com uma segunda tentativa concluída após erro, 621 voltaram `ok`.
+No Desert Eagle | Heat Treated foram 145 de 398. A repetição recupera respostas, mas nenhuma virou
+achado nesse recorte. As duas buscas cobrem páginas e alvos diferentes. Quatro achados são uma amostra
+pequena para escolher quanto tempo transferir de uma busca para a outra.
+
+Recorte reproduzível: contar `research_attempts` por origem, endpoint e resultado usando a hora do
+envio. O recorte de faixa é `listings` com origem `normal` ou `exploracao_interna`; o da varredura é
+`legacy` com origem `varredura_piso`. Para as repetições, usar a hora da decisão em `research_decisions`,
+ordenar os envios pelo id dentro de cada decisão e tirar `started` e `not_sent`. Atribuir os achados
+por `research_finds.decision_id`. O banco em uso foi aberto só para leitura.
+
 ### 1.4 Moeda
 
 - `eCurrency: 7` = BRL. As listagens do fixture real vêm em `eCurrency:7` com `strSubtotal "R$202.80"`.
