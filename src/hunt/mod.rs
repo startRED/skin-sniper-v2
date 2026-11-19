@@ -71,6 +71,7 @@ pub(crate) struct Shared {
     /// Saldo e hora da última seleção (para re-selecionar quando muda > 20 % ou passa 24 h).
     pub selected: Option<(i64, i64)>,
     pub active: HashMap<String, Active>,
+    pub(super) bets: HashMap<String, Active>,
     pub combo: Combo,
     pub message: Option<String>,
     /// Vendas do CSFloat por nome: (quando buscou, vendas). Cache de 6 h.
@@ -187,6 +188,7 @@ impl Hunt {
                 ratio: None,
                 selected: None,
                 active: HashMap::new(),
+                bets: HashMap::new(),
                 combo: Combo {
                     ids: vec![],
                     cost_cents: 0,

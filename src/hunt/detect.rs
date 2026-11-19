@@ -26,6 +26,8 @@ const STALE_HISTORY_MAX: i64 = DAY;
 const EMPTY_PAGES_TO_TRUST: u8 = 2;
 /// Balanço do que foi conferido a cada 10 min, para o painel e o log.
 const CYCLE_SECS: i64 = 600;
+// A releitura de uma faixa pode levar horas. O painel mostra o tempo desde a conferência.
+const BET_KEEP_SECS: i64 = 3 * 3600;
 const NEAR_KEEP: usize = 3;
 /// shortcut: o mapa de avaliados só esvazia quando enche; subir se a reavaliação em massa pesar.
 const EVALUATED_MAX: usize = 50_000;
@@ -339,35 +341,68 @@ async fn stored_points(h: &Hunt, name: &str, now: i64) -> Result<Vec<PricePoint>
     .await
 }
 
-/// Com menos vendas do grupo no mesmo nome que isto, valem as do grupo em todos os desgastes.
+/// Com menos vendas no mesmo nome, também usa os desgastes piores comparáveis.
 const NEAR_SALES: usize = 8;
 
-/// Múltiplos de um grupo raro entre as vendas guardadas `(nome, float, múltiplo, grupo)`: as do grupo no mesmo
-/// nome; com menos de `NEAR_SALES`, as do grupo em todos os desgastes. Só é usado para skin ainda sem medida
-/// (`patterns`): o seed que paga traz a própria prova.
-fn rare_multiples(
-    rows: &[(String, Option<f64>, f64, Option<String>)],
+type CsfloatSample = (String, Option<u16>, f64, Option<String>);
+
+fn market_variant(name: &str) -> &str {
+    name.rsplit_once(" (").map_or(name, |(variant, _)| variant)
+}
+
+fn comparable_sales<'a>(
+    rows: &'a [CsfloatSample],
     name: &str,
     group_key: &str,
+    seed: Option<u16>,
+) -> impl Iterator<Item = &'a CsfloatSample> {
+    let variant = market_variant(name).to_owned();
+    let wear = wear_index(name);
+    let group_key = group_key.to_owned();
+    let proves = proves(name, seed);
+    rows.iter().filter(move |(n, s, multiple, grp)| {
+        grp.as_deref() == Some(group_key.as_str())
+            && market_variant(n) == variant
+            && wear_index(n) >= wear
+            && proves(*s)
+            && *multiple > 0.0
+            && *multiple <= sell::MAX_RARE_MULTIPLE
+    })
+}
+
+/// Múltiplos do grupo no mesmo nome; com poucas vendas, inclui os desgastes piores da mesma variante.
+/// Só é usado para skin ainda sem medida
+/// (`patterns`): o seed que paga traz a própria prova.
+fn rare_multiples(
+    rows: &[CsfloatSample],
+    name: &str,
+    group_key: &str,
+    seed: Option<u16>,
 ) -> Vec<f64> {
-    let of_group = |same_name: bool| -> Vec<f64> {
-        rows.iter()
-            .filter(|r| r.3.as_deref() == Some(group_key) && (!same_name || r.0 == name))
-            .map(|r| r.2)
-            .collect()
-    };
-    let same = of_group(true);
+    let comparable = comparable_sales(rows, name, group_key, seed);
+    let (same, worse): (Vec<_>, Vec<_>) = comparable.partition(|r| r.0 == name);
     if same.len() >= NEAR_SALES {
-        same
+        same.into_iter().map(|r| r.2).collect()
     } else {
-        of_group(false)
+        same.into_iter().chain(worse).map(|r| r.2).collect()
     }
+}
+
+fn csfloat_group(c: &rusqlite::Connection, key: &str) -> rusqlite::Result<Vec<CsfloatSample>> {
+    c.prepare("SELECT name, seed, multiple, grp FROM csfloat_sales WHERE grp = ?1")?
+        .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect()
 }
 
 /// Múltiplos `price / base_price` das vendas do CSFloat do mesmo grupo: todas as guardadas (`csfloat_sales`),
 /// depois de garantir que a leitura do nome tem menos de 6 h. Só com a última leitura (40 vendas do nome) o grupo
 /// tinha 5 vendas onde o banco guardava 39, e um Center Star a 1,2× o preço comum foi recusado (10/11/2026).
-async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvidence> {
+async fn rare_evidence(
+    h: &Hunt,
+    name: &str,
+    group_key: &str,
+    seed: Option<u16>,
+) -> Result<RareEvidence> {
     let now = h.now();
     let fresh = h
         .lock()
@@ -391,16 +426,10 @@ async fn rare_evidence(h: &Hunt, name: &str, group_key: &str) -> Result<RareEvid
         };
         h.lock().csfloat_cache.insert(name.to_string(), (at, v));
     }
-    let (n, key) = (name.to_string(), group_key.to_string());
-    let rows: Vec<(String, Option<f64>, f64, Option<String>)> =
-        h.db.call(move |c| {
-            c.prepare("SELECT name, \"float\", multiple, grp FROM csfloat_sales WHERE name = ?1 OR grp = ?2")?
-                .query_map([n, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect()
-        })
-        .await?;
+    let key = group_key.to_string();
+    let rows = h.db.call(move |c| csfloat_group(c, &key)).await?;
     Ok(RareEvidence {
-        multiples: rare_multiples(&rows, name, group_key),
+        multiples: rare_multiples(&rows, name, group_key, seed),
         borrowed: false,
     })
 }
@@ -463,11 +492,10 @@ async fn better_wear_ask(h: &Hunt, name: &str, group_key: &str, now: i64) -> Res
         })
         .await?;
     // mesmo item = mesmo nome sem o desgaste (StatTrak e Souvenir não se misturam com o normal)
-    let item = |n: &str| n.rsplit_once(" (").map(|(i, _)| i.to_string());
-    let (mine, wear) = (item(&name), wear_index(&name));
+    let (mine, wear) = (market_variant(&name), wear_index(&name));
     Ok(asks
         .into_iter()
-        .filter(|(n, _)| item(n) == mine && wear_index(n) < wear)
+        .filter(|(n, _)| market_variant(n) == mine && wear_index(n) < wear)
         .map(|(_, p)| p)
         .min())
 }
@@ -506,6 +534,7 @@ fn steam_url(code: &str, l: &Listing) -> String {
 struct Judged {
     /// Virou (ou segue) oportunidade; o bool é o `notify` da avaliação.
     found: Option<(Opportunity, bool)>,
+    bet: Option<Opportunity>,
     near: Option<Near>,
     /// Motivo da recusa quando não virou oportunidade.
     refused: Option<&'static str>,
@@ -619,17 +648,15 @@ fn why(
     let label = &g.label;
     match g.key.split(':').next().unwrap_or("") {
         "cs" => format!(
-            "Pattern de tabela ({label}): o seed {seed} põe a estampa numa posição das mais procuradas desta skin, e colecionador paga mais por ela."
+            "Pattern de tabela ({label}): o seed {seed} muda a posição da estampa. O preço depende das vendas comparáveis."
         ),
         "bluegem" => format!(
-            "{label}: o seed {seed} deixa a arma com bastante azul (Case Hardened), o que colecionador paga mais."
+            "{label}: o seed {seed} deixa a arma com bastante azul. O preço depende das vendas comparáveis."
         ),
         "fade" if label.ends_with("99%+") => format!(
             "{label}: o seed {seed} dá um degradê quase completo, a versão mais procurada do Fade."
         ),
-        "fade" => format!(
-            "{label}: o seed {seed} tem esse % de degradê; as vendas do CSFloat de fades iguais ou melhores saíram acima do preço comum, mas não é Full Fade."
-        ),
+        "fade" => format!("{label}: o seed {seed} determina esse percentual do degradê."),
         "phase" => format!(
             "Fase {label}: a cor desta faca/arma Doppler ou Gamma é mais rara que as fases comuns."
         ),
@@ -661,15 +688,19 @@ async fn seal_for(
     let r = h
         .db
         .call(move |c| {
-            let mut sales: Vec<(Option<u16>, f64)> = c
-                .prepare("SELECT seed, multiple FROM csfloat_sales WHERE grp = ?1")?
-                .query_map([&grp], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
+            let rows = csfloat_group(c, &grp)?;
+            let mut sales: Vec<_> = comparable_sales(&rows, &name, &grp, seed)
+                .map(|r| (r.1, r.2))
+                .collect();
+            let mut disappeared = 0;
             if let Some(b) = base_cents.filter(|&b| b > 0) {
-                let gone = vanished(c, &grp, &name)?;
-                sales.extend(gone.into_iter().map(|(s, p)| (s, p as f64 / b as f64)));
+                for (s, p) in vanished(c, &grp, &name)? {
+                    if proves(s) {
+                        sales.push((s, p as f64 / b as f64));
+                        disappeared += 1;
+                    }
+                }
             }
-            sales.retain(|(s, _)| proves(*s));
             // ainda visto nas últimas 6 h: o registro não marca sumiço de consulta que deixou de rodar
             let parked: u32 = c.query_row(
                 "SELECT count(*) FROM observations WHERE grp = ?1 AND gone_at IS NULL AND first_seen <= ?2
@@ -677,19 +708,24 @@ async fn seal_for(
                 params![grp, now - FAST, now - 6 * 3600],
                 |r| r.get(0),
             )?;
-            Ok((sales, parked))
+            Ok((sales, parked, disappeared))
         })
         .await;
-    let (sales, parked) = r.unwrap_or_else(|e| {
+    let (sales, parked, disappeared) = r.unwrap_or_else(|e| {
         tracing::warn!("selo do raro sem vendas fechadas: {e:#}");
-        (vec![], 0)
+        (vec![], 0, 0)
     });
-    premium::seal(
+    let mut seal = premium::seal(
         price_cents,
         base_cents,
         &premium::premium(seed, &sales),
         parked,
-    )
+    );
+    if disappeared > 0 {
+        seal.text = seal.text.replace("vendas fechadas", "comparáveis");
+        seal.text += " · inclui anúncios que sumiram na Steam, com venda incerta";
+    }
+    seal
 }
 
 /// Uma remoção de chaveiro: pacote de 3 por US$ 0,99 na loja do jogo (fonte de terceiros, 11/2026).
@@ -795,7 +831,7 @@ async fn appraise(
             multiples,
             borrowed,
         }),
-        (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key).await?),
+        (Some(g), _) => Some(rare_evidence(h, &l.name, &g.key, l.seed).await?),
         (None, _) => None,
     };
     // Vende-se na Steam: com fechamentos suficientes lá, o prêmio é o que a Steam pagou, não o do CSFloat.
@@ -820,8 +856,7 @@ async fn appraise(
             );
         }
         if on_steam {
-            est.evidence +=
-                " · prêmio medido na Steam: anúncios do grupo que sumiram em até 48 h sem voltar";
+            est.evidence += " · prêmio medido na Steam por anúncios que sumiram em até 48 h · venda não confirmada";
         }
     }
     Ok(Appraisal {
@@ -896,6 +931,7 @@ async fn evaluate_one(
         Err(e) => {
             return Ok(Judged {
                 found: None,
+                bet: None,
                 near: None,
                 refused: Some(no_estimate_reason(&e)),
                 detail: Some(format!("{e:?}")),
@@ -952,7 +988,7 @@ async fn evaluate_one(
     // Com chaveiro o professor não aprende: o lucro não vem só da venda da arma.
     let ghost_worthy =
         charm.is_none() && super::teacher::ghost_worthy(l.price_cents, ev.sell.mid.profit_cents);
-    let ghost = ghost_worthy.then(|| super::teacher::Ghost {
+    let mut ghost = ghost_worthy.then(|| super::teacher::Ghost {
         listing_id: l.listing_id.clone(),
         name: l.name.clone(),
         grp: group.as_ref().map(|g| g.key.clone()),
@@ -962,9 +998,13 @@ async fn evaluate_one(
         base_cents,
         approved: ev.listable,
     });
-    if !ev.listable {
+    let possible_bet = ev.sell.mid.profit_cents >= sell::MIN_LIST_PROFIT_CENTS
+        && ev.margin_pct >= sell::MIN_LIST_MARGIN_PCT
+        && hist_age < HISTORY_TTL;
+    if !ev.listable && !possible_bet {
         return Ok(Judged {
             found: None,
+            bet: None,
             near,
             refused: Some("sem_lucro"),
             detail: Some(est.evidence),
@@ -980,16 +1020,28 @@ async fn evaluate_one(
     // Raro sem nenhuma venda fechada que prove o prêmio só é oportunidade se, vendido como comum, perde no máximo
     // centavos (11/11: Serpent Strike #804 a R$ 3,56 com prêmio de 3 vendas no CSFloat, 0 fechadas, −R$ 0,91 no rápido;
     // 13/11: MAC-10 Snow Splash #309 a R$ 0,34, 20–56× no CSFloat, recusado por −R$ 0,18).
-    if seal.as_ref().is_some_and(|s| !s.proven && s.sales == 0)
-        && unproven_loses_too_much(ev.sell.quick.profit_cents)
-    {
-        return Ok(Judged {
-            found: None,
-            near,
-            refused: Some("raro_nao_comprovado"),
-            detail: Some(est.evidence),
-            ghost,
-        });
+    let unproven = seal.as_ref().is_some_and(|s| !s.proven && s.sales == 0)
+        && unproven_loses_too_much(ev.sell.quick.profit_cents);
+    let refused = if !ev.listable {
+        Some("sem_lucro")
+    } else if unproven {
+        Some("raro_nao_comprovado")
+    } else {
+        None
+    };
+    if let Some(g) = &mut ghost {
+        g.approved = refused.is_none();
+    }
+    if refused.is_some() && possible_bet {
+        if let Some(p) = ev.ev_profit_cents.filter(|p| *p < 0) {
+            est.evidence += &format!(
+                " · considerando a oscilação, a conta fica em {}",
+                profit_text(p)
+            );
+        }
+        if unproven {
+            est.evidence += " · ainda faltam comparáveis que sustentem o prêmio do pattern";
+        }
     }
     let opp = Opportunity {
         id: l.listing_id.clone(),
@@ -1028,13 +1080,41 @@ async fn evaluate_one(
         seal,
     };
     let detail = Some(opp.evidence.clone());
+    let (found, bet) = if refused.is_none() {
+        (Some((opp, ev.notify)), None)
+    } else {
+        (None, possible_bet.then_some(opp))
+    };
     Ok(Judged {
-        found: Some((opp, ev.notify)),
+        found,
+        bet,
         near,
-        refused: None,
+        refused,
         detail,
         ghost,
     })
+}
+
+/// Apostas de leituras já feitas. A consulta do painel não muda a agenda.
+pub(crate) fn bets(h: &Hunt) -> Vec<Opportunity> {
+    let now = h.now();
+    let s = h.lock();
+    let mut offers: Vec<_> = s
+        .bets
+        .values()
+        .map(|a| &a.opp)
+        .filter(|o| {
+            o.price_cents <= s.saldo && now - o.checked_at.unwrap_or(o.seen_at) < BET_KEEP_SECS
+        })
+        .collect();
+    offers.sort_unstable_by_key(|o| {
+        (
+            std::cmp::Reverse(o.sell.mid.profit_cents),
+            std::cmp::Reverse(o.sell.quick.profit_cents),
+            &o.id,
+        )
+    });
+    offers.into_iter().take(20).cloned().collect()
 }
 
 // Guarda todos os IDs distintos por preço: uma página de piso pode invalidar os mais baratos.
@@ -1070,6 +1150,16 @@ pub(super) async fn process_page(
     let floor = relevant.iter().map(|l| l.price_cents).min();
     {
         let mut s = h.lock();
+        let expired: Vec<_> = s
+            .bets
+            .iter()
+            .filter(|(_, a)| now - a.opp.checked_at.unwrap_or(a.opp.seen_at) >= BET_KEEP_SECS)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            s.bets.remove(&id);
+            s.evaluated.remove(&id);
+        }
         let previous = s.floors.insert(state_key.clone(), (floor, now));
         if floor_name.is_none()
             && floor.is_some_and(|p| p > saldo)
@@ -1166,29 +1256,40 @@ pub(super) async fn process_page(
             .map(|l| l.price_cents)
             .max()
             .unwrap_or(0);
-        let missing: Vec<String> = h
-            .lock()
-            .active
-            .values()
-            .filter(|a| a.task == task.id && !present.contains(a.opp.id.as_str()))
-            // raro em rodízio: a página só cobre a faixa de seed consultada
-            .filter(|a| {
-                if let Some(name) = floor_name {
-                    return a.opp.name == name;
-                }
-                task.seeds.first().is_none_or(|&(lo, hi)| {
-                    a.opp
-                        .seed
-                        .is_some_and(|s| (i64::from(lo)..=i64::from(hi)).contains(&s))
+        let missing = {
+            let mut s = h.lock();
+            let mut missing: Vec<String> = s
+                .active
+                .values()
+                .chain(s.bets.values())
+                .filter(|a| a.task == task.id && !present.contains(a.opp.id.as_str()))
+                // raro em rodízio: a página só cobre a faixa de seed consultada
+                .filter(|a| {
+                    if let Some(name) = floor_name {
+                        return a.opp.name == name;
+                    }
+                    task.seeds.first().is_none_or(|&(lo, hi)| {
+                        a.opp
+                            .seed
+                            .is_some_and(|s| (i64::from(lo)..=i64::from(hi)).contains(&s))
+                    })
                 })
-            })
-            .filter(|a| {
-                !page.more
-                    || a.opp.price_cents < page_max
-                    || (floor_name.is_none() && a.opp.price_cents == page_max)
-            })
-            .map(|a| a.opp.id.clone())
-            .collect();
+                .filter(|a| {
+                    !page.more
+                        || a.opp.price_cents < page_max
+                        || (floor_name.is_none() && a.opp.price_cents == page_max)
+                })
+                .map(|a| a.opp.id.clone())
+                .collect();
+            missing.retain(|id| {
+                if s.bets.remove(id).is_some() {
+                    s.evaluated.remove(id);
+                    return false;
+                }
+                true
+            });
+            missing
+        };
         out.gone = mark_gone(h, missing, GoneReason::Unavailable).await?;
     }
 
@@ -1251,8 +1352,15 @@ pub(super) async fn process_page(
             )
             .min();
         if l.price_cents > saldo && active.is_none() {
-            // Guarda uma vez por ciclo: o mesmo anúncio volta em toda consulta da tarefa.
-            if h.lock().cycle.over_saldo.insert(l.listing_id.clone()) {
+            let first_over_saldo = {
+                let mut s = h.lock();
+                if s.bets.remove(&l.listing_id).is_some() {
+                    s.evaluated.remove(&l.listing_id);
+                }
+                // Guarda uma vez por ciclo: o mesmo anúncio volta em toda consulta da tarefa.
+                s.cycle.over_saldo.insert(l.listing_id.clone())
+            };
+            if first_over_saldo {
                 let row = over_saldo(h, task, l, others_min, notify_min, saldo).await;
                 if floor_name.is_none() || mine.is_some() || row.reason != "acima_do_saldo" {
                     audit.push(row);
@@ -1270,8 +1378,12 @@ pub(super) async fn process_page(
         let hist = history_at(h, &l.name).await?;
         if was_known {
             let last = h.lock().evaluated.get(&l.listing_id).copied();
-            let aged = active.is_some() && hist.is_none_or(|t| now - t >= HISTORY_TTL);
+            let tracked = active.is_some() || h.lock().bets.contains_key(&l.listing_id);
+            let aged = tracked && hist.is_none_or(|t| now - t >= HISTORY_TTL);
             if last == Some((l.price_cents, hist.unwrap_or(0), others_min)) && !aged {
+                if let Some(bet) = h.lock().bets.get_mut(&l.listing_id) {
+                    bet.opp.checked_at = Some(now);
+                }
                 if let Some(mut opp) = active {
                     let changed = opp.checked_at != Some(now);
                     opp.checked_at = Some(now);
@@ -1286,6 +1398,7 @@ pub(super) async fn process_page(
                 continue;
             }
         }
+        let previous_bet = h.lock().bets.remove(&l.listing_id);
         let mut judged = match evaluate_one(h, task, l, others_min, notify_min).await {
             Ok(j) => j,
             Err(e) => {
@@ -1335,6 +1448,19 @@ pub(super) async fn process_page(
             }
             s.evaluated
                 .insert(l.listing_id.clone(), (l.price_cents, hist_now, others_min));
+            if let Some(mut opp) = judged.bet.take().filter(|o| o.price_cents <= s.saldo) {
+                if let Some(previous) = previous_bet {
+                    opp.seen_at = previous.opp.seen_at;
+                }
+                s.bets.insert(
+                    l.listing_id.clone(),
+                    Active {
+                        opp,
+                        task: task.id.clone(),
+                        attempted_at: now,
+                    },
+                );
+            }
             if let Some(why) = judged.refused {
                 s.cycle.refuse(why);
             }
@@ -1850,25 +1976,42 @@ mod tests {
     }
 
     #[test]
-    fn rare_premium_uses_the_whole_group_when_the_name_has_few_sales() {
-        let row = |name: &str, float: f64, multiple: f64, grp: Option<&str>| {
+    fn rare_premium_uses_comparable_worse_wear_when_the_name_has_few_sales() {
+        let row = |name: &str, multiple: f64, grp: Option<&str>| {
             (
                 name.to_string(),
-                Some(float),
+                Some(59),
                 multiple,
                 grp.map(str::to_string),
             )
         };
-        let (ft, mw) = ("Skin (Field-Tested)", "Skin (Minimal Wear)");
-        // venda sem grupo (float baixo ou não) não entra em prêmio nenhum
-        let mut rows = vec![row(ft, 0.15, 3.0, None), row(mw, 0.07, 9.0, None)];
-        assert!(rare_multiples(&rows, ft, "float:Skin:Field-Tested").is_empty());
-        // tabela: 2 vendas no nome são poucas, valem as 3 do grupo em todos os desgastes
-        rows.push(row(ft, 0.3, 1.5, Some("cs:Skin:t1")));
-        rows.push(row(ft, 0.3, 1.7, Some("cs:Skin:t1")));
-        rows.push(row(mw, 0.1, 2.0, Some("cs:Skin:t1")));
-        rows.push(row(mw, 0.1, 5.0, Some("cs:Skin:t2")));
-        assert_eq!(rare_multiples(&rows, ft, "cs:Skin:t1"), vec![1.5, 1.7, 2.0]);
+        let (ft, ww) = ("Skin (Field-Tested)", "Skin (Well-Worn)");
+        let rows = [
+            row(ft, 3.0, None),
+            row(ft, 1.5, Some("cs:Skin:t1")),
+            row(ft, 1.7, Some("cs:Skin:t1")),
+            row(ww, 2.0, Some("cs:Skin:t1")),
+            row(ww, 5.0, Some("cs:Skin:t2")),
+        ];
+        assert!(rare_multiples(&rows, ft, "cs:Skin:t3", None).is_empty());
+        assert_eq!(
+            rare_multiples(&rows, ft, "cs:Skin:t1", None),
+            vec![1.5, 1.7, 2.0]
+        );
+    }
+
+    #[test]
+    fn pattern_sales_from_another_variant_or_better_wear_do_not_prove_the_price() {
+        let group = "cs:Glock-18 | Moonrise:t1";
+        let name = "Glock-18 | Moonrise (Field-Tested)";
+        let row = |name: &str, multiple| (name.to_string(), None, multiple, Some(group.into()));
+        let rows = [
+            row(name, 1.5),
+            row("Glock-18 | Moonrise (Well-Worn)", 1.7),
+            row("Glock-18 | Moonrise (Minimal Wear)", 12.0),
+            row("StatTrak™ Glock-18 | Moonrise (Field-Tested)", 20.0),
+        ];
+        assert_eq!(rare_multiples(&rows, name, group, None), vec![1.5, 1.7]);
     }
 
     #[test]

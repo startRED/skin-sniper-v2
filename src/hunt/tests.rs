@@ -1616,6 +1616,65 @@ async fn rare_losing_cents_that_loses_reais_as_common_is_not_a_virtual_candidate
 }
 
 #[tokio::test]
+async fn estimated_profit_with_negative_risk_adjustment_is_only_a_bet() {
+    let (base, _) = serve().await;
+    let (db, _dir) = temp_db();
+    let (h, mut rx) = hunt_against(&base, db.clone());
+    h.set_saldo(3608, SaldoSource::Manual);
+    let original = run_until_two(&h, &mut rx)
+        .await
+        .into_iter()
+        .find(|o| o.id == ID_T1)
+        .unwrap();
+    let task = h
+        .lock()
+        .queue
+        .tasks()
+        .into_iter()
+        .find(|t| t.id == format!("d:{MOON}"))
+        .unwrap();
+    let mut page = crate::steam::listings::parse_page(&listings_body()["data"], 0).unwrap();
+    let candidate = page
+        .listings
+        .iter_mut()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap();
+    candidate.price_cents = original.sell.mid.net_cents * 10 / 11;
+
+    let outcome = detect::process(&h, &task, &page).await.unwrap();
+    assert!(outcome.found.iter().all(|(o, _)| o.id != ID_T1));
+    assert_eq!(outcome.rewarded.finds, 0);
+    assert!(!h.state().combo.ids.iter().any(|id| id == ID_T1));
+    let bets = detect::bets(&h);
+    let bet = bets.iter().find(|o| o.id == ID_T1).unwrap();
+    assert!(bet.sell.mid.profit_cents >= 100 && bet.sell.quick.profit_cents < 0);
+    assert!(bet.ev_profit_cents.is_some_and(|p| p < 0));
+
+    h.set_saldo(bet.price_cents - 1, SaldoSource::Manual);
+    assert!(detect::bets(&h).iter().all(|o| o.id != ID_T1));
+    h.set_saldo(3608, SaldoSource::Manual);
+    h.lock().bets.get_mut(ID_T1).unwrap().opp.checked_at = Some(NOW - 3 * 3600);
+    assert!(detect::bets(&h).iter().all(|o| o.id != ID_T1));
+    h.lock().bets.get_mut(ID_T1).unwrap().opp.checked_at = Some(NOW);
+
+    let mut missing = page.clone();
+    missing.listings.retain(|l| l.listing_id != ID_T1);
+    missing.more = false;
+    detect::process(&h, &task, &missing).await.unwrap();
+    assert!(detect::bets(&h).iter().all(|o| o.id != ID_T1));
+    detect::process(&h, &task, &page).await.unwrap();
+    assert!(detect::bets(&h).iter().any(|o| o.id == ID_T1));
+    page.listings
+        .iter_mut()
+        .find(|l| l.listing_id == ID_T1)
+        .unwrap()
+        .price_cents = original.price_cents;
+    let out = detect::process(&h, &task, &page).await.unwrap();
+    assert!(out.found.iter().any(|(o, _)| o.id == ID_T1));
+    assert!(detect::bets(&h).iter().all(|o| o.id != ID_T1));
+}
+
+#[tokio::test]
 async fn cheaper_competitor_reevaluates_known_opportunity() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();

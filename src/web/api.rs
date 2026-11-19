@@ -421,6 +421,14 @@ pub async fn opportunity_history(
     Ok(Json(rt.history(&id).await?))
 }
 
+pub async fn list_bets(AxState(app): AxState<AppState>) -> Json<Vec<Opportunity>> {
+    Json(
+        app.rt
+            .as_ref()
+            .map_or_else(Vec::new, |rt| crate::hunt::detect::bets(&rt.hunt)),
+    )
+}
+
 pub async fn watch(AxState(app): AxState<AppState>) -> ApiResult<Vec<WatchRow>> {
     let Some(rt) = &app.rt else {
         return Err(ApiError::not_wired("vigilância"));

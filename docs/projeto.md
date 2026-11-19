@@ -66,6 +66,7 @@ Valores de dinheiro sempre em **centavos BRL inteiros**. Datas em segundos Unix.
 GET  /api/state            -> State
 PUT  /api/saldo            {cents: int}            -> State      (saldo manual; null apaga)
 GET  /api/opportunities    -> Opportunity[]         (ativas e todas as perdidas nas últimas 24 h, com gone_at; o frontend ordena)
+GET  /api/bets             -> Opportunity[]         (apostas recentes dentro do saldo, até 20, sem consulta nova)
 GET  /api/opportunities/:id/history -> {points: [[ts, median_cents, purchases]], sell: Sell}
 POST /api/buy              -> 410 (compra só na Steam; nada sai pela rede)
 GET|POST /api/steam/login/* -> 410 (sem login)
@@ -748,7 +749,8 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
     luvas ficam fora; a tabela `learned_sales` fica no banco, sem uso.
 - Raro: o grupo do anúncio (tier, fase, faixa de fade, float de elite) busca vendas do CSFloat do mesmo grupo
   (`price / reference.base_price`) entre todas as guardadas (`csfloat_sales`), não só as da última leitura do
-  nome: as do grupo no mesmo nome ou, com menos de 8, as do grupo em todos os desgastes. Em 10/11 um Moonrise FT
+  nome: as do grupo no mesmo nome ou, com menos de 8, também as da mesma variante em desgaste pior. O
+  fallback e o selo excluem vendas de seeds com nota melhor, quando há nota por seed. Em 10/11 um Moonrise FT
   Center Star a R$ 7,20 (1,2× o comum) foi recusado com "5 vendas, 1,4x a 1,6x" quando o banco guardava 39 vendas
   do grupo (mediana 1,78×). Com n ≥ 3: `mid` e `high` da base × Q50/Q75 do múltiplo; `quick` fica sem
   prêmio (× min(1, Q25)), porque o prêmio do CSFloat já saiu abaixo na Steam (`conhecimento.md` 5.6). Com n < 3:
@@ -843,6 +845,11 @@ Esta versão prepara coleta/comparação; não comprova mais lucro. Seed/float i
   alto), prazo, risco (selo + confiança), apareceu (+ última conferência) e "Abrir na Steam". "Por dia" é o
   lucro esperado com risco ÷ prazo total e não muda com o seletor. Ordem padrão por lucro por dia; ordenar
   pelo cabeçalho. Linha nova entra com destaque breve; linha vendida vai para "Perdidas nas últimas 24 h".
+- Apostas mais arriscadas (opcional em Oportunidades): anúncios dentro do saldo, conferidos nas últimas
+  3 horas, com histórico fresco e cenário médio de pelo menos R$ 1 e 10 % de lucro. Após 10 min sem reconferir
+  o painel indica que o anúncio pode ter saído. A lista aberta se atualiza a cada 15 s. Entram quando a
+  avaliação regular recusou pelo risco ou pela falta de prova do prêmio, com os três preços e resultados após taxas
+  e a evidência disponível. A lista usa as leituras normais, vive em memória e fica fora de avisos, agenda e combo.
 - Linha expandida (clique em qualquer ponto da linha): gráfico de 30 dias com as três linhas de preço, frase
   de evidência, tabela dos três cenários e "inspecionar no jogo". Explicações longas ficam na dica do
   cabeçalho (passar o mouse), não em parágrafos na tela.
