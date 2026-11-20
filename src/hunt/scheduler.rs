@@ -62,6 +62,11 @@ const FLOOR_MIN_REVISIT_SECS: i64 = 180;
 // shortcut: 5 min e 1 h são hipótese; conferir por `research_attempts` com `outcome='error'` por alvo.
 const FAIL_REST_SECS: i64 = 300;
 const FAIL_REST_MAX_SECS: i64 = 3600;
+const SEED_CODE_FIRST_REST_SECS: i64 = 60;
+
+fn failure_rest(n: u32) -> i64 {
+    (FAIL_REST_SECS << (n - 1).min(8)).min(FAIL_REST_MAX_SECS)
+}
 
 /// Intervalo de conferência do achado: 60 s enquanto é novo, depois um décimo da idade, até 30 min. Em 10/11 um
 /// achado parado há 5 h gastava 40 leituras de anúncios por hora (20 % do balde) só para dizer que seguia lá.
@@ -320,6 +325,7 @@ pub struct Queue {
     query_revisions: HashMap<String, u64>,
     /// Alvos em descanso por `data` nula: falhas seguidas e até quando (`FAIL_REST_SECS`).
     failing: HashMap<String, (u32, i64)>,
+    range_failing: HashMap<String, (u32, i64)>,
 }
 
 impl Queue {
@@ -366,12 +372,32 @@ impl Queue {
         self.ranges = ranges;
     }
 
+    fn range_available(&self, id: &str, range: (u16, u16), now: i64) -> bool {
+        self.range_failing.is_empty()
+            || self
+                .range_failing
+                .get(&range_key(id, range))
+                .is_none_or(|&(_, until)| now >= until)
+    }
+
+    fn available(&self, task: &Task, now: i64) -> bool {
+        self.failing
+            .get(&task.id)
+            .is_none_or(|&(_, until)| now >= until)
+            && (task.seeds.is_empty()
+                || task
+                    .seeds
+                    .iter()
+                    .any(|&r| self.range_available(&task.id, r, now)))
+    }
+
     /// Índice marginal: peso * lucro * W * (1 - exp(-x) - x exp(-x)), x = gap/W.
     /// Exposição do aprendizado continua sendo o estoque acumulado, sem a parcela marginal.
     fn best_range(&self, task: &Task, now: i64) -> Option<(usize, f64)> {
         task.seeds
             .iter()
             .enumerate()
+            .filter(|&(_, &r)| self.range_available(&task.id, r, now))
             .map(|(i, &r)| {
                 let range = range_info(&self.ranges, task, i);
                 let gap = self
@@ -523,8 +549,12 @@ impl Queue {
 
     /// Há alvo de seed: a vaga da leitura de anúncios vai para eles, e entre eles decide a agenda (valor da
     /// leitura da melhor faixa de cada um).
-    pub fn has_rare(&self) -> bool {
-        self.entries.values().any(|e| e.task.rare())
+    pub fn has_rare(&self, now: i64) -> bool {
+        self.entries.values().any(|e| {
+            e.task.rare()
+                && self.external.as_ref() != Some(&e.task.id)
+                && self.available(&e.task, now)
+        })
     }
 
     /// Prioridade da leitura: retorno marginal para raro; centavos esperados nos demais. Nunca visto vale infinito.
@@ -559,16 +589,10 @@ impl Queue {
         self.focused_snapshots.clear();
         self.shared.clear();
         let external_id = self.external.clone();
-        let failing: HashSet<&str> = self
-            .failing
-            .iter()
-            .filter(|(_, (_, until))| now < *until)
-            .map(|(id, _)| id.as_str())
-            .collect();
-        let eligible = |t: &Task| {
-            keep(t) && external_id.as_ref() != Some(&t.id) && !failing.contains(t.id.as_str())
+        let eligible = |q: &Queue, t: &Task| {
+            keep(t) && external_id.as_ref() != Some(&t.id) && q.available(t, now)
         };
-        if !self.entries.values().any(|e| eligible(&e.task)) {
+        if !self.entries.values().any(|e| eligible(self, &e.task)) {
             return None;
         }
         let half_life = self.params.half_life;
@@ -598,7 +622,7 @@ impl Queue {
             let mut modes: Vec<Mode> = self
                 .entries
                 .values()
-                .filter(|e| eligible(&e.task))
+                .filter(|e| eligible(self, &e.task))
                 .map(|e| e.task.mode())
                 .collect();
             modes.sort();
@@ -618,17 +642,22 @@ impl Queue {
             let of_mode = || {
                 self.entries
                     .values()
-                    .filter(|e| eligible(&e.task) && e.task.mode() == mode)
+                    .filter(|e| eligible(self, &e.task) && e.task.mode() == mode)
             };
-            let range_seen = &self.range_seen;
+            let q = &*self;
             let oldest = (external.is_none() && mode == Mode::Seed)
                 .then(|| {
                     of_mode()
                         .flat_map(|e| {
-                            e.task.seeds.iter().enumerate().map(move |(i, &r)| {
-                                let key = range_key(&e.task.id, r);
-                                (range_seen.get(&key).copied().unwrap_or(0), e, i)
-                            })
+                            e.task
+                                .seeds
+                                .iter()
+                                .enumerate()
+                                .filter(move |&(_, &r)| q.range_available(&e.task.id, r, now))
+                                .map(move |(i, &r)| {
+                                    let key = range_key(&e.task.id, r);
+                                    (q.range_seen.get(&key).copied().unwrap_or(0), e, i)
+                                })
                         })
                         .min_by(|a, b| {
                             a.0.cmp(&b.0)
@@ -656,7 +685,7 @@ impl Queue {
             let seen = |e: &Entry| self.stats.get(&e.task.id).map_or(0, Stat::seen);
             self.entries
                 .values()
-                .filter(|e| eligible(&e.task))
+                .filter(|e| eligible(self, &e.task))
                 .map(|e| (self.value(&pool, &e.task.id, now), e))
                 .min_by(|(va, a), (vb, b)| {
                     vb.total_cmp(va)
@@ -675,8 +704,14 @@ impl Queue {
             let mut candidates: Vec<_> = self
                 .entries
                 .values()
-                .filter(|e| eligible(&e.task) && e.task.rare())
-                .flat_map(|e| e.task.seeds.iter().map(|&r| range_key(&e.task.id, r)))
+                .filter(|e| eligible(self, &e.task) && e.task.rare())
+                .flat_map(|e| {
+                    e.task
+                        .seeds
+                        .iter()
+                        .filter(|&&r| self.range_available(&e.task.id, r, now))
+                        .map(|&r| range_key(&e.task.id, r))
+                })
                 .collect();
             candidates.sort_by(|a, b| {
                 self.range_seen
@@ -755,14 +790,24 @@ impl Queue {
         }
     }
 
-    /// A consulta do alvo voltou `data` nula: ele descansa (`FAIL_REST_SECS`) em vez de repetir a falha na
-    /// vaga dos outros. A primeira leitura que der certo (`reward`) zera a conta. Devolve o descanso em segundos.
+    /// Registra a falha final antes de desfazer o foco. Devolve o descanso do alvo em segundos.
     pub fn failed(&mut self, id: &str, now: i64) -> i64 {
         self.snapshots.remove(id);
-        self.focused_snapshots.remove(id);
+        let seed = if let Some(focus) = self.focused.get(id) {
+            let (n, until) = self.range_failing.entry(focus.key.clone()).or_default();
+            *n = n.saturating_add(1);
+            *until = now + failure_rest(*n);
+            true
+        } else {
+            false
+        };
         let (n, until) = self.failing.entry(id.to_string()).or_insert((0, 0));
-        *n += 1;
-        let rest = (FAIL_REST_SECS << (*n - 1).min(8)).min(FAIL_REST_MAX_SECS);
+        *n = n.saturating_add(1);
+        let rest = match (seed, *n) {
+            (true, 1) => SEED_CODE_FIRST_REST_SECS,
+            (true, n) => failure_rest(n - 1),
+            (false, n) => failure_rest(n),
+        };
         *until = now + rest;
         rest
     }
@@ -781,6 +826,9 @@ impl Queue {
         new_listings: Option<u32>,
     ) {
         self.failing.remove(id);
+        if let Some(focus) = self.focused.get(id) {
+            self.range_failing.remove(&focus.key);
+        }
         self.shared.retain(|s| s != id);
         let Some(s) = self.stats.get_mut(id) else {
             return;
@@ -1054,7 +1102,8 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     }
     let (may_discover, empty, urgent) = {
         let s = h.lock();
-        let urgent = overdue_task(&s, h.now()).is_some();
+        let now = h.now();
+        let urgent = overdue_available(&s, now, book_blocked).is_some();
         (s.queue.may_discover(), s.queue.len() == 0, urgent)
     };
     // a descoberta lê busca e histórico (os dois baldes)
@@ -1124,7 +1173,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             s.queue.cursors.clone(),
         );
         // Conferir ativo atrasado tem preferência sobre qualquer teste; usa a mesma vaga do laço.
-        let overdue = overdue_task(&s, now);
+        let overdue = overdue_available(&s, now, book_blocked);
         if let Some(task) = overdue {
             s.queue.record_scan(&task.id, now);
             s.queue.last_exploring = false;
@@ -1142,7 +1191,7 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             // No descanso da leitura de anúncios a vaga é do livro de ofertas (alvo barato); fora dele, de um
             // alvo de seed ou float: é a leitura escassa e é onde está o anúncio mal precificado.
             let no_listings = listings_blocked || s.queue.resting(now, listings_rest);
-            let rare = !no_listings && s.queue.has_rare();
+            let rare = !no_listings && s.queue.has_rare(now);
             (
                 s.queue.next_matching(now, |t| {
                     if rare {
@@ -1171,12 +1220,16 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             "normal"
         }
     };
-    let tracked = crate::research::scope_tracked(
-        h.db.clone(),
-        decision(h, source, &task.id),
-        run_task(h, &task),
-    )
-    .await;
+    let tracked =
+        crate::research::scope_tracked(h.db.clone(), decision(h, source, &task.id), async {
+            let seed_resting = !task.seeds.is_empty() && !h.lock().queue.available(&task, h.now());
+            if seed_resting {
+                gone_by_book(h, &task).await
+            } else {
+                run_task(h, &task).await
+            }
+        })
+        .await;
     let (result, attempts) = match tracked {
         Ok((result, context)) => match crate::research::attempts(h.db.clone(), context.id).await {
             Ok(n) => (result, n),
@@ -1187,8 +1240,21 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
         },
         Err(e) => (Err(e), 0),
     };
-    if result.is_err() && attempts > 0 {
-        h.lock().queue.failed_read(&task.id, h.now());
+    if let Err(e) = &result
+        && attempts > 0
+    {
+        let now = h.now();
+        let mut s = h.lock();
+        if matches!(
+            e.downcast_ref::<SteamError>(),
+            Some(SteamError::ActionUnavailable {
+                endpoint: Endpoint::Listings
+            })
+        ) {
+            let rest = s.queue.failed(&task.id, now);
+            tracing::warn!(alvo = %task.id, descanso_s = rest, "data nula: o alvo descansa");
+        }
+        s.queue.failed_read(&task.id, now);
     }
     match result {
         Ok(()) => {
@@ -1201,12 +1267,6 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
             h.lock().queue.external_ready = false;
         }
         Err(e) => {
-            if e.downcast_ref::<SteamError>()
-                .is_some_and(|e| matches!(e, SteamError::ActionUnavailable { .. }))
-            {
-                let rest = h.lock().queue.failed(&task.id, h.now());
-                tracing::warn!(alvo = %task.id, descanso_s = rest, "data nula: o alvo descansa");
-            }
             backoff(h, &e).await;
         }
     }
@@ -1223,7 +1283,12 @@ pub async fn tick(h: &Arc<Hunt>) -> Tick {
     Tick::Watched(task.id)
 }
 
+#[cfg(test)]
 pub(super) fn overdue_task(s: &super::Shared, now: i64) -> Option<Task> {
+    overdue_available(s, now, false)
+}
+
+pub(super) fn overdue_available(s: &super::Shared, now: i64, book_blocked: bool) -> Option<Task> {
     s.active
         .values()
         .filter_map(|a| {
@@ -1235,8 +1300,7 @@ pub(super) fn overdue_task(s: &super::Shared, now: i64) -> Option<Task> {
                 &entry.task,
             ))
         })
-        .min_by_key(|(checked, a, _)| (*checked, &a.opp.id))
-        .map(|(_, a, t)| {
+        .map(|(checked, a, t)| {
             let mut task = t.clone();
             if let Some(seed) = a.opp.seed
                 && let Some(range) = t
@@ -1246,8 +1310,11 @@ pub(super) fn overdue_task(s: &super::Shared, now: i64) -> Option<Task> {
             {
                 task.seeds = vec![*range];
             }
-            task
+            (checked, &a.opp.id, task)
         })
+        .filter(|(_, _, t)| !book_blocked || t.seeds.is_empty() || s.queue.available(t, now))
+        .min_by_key(|(checked, id, _)| (*checked, *id))
+        .map(|(_, _, task)| task)
 }
 
 fn decision(h: &Hunt, source: &str, target: &str) -> crate::research::Decision {
@@ -1663,30 +1730,76 @@ fn floor_priority(
     if active {
         return Some((true, age.is_none(), age.unwrap_or_default() as f64));
     }
-    if balance <= 0 || paying == 0 || price.is_some_and(|p| p > balance) {
+    if paying == 0 || price.is_some_and(|p| p > balance) {
         return None;
     }
-    let weight = (paying as f64 * sales_per_day).max(0.1);
-    Some((false, age.is_none(), age.unwrap_or(1) as f64 * weight))
+    let bonus = (paying as f64 * sales_per_day.max(0.0)).ln_1p().min(30.0);
+    Some((false, age.is_none(), age.unwrap_or_default() as f64 + bonus))
+}
+
+#[derive(Default)]
+pub(super) struct FloorVisits {
+    variants: HashMap<String, i64>,
+    families: HashMap<String, i64>,
+}
+
+impl FloorVisits {
+    fn record(&mut self, key: String, at: i64) {
+        if let Some((family, _)) = key.split_once("|floor:") {
+            let last = self.families.entry(family.to_owned()).or_insert(at);
+            *last = (*last).max(at);
+            self.variants.insert(key, at);
+        }
+    }
+}
+
+pub(super) async fn load_floor_visits(h: &Hunt) -> anyhow::Result<FloorVisits> {
+    // A decisão antecede o envio. Linhas antigas sem variante e reservas inconclusivas não contam.
+    let rows: Vec<(String, i64)> = h.db.call(|c| {
+        c.prepare("SELECT d.target, max(a.at) FROM research_decisions d
+                   JOIN research_attempts a ON a.decision_id = d.id
+                   WHERE d.source = 'varredura_piso' AND a.endpoint = 'legacy' AND a.route = 'main'
+                       AND a.outcome NOT IN ('not_sent', 'started') AND instr(d.target, '|floor:') > 0
+                   GROUP BY d.target")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }).await?;
+    let mut visited = FloorVisits::default();
+    for (key, at) in rows {
+        visited.record(key, at);
+    }
+    Ok(visited)
 }
 
 pub(super) async fn sweep_floor(
     h: &Arc<Hunt>,
-    visited: &mut HashMap<String, i64>,
+    visited: &mut Option<FloorVisits>,
 ) -> anyhow::Result<()> {
     use crate::pricing::groups::{group_of, skin_base};
+    use std::cmp::Reverse;
 
-    let tasks: HashMap<_, _> = h
+    let mut tasks = HashMap::new();
+    for task in h
         .lock()
         .queue
         .tasks()
         .into_iter()
         .filter(|task| !task.seeds.is_empty())
-        .map(|task| (task.code.clone(), task))
-        .collect();
+    {
+        if tasks
+            .get(&task.code)
+            .is_none_or(|old: &Task| task.id < old.id)
+        {
+            tasks.insert(task.code.clone(), task);
+        }
+    }
     if tasks.is_empty() {
         return Ok(());
     }
+    if visited.is_none() {
+        *visited = Some(load_floor_visits(h).await?);
+    }
+    let visited = visited.as_mut().unwrap();
     let rows = h.db.call(|c| {
         c.prepare("SELECT name, g_code, floor_cents, sales_per_day FROM items WHERE g_code IS NOT NULL")?
             .query_map([], |r| {
@@ -1712,38 +1825,56 @@ pub(super) async fn sweep_floor(
                         .filter(|&seed| group_of(&name, Some(seed), None, None).is_some())
                         .count()
                 };
-                let age = visited.get(&name).map(|at| now - at);
+                let age = visited.variants.get(&key).map(|at| now - at);
                 let active = s
                     .active
                     .values()
                     .any(|a| a.task == task.id && a.opp.name == name);
                 let priority =
                     floor_priority(s.saldo, price, age, paying, sales.unwrap_or(0.0), active)?;
-                Some((priority, task, name))
+                // O rodízio por família só disputa as vagas sem oportunidade ativa.
+                let family = (!active).then(|| {
+                    (
+                        Reverse(visited.families.get(&task.id)),
+                        Reverse(task.code.as_str()),
+                    )
+                });
+                Some((priority, family, task, name, key))
             })
-            .max_by(|(a, _, name_a), (b, _, name_b)| {
+            .max_by(|(a, family_a, _, name_a, _), (b, family_b, _, name_b, _)| {
                 a.0.cmp(&b.0)
+                    .then(family_a.cmp(family_b))
                     .then(a.1.cmp(&b.1))
                     .then(a.2.total_cmp(&b.2))
                     .then(name_b.cmp(name_a))
             })
     };
-    let Some((_, task, name)) = target else {
+    let Some((_, _, task, name, key)) = target else {
         return Ok(());
     };
-    let (result, context) = crate::research::scope_tracked(
-        h.db.clone(),
-        decision(h, "varredura_piso", &task.id),
-        async { Ok(listings::query_legacy_floor(&h.steam, &name, &task.code).await?) },
-    )
-    .await?;
+    let (result, context) =
+        crate::research::scope_tracked(h.db.clone(), decision(h, "varredura_piso", &key), async {
+            Ok(listings::query_legacy_floor(&h.steam, &name, &task.code).await?)
+        })
+        .await?;
     if result.as_ref().is_err_and(floor_slot_busy) {
         return result.map(|_| ());
     }
-    let now = h.now();
-    if result.is_ok() || crate::research::attempts(h.db.clone(), context.id).await? > 0 {
-        visited.insert(name.clone(), now);
-        super::ledger::count_hour(h, now, "queries", 1).await;
+    let id = context.id;
+    let sent_at: Option<i64> =
+        h.db.call(move |c| {
+            c.query_row(
+                "SELECT max(at) FROM research_attempts WHERE decision_id = ?1
+                     AND endpoint = 'legacy' AND route = 'main'
+                     AND outcome NOT IN ('not_sent', 'started')",
+                [id],
+                |r| r.get(0),
+            )
+        })
+        .await?;
+    if let Some(sent_at) = sent_at {
+        visited.record(key, sent_at);
+        super::ledger::count_hour(h, h.now(), "queries", 1).await;
     }
     let page = match result {
         Ok(page) => page,
@@ -1986,7 +2117,7 @@ pub async fn run(h: Arc<Hunt>) {
     let mut saved = h.now();
     let mut parallel = super::parallel::Reader::default();
     let mut next_floor = h.now();
-    let mut floor_visited = HashMap::new();
+    let mut floor_visited = None;
     loop {
         parallel.step(&h).await;
         let now = h.now();
@@ -2063,12 +2194,12 @@ mod tests {
     }
 
     #[test]
-    fn floor_picker_prefers_never_read_then_weight_times_age() {
+    fn floor_picker_prefers_never_read_then_age_with_bounded_bonus() {
         let score =
             |price, age, seeds, sales| floor_priority(1000, price, age, seeds, sales, false);
         let light = score(Some(1000), Some(600), 2, 10.0).unwrap();
         let heavy = score(None, Some(180), 10, 10.0).unwrap();
-        assert!(heavy > light);
+        assert!(light > heavy);
         assert!(score(None, Some(179), 10, 10.0).is_none());
         assert!(score(Some(1001), None, 10, 10.0).is_none());
         assert!(score(None, None, 0, 10.0).is_none());
@@ -2142,16 +2273,16 @@ mod tests {
             ..task(id, 1.0)
         };
         let mut q = Queue::default();
-        assert!(!q.has_rare());
+        assert!(!q.has_rare(1));
         q.set_tasks(vec![rare("d:a", vec![])]);
-        assert!(!q.has_rare());
+        assert!(!q.has_rare(1));
         q.set_tasks(vec![
             rare("d:a", vec![]),
             rare("r:a", vec![(1, 1)]),
             rare("r:b", vec![(2, 3)]),
             rare("r:c", vec![(7, 7)]),
         ]);
-        assert!(q.has_rare());
+        assert!(q.has_rare(1));
         let mut picked = Vec::new();
         for now in 1..=3 {
             let t = q.next_matching(now, Task::rare).unwrap();
@@ -2285,6 +2416,72 @@ mod tests {
         q.reward("r:a", 3_000, Found::default());
         assert!(q.next_matching(3_001, |t| t.id == "r:a").is_some());
         assert_eq!(q.failed("r:a", 4_000), FAIL_REST_SECS);
+    }
+
+    #[test]
+    fn failed_seed_range_leaves_the_other_for_ranking_and_control() {
+        for exploring in [false, true] {
+            let mut q = Queue::default();
+            q.set_tasks(vec![Task {
+                seeds: vec![(1, 2), (5, 6)],
+                ..task("r:a", 1.0)
+            }]);
+            let t = q.next(1_000).unwrap();
+            assert_eq!(q.focus(t, 1_000).seeds, vec![(1, 2)]);
+            q.failed("r:a", 1_001);
+            q.failed_read("r:a", 1_001);
+            assert!(q.next(1_060).is_none());
+            q.explore = if exploring { 1.0 } else { 0.0 };
+            let t = q.next(1_061).expect("a outra faixa já pode sair");
+            assert_eq!(q.focus(t, 1_061).seeds, vec![(5, 6)]);
+            q.reward("r:a", 1_061, Found::default());
+            let comparison = q.take_reads().pop().unwrap().choice.unwrap();
+            assert_eq!(comparison.eligible_ranges, 1);
+            assert_eq!(comparison.oldest_range, "r:a#5-6");
+            assert_eq!(comparison.control, exploring);
+            let t = q.next(1_062).unwrap();
+            assert_eq!(q.focus(t, 1_062).seeds, vec![(5, 6)]);
+            let t = q.next(1_301).unwrap();
+            assert_eq!(q.focus(t, 1_301).seeds, vec![(1, 2)]);
+            q.failed("r:a", 1_302);
+            q.failed_read("r:a", 1_302);
+            let t = q.next(1_602).unwrap();
+            assert_eq!(q.focus(t, 1_602).seeds, vec![(5, 6)]);
+            let t = q.next(1_902).unwrap();
+            assert_eq!(q.focus(t, 1_902).seeds, vec![(1, 2)]);
+        }
+    }
+
+    #[test]
+    fn consecutive_seed_failures_rest_the_code_until_a_page_recovers() {
+        let mut q = Queue::default();
+        q.set_tasks(vec![Task {
+            seeds: vec![(1, 2), (5, 6), (7, 8)],
+            ..task("r:a", 1.0)
+        }]);
+        let t = q.next(1_000).unwrap();
+        q.focus(t, 1_000);
+        q.failed("r:a", 1_001);
+        q.failed_read("r:a", 1_001);
+        let t = q.next(1_061).expect("pausa da primeira falha acabou");
+        assert_eq!(q.focus(t, 1_061).seeds, vec![(5, 6)]);
+        q.failed("r:a", 1_062);
+        q.failed_read("r:a", 1_062);
+        assert!(q.next(1_361).is_none());
+        let t = q.next(1_362).expect("pausa da segunda falha acabou");
+        assert_eq!(q.focus(t.clone(), 1_362).seeds, vec![(1, 2)]);
+        q.reward("r:a", 1_362, Found::default());
+        q.focus(
+            Task {
+                seeds: vec![(1, 2)],
+                ..t
+            },
+            1_363,
+        );
+        q.failed("r:a", 1_363);
+        q.failed_read("r:a", 1_363);
+        assert!(q.next(1_422).is_none());
+        assert!(q.next(1_423).is_some());
     }
 
     #[test]
@@ -2871,8 +3068,8 @@ mod tests {
         let t = q.next_matching(100, Task::rare).unwrap();
         q.focus(t, 100);
         let stat = q.stats["r:a"].clone();
-        q.failed_read("r:a", 101);
         q.failed("r:a", 101);
+        q.failed_read("r:a", 101);
         q.failed_read("r:a", 102);
         let reads = q.take_reads();
         assert_eq!(reads.len(), 1);
@@ -2898,17 +3095,18 @@ mod tests {
             }
             let t = q.next_matching(10_000, Task::rare).unwrap();
             q.focus(t, 10_000);
+            assert_eq!(q.failed("r:a", 10_001), 60);
             q.failed_read("r:a", 10_001);
-            let rest = q.failed("r:a", 10_001);
             assert_eq!(q.range_seen.get(&key).copied(), seen.map(|a| 10_000 - a));
             assert!(!q.focused.contains_key("r:a"));
-            assert_eq!(q.failing["r:a"], (1, 10_001 + rest));
             let read = q.take_reads().pop().unwrap();
             assert!(read.failed);
             assert_eq!(read.choice.unwrap().gap, seen);
             // em descanso o alvo não sai; depois do descanso volta e a leitura mede a espera verdadeira
             assert!(q.next_matching(10_002, Task::rare).is_none());
-            let later = 10_001 + rest;
+            let later = 10_301;
+            assert!(!q.has_rare(later - 1));
+            assert!(q.has_rare(later));
             let t = q.next_matching(later, Task::rare).unwrap();
             q.focus(t, later);
             q.reward("r:a", later, Found::default());

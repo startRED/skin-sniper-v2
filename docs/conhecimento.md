@@ -210,6 +210,18 @@ consecutivos da mesma skin e faixa de seed, a tentativa 2 foi boa em 19 pares e 
 prova:** a consulta filtrada dessas skins custa à Steam quase o limite de ~9,6 s dela, que ora recusa na hora, ora
 corta no limite. **Segue não medido:** se o filtro de desgaste alivia e o que decide a recusa na hora.
 
+**Medido em 19/11/2026, das 9h55 às 21h55 de Fortaleza**, no banco do programa instalado, aberto apenas para
+leitura. A Steam respondeu a 1.432 varreduras do piso pela interface antiga e a 1.328 consultas de anúncios
+por faixa. Houve ainda 369 erros de anúncios por faixa e 2 falhas de rede em cada interface. A Desert Eagle |
+Heat Treated recebeu 756 das respostas do piso (53%). Nas 667 páginas das quatro variantes que constavam no
+log desse recorte, nenhuma trouxe seed pagante. Por faixa, a mesma skin teve 86 leituras boas e 61 falhas
+finais registradas: 39 faixas só responderam bem, 29 tiveram resultados misturados e uma só falhou. Nenhum
+achado no recorte. Os quatro achados desde 18/11, até o fim desse recorte, vieram do piso.
+
+Para reproduzir, contar `research_attempts` por endpoint e resultado, usando a hora do envio e juntando
+`research_decisions` pelo ID para obter o alvo. `reads` dá o resultado final por `choice_range` após eventual
+repetição. `research_finds` ligado à decisão de origem identifica qual leitura encontrou o anúncio.
+
 ### 1.4 Moeda
 
 - `eCurrency: 7` = BRL. As listagens do fixture real vêm em `eCurrency:7` com `strSubtotal "R$202.80"`.
