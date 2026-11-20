@@ -2019,6 +2019,117 @@ async fn known_listing_without_floor_visit_earns_no_range_credit() {
 }
 
 #[tokio::test]
+async fn floor_sweep_interleaves_codes_before_other_variants() {
+    let (base, bodies) = serve().await;
+    let (db, _dir) = temp_db();
+    let (heavy, _, _) = floor_rival_fixture();
+    let light = Task {
+        id: "r:light".into(),
+        code: "light".into(),
+        name: "Five-SeveN | Case Hardened (Field-Tested)".into(),
+        ..heavy.clone()
+    };
+    let items = [
+        (MOON.to_owned(), heavy.code.clone(), 1_000_000),
+        (ST_MOON.to_owned(), heavy.code.clone(), 100_000),
+        (
+            "Glock-18 | Moonrise (Battle-Scarred)".into(),
+            heavy.code.clone(),
+            10_000,
+        ),
+        (light.name.clone(), light.code.clone(), 1),
+    ];
+    db.call(move |c| {
+        for (name, code, sales) in items {
+            c.execute(
+                "INSERT INTO items(name, g_code, floor_cents, sales_per_day, updated_at)
+                 VALUES (?1, ?2, 700, ?3, ?4)",
+                (name, code, sales, NOW),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let heavy_key = heavy.floor_sweep_key(MOON);
+    let light_key = light.floor_sweep_key(&light.name);
+    let active_key = heavy.floor_sweep_key(ST_MOON);
+    let tasks = vec![heavy.clone(), light.clone()];
+    let fresh_hunt = || {
+        let (h, _) = hunt_against(&base, db.clone());
+        h.set_saldo(3608, SaldoSource::Manual);
+        h.lock().queue.set_tasks(tasks.clone());
+        h
+    };
+    let mut visited = None;
+    let h = fresh_hunt();
+    h.steam.set_gap_for_test(Duration::from_secs(60));
+    // A primeira leitura ocupa o balde lateral. O prazo curto da próxima não alcança essa vaga.
+    let _ = h.steam.legacy_json_main("/unused", &[]).await;
+    h.steam.set_gap_for_test(Duration::from_millis(1));
+    let busy = scheduler::sweep_floor(&h, &mut visited).await.unwrap_err();
+    assert!(matches!(
+        busy.downcast_ref::<crate::steam::client::Error>(),
+        Some(crate::steam::client::Error::MainSlotBusy)
+    ));
+    assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), 0);
+    let h = fresh_hunt();
+    scheduler::sweep_floor(&h, &mut visited).await.unwrap();
+    drop(h);
+
+    let skipped_key = light_key.clone();
+    db.call(move |c| {
+        for (target, outcome) in [(light.id, "ok"), (skipped_key, "not_sent")] {
+            c.execute(
+                "INSERT INTO research_decisions(at,source,policy,target,scale)
+                 VALUES (?1,'varredura_piso','fixture',?2,0)",
+                (NOW, target),
+            )?;
+            c.execute(
+                "INSERT INTO research_attempts(decision_id,at,source,endpoint,route,outcome)
+                 VALUES (?1,?2,'varredura_piso','legacy','main',?3)",
+                (c.last_insert_rowid(), NOW, outcome),
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let h = fresh_hunt();
+    let mut visited = None;
+    scheduler::sweep_floor(&h, &mut visited).await.unwrap();
+    let opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    h.lock().active.insert(
+        opp.id.clone(),
+        Active {
+            opp,
+            task: heavy.id,
+            attempted_at: 0,
+        },
+    );
+    scheduler::sweep_floor(&h, &mut visited).await.unwrap();
+
+    let targets: Vec<String> = db
+        .call(|c| {
+            c.prepare(
+                "SELECT d.target FROM research_decisions d
+                   WHERE d.source = 'varredura_piso' AND d.policy = 'baseline'
+                     AND EXISTS (SELECT 1 FROM research_attempts a WHERE a.decision_id = d.id
+                         AND a.endpoint = 'legacy' AND a.outcome != 'not_sent')
+                   ORDER BY d.id",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect()
+        })
+        .await
+        .unwrap();
+    assert_eq!(targets, [heavy_key, light_key, active_key]);
+}
+
+#[tokio::test]
 async fn floor_read_leaves_observations_empty() {
     let (base, bodies) = serve().await;
     let (db, _dir) = temp_db();
@@ -2035,9 +2146,7 @@ async fn floor_read_leaves_observations_empty() {
     let (h, _rx) = hunt_against(&base, db.clone());
     h.set_saldo(3608, SaldoSource::Manual);
     h.lock().queue.set_tasks(vec![task]);
-    scheduler::sweep_floor(&h, &mut std::collections::HashMap::new())
-        .await
-        .unwrap();
+    scheduler::sweep_floor(&h, &mut None).await.unwrap();
 
     assert_eq!(bodies.legacy_queries.load(Ordering::Relaxed), 1);
     let rows: i64 = db
@@ -4086,4 +4195,49 @@ async fn newly_learned_seed_sends_every_listing_back_to_evaluation() {
     patterns::load(&h).await.unwrap();
     let s = h.lock();
     assert!(!s.evaluated.contains_key(&id) && s.evaluated.contains_key("x"));
+}
+
+#[test]
+fn overdue_skips_unavailable_oldest_when_book_blocked() {
+    let (db, _dir) = temp_db();
+    let (h, _rx) = hunt_against("http://127.0.0.1:1", db);
+    let mut opp: Opportunity = serde_json::from_str(include_str!(
+        "../../testdata/opportunity_stattrak_moonrise_t1_2026-11-05.json"
+    ))
+    .unwrap();
+    let task = Task {
+        id: "old".into(),
+        name: MOON.into(),
+        code: "G180420B6053004".into(),
+        wear: None,
+        seeds: vec![(706, 706)],
+        float: None,
+        score: 1.0,
+    };
+    let mut s = h.lock();
+    let mut other = task.clone();
+    other.id = "ready".into();
+    s.queue.set_tasks(vec![task, other]);
+    opp.checked_at = Some(NOW - 120);
+    s.active.insert(
+        opp.id.clone(),
+        Active {
+            opp: opp.clone(),
+            task: "old".into(),
+            attempted_at: 0,
+        },
+    );
+    opp.id = "second".into();
+    opp.checked_at = Some(NOW - 61);
+    s.active.insert(
+        opp.id.clone(),
+        Active {
+            opp,
+            task: "ready".into(),
+            attempted_at: 0,
+        },
+    );
+    s.queue.failed("old", NOW);
+    let selected = scheduler::overdue_available(&s, NOW, true);
+    assert_eq!(selected.map(|t| t.id), Some("ready".into()));
 }
